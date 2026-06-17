@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "supabase": {
+      "type": "http",
+      "url": "https://supabasekong-badminton-analytics.apps.bc-rheinbach.de/mcp"
+    }
+  }
+}

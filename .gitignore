@@ -1,0 +1,44 @@
+# --- OS / editor ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# --- Node / web ---
+node_modules/
+web/dist/
+web/.vite/
+*.local
+
+# --- Python / worker ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Media & ML artifacts (kept out of git) ---
+*.mp4
+*.mov
+*.mkv
+videos/
+!videos/.gitkeep
+models/weights/
+*.pt
+*.pth
+*.onnx
+*.mlpackage
+*.mlmodel
+*.npz
+
+# --- Pipeline intermediate caches ---
+worker/.cache/
+*.parquet
+frames_cache/
