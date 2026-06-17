@@ -1,0 +1,66 @@
+# Feature — Frontend Port (mobile Spielbericht + desktop Video-Dashboard)
+
+Status: in progress · Branch: `feat/frontend-port` · Depends on: P0 foundations, `specs/50-web-app.md`.
+
+## Goal
+Port the two pixel-final Claude Design handoffs to TypeScript React, **pixel-close**, driven by the
+**live seeded Supabase data** (no CV/ML). One route `/match/:slug`, **one data fetch**, layout branched
+on viewport via `useMediaQuery('(min-width:1200px)')`:
+- `<MatchReportMobile>` — the mobile **Spielbericht** stacked column (`handovers/design_handoff_match_report_app`, theme **A** only).
+- `<MatchReportDashboard>` — the desktop **Video-Dashboard** (`handovers/design_handoff_desktop_dashboard`, **only** `DeskVideoDashScreen`).
+
+## Sources of truth
+- Mobile: `handovers/design_handoff_match_report_app/{viz,screens,video}.jsx`. Use theme A values.
+- Desktop: `handovers/design_handoff_desktop_dashboard/{desktop-screens,desktop-shared}.jsx` → only `DeskVideoDashScreen` + its building blocks.
+- Data shapes: `specs/20-data-model.md` / `web/src/types.ts`. Localize canonical values via `web/src/lib/labels.ts`.
+
+## Components (all under `web/src/components/report/` unless noted)
+Primitives: `Icon` (inline SVG set — no lucide), `CountUp` (de-DE, settle-exact, reduced-motion), `Reveal` (IO + 900 ms fallback + reduced-motion).
+Viz: `CourtHeatmap` (+ `heatGrid`) + `HeatLegend`, `CourtCoverageCard`, `ZoneCard`, `ActivityCard`, `ShotMixCard` (+ `compact`), `FormationCard`, `RallyCard`, `Endstand`, `PlayerTabs`, `SafariFrame`. Extend `KeyStats` with a `variant` ('cards' | 'bare') and `SectionCard` already has `dense`.
+Video: `useVideoPlayer(slug)` (hook), `VideoOverlay` (shared SVG engine), `OverlayChips`, `VideoControls`, `VideoAnalysisCard` (mobile chrome). Desktop composes the surface inside `SafariFrame`.
+Layout: `MatchReportMobile`, `MatchReportDashboard`, `ReportHero`; `pages/MatchReport.tsx` becomes a thin branch with lifted `tab` state.
+
+## Libs (`web/src/lib/`)
+- `homography.ts` — **production projection engine** replacing the prototype `vidProject`/`VID_QUAD`:
+  `solveHomography(srcQuad, dstQuad)` (4-point DLT) + `projectUV(H, u, v) → {x, y}` (court u,v∈[0,1] → frame fraction 0..1).
+- `overlay.ts` — `trackAt(keys, p)` (smoothstep over `[{t,u,v}]`) + `shuttleAt(p, near, far)` (alternating hits).
+- `demoOverlay.ts` — **demo input only** (clearly labeled): court-corner↔frame correspondences derived from the
+  prototype baseline quad → `H_DEMO = solveHomography(...)`; demo near/far tracks + `DEMO_LOOP`. The demo feeds
+  the *same* `projectUV` engine production will use. **TODO (P1):** replace with `court_calibrations.homography`
+  + `track_keyframes` rows.
+- `storage.ts` — `resolveVideoSrc(path)`. This slice: returns no playable URL (Storage buckets are private and
+  the demo clip is absent) so the player uses the synthetic-clock placeholder. **TODO (P1):** signed URL via
+  `supabase.storage.from('match-videos').createSignedUrl(path, ttl)`.
+
+## Decisions / deviations from the prototype (keep in sync with `specs/50-web-app.md`)
+1. **Heatmap default style = `raster`** (12×13), per `specs/50-web-app.md` — overrides the prototype theme-A `heat:'blobs'`.
+2. **Projection = a single planar homography** (the correct court model). It can drift slightly from the
+   prototype's hand-tuned depth `k`; this is intentional. We never ship `VID_QUAD` as the engine.
+3. **Video = placeholder backdrop** for this slice: full player (Safari chrome, controls, toggle chips, SVG
+   overlays from demo tracks) over a black surface; a **synthetic 16 s clock** advances `time` so overlays
+   animate without footage. Real signed-URL footage + real tracks land in P1.
+4. **`ShotMix compact` and `KeyStats variant='bare'` are net-new** (the prototype passes `compact` but the
+   component ignores it). Designed against the desktop dashboard tile sizing.
+5. **Doubles renders as-is**: no shots → empty-state Schlagverteilung tile (keeps the 4-tile desktop row);
+   no video → a "keine Videoanalyse" placeholder fills the span-8 region so the grid doesn't collapse. No new seed data.
+
+## Correctness guards (our hook's shapes differ from the prototype mock)
+- `report.pairs` is `[]` not `null` → gate doubles UI on `pairs?.length`.
+- `report.rallies` can be `null` → guard the Ballwechsel block + Endstand rally extra line.
+- `stats.shots` can be `[]` → `ShotMixCard` early-returns an empty state (no `sorted[0]`/`NaN`).
+- `meta.result` is `'win'`/`'loss'` (not `'S'`/`'N'`) → `ResultChip` takes the code and computes `won`.
+- HTML entities (`&thinsp;`, `&prime;`) → unicode (` `, `′`). Salt `CourtHeatmap` SVG ids via `useId`.
+
+## State
+- `tab`/`setTab` lifted to `pages/MatchReport.tsx` (survives a viewport-crossing remount). Both layouts take it as props.
+- Video/overlay state in `useVideoPlayer(slug)`, one instance per mounted layout. Position persists in
+  `localStorage['bca-vt-'+slug]`; overlay toggles in `localStorage['bca-ov-v1']` (defaults tracking+wege on).
+
+## Tests
+- TDD: `homography` (identity + known quad + round-trip), `overlay` (`trackAt`/`shuttleAt`), `heatGrid` (counts/normalization/peak/suppression).
+- One render smoke test per layout against a fixture report (catches the null/empty-shape crashes above).
+
+## Verification
+- `cd web && npm run typecheck && npm test && npm run build` green.
+- `npm run dev`; open `/match/2026-06-10` (Einzel) and `/match/2026-06-03` (Doppel); compare mobile (<1200px)
+  and desktop (≥1200px) to `handovers/**/Spielanalyse*.html`. Confirm anon read works (migration `0002_dev_anon_read`).

@@ -42,3 +42,6 @@ models/weights/
 worker/.cache/
 *.parquet
 frames_cache/
+
+# --- Build artifacts ---
+*.tsbuildinfo

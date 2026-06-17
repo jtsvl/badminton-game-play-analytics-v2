@@ -15,10 +15,13 @@
   --radius-scoreboard: 16px;
   --radius-pill: 99px;
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
 
   --font-body: 'Inter Variable', Inter, system-ui, sans-serif;
   --font-head: 'Space Grotesk Variable', 'Space Grotesk', system-ui, sans-serif;
+  /* Handoff JSX references --font-heading; alias to our --font-head. */
+  --font-heading: var(--font-head);
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -35,6 +38,20 @@ body {
 h1, h2, h3 { font-family: var(--font-head); letter-spacing: -0.01em; line-height: 1.08; margin: 0; }
 a { color: inherit; text-decoration: none; }
 .tabular { font-variant-numeric: tabular-nums; }
+
+/* Section kicker above headings (handoff `.eyebrow`). */
+.eyebrow { font-family: var(--font-body); font-weight: 600; color: var(--orange); }
+
+/* Video scrubber (orange accent via inline accentColor; here just sizing/cursor). */
+.bca-range { cursor: pointer; height: 4px; }
+
+/* Tappable list/card press — lift on hover, settle on press ("dezent"). */
+.bca-press { transition: transform .18s ease, box-shadow .18s ease; }
+.bca-press:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+.bca-press:active { transform: scale(.985); }
+
+/* On-dark wrapper: force white text over dark surfaces (Safari frame backdrop etc.). */
+.on-dark, .on-dark h1, .on-dark h2, .on-dark h3, .on-dark p, .on-dark span { color: #fff; }
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
