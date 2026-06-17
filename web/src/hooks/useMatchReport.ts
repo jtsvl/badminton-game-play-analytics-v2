@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { supabase, isConfigured } from '../lib/supabase'
 import { dateParts } from '../lib/format'
 import { gamesWon } from '../lib/score'
+import { shotDE } from '../lib/labels'
+import { resolveVideoSrc } from '../lib/storage'
 import type { MatchReport, ReportPlayer, ShotPair, Side, MatchResultCode } from '../types'
 
 interface ReportState { loading: boolean; error: string | null; report: MatchReport | null }
@@ -32,7 +34,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
           supabase.from('pair_match_stats').select('*').eq('match_id', mid),
           supabase.from('match_rally_stats').select('*').eq('match_id', mid).maybeSingle(),
           supabase.from('match_videos').select('*').eq('match_id', mid).limit(1),
-          supabase.from('rallies').select('ending_shot_type').eq('match_id', mid),
+          supabase.from('rallies').select('end_shot_type').eq('match_id', mid),
         ])
 
         const mps = (mpRes.data ?? []) as any[]
@@ -80,13 +82,13 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
         players.sort((a, b) => Number(b.isViewer) - Number(a.isViewer))
 
         // endLine from ending-shot distribution
-        const endings = ((endRes.data ?? []) as any[]).map((r) => r.ending_shot_type).filter(Boolean)
+        const endings = ((endRes.data ?? []) as any[]).map((r) => r.end_shot_type).filter(Boolean)
         let endLine = ''
         if (endings.length) {
           const counts = new Map<string, number>()
           for (const e of endings) counts.set(e, (counts.get(e) ?? 0) + 1)
           const [topShot, topCount] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
-          endLine = `Der ${topShot} beendete ${Math.round((topCount / endings.length) * 100)} % aller Ballwechsel.`
+          endLine = `Der ${shotDE(topShot)} beendete ${Math.round((topCount / endings.length) * 100)} % aller Ballwechsel.`
         }
 
         const rally = rallyRes.data as any
@@ -94,7 +96,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
         const vid = ((vidRes.data ?? []) as any[])[0]
 
         const report: MatchReport = {
-          video: vid ? { src: vid.storage_path, label: vid.label ?? '' } : null,
+          video: vid ? { src: resolveVideoSrc(vid.storage_path), label: vid.label ?? '' } : null,
           meta: {
             id: mid, dateLabel: dp.dateLabel, weekday: m.weekday, dd: dp.dd,
             discipline: m.discipline, durationMin: m.duration_min, restMin: m.rest_min,

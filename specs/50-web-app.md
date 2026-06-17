@@ -59,6 +59,28 @@ settle exact), respect `prefers-reduced-motion`.
 Supabase Auth for admin (upload/calibrate/review/publish). Player report links = signed token granting read of
 one match; tab order derived from the token's player. RLS enforces read scope; only admin/service-role writes.
 
+## Implementation notes (frontend-port slice — `specs/features/frontend-port.md`)
+Done on `feat/frontend-port`, driven by the live seeded DB. Deviations from the prototype:
+- **Heatmap default = `raster`** (12×13), overriding the prototype theme-A `heat:'blobs'`.
+- **Projection engine** `lib/homography.ts` (`solveHomography` 4-pt DLT + `projectUV`) replaces
+  `vidProject`/`VID_QUAD`. `lib/overlay.ts` = `trackAt`/`shuttleAt`. `lib/demoOverlay.ts` holds demo
+  corner↔frame correspondences (→ `H_DEMO`) + demo tracks, clearly labelled; **TODO P1**: swap to
+  `court_calibrations.homography` + `track_keyframes`. A planar homography is the correct court model and
+  may drift slightly from the prototype's hand-tuned depth `k` (intentional).
+- **Video = placeholder backdrop**: `lib/storage.resolveVideoSrc` returns no playable URL this slice
+  (buckets private, demo clip absent); `useVideoPlayer` runs a **synthetic 16 s clock** so overlays animate
+  over a black surface. **TODO P1**: signed URL via Storage. The shared overlay engine is `VideoOverlay`
+  (consumed by the mobile card and the desktop `SafariFrame` surface).
+- **New variants**: `ShotMixCard` `compact` (tighter rows, no per-row %) and `KeyStats` `variant='bare'`
+  (desktop Kennzahlen tile) — net-new, not in the prototype. `SectionCard` gained `foot`/`style`/`dense`.
+- **Empty/`null` shapes** the prototype assumed away are guarded: `pairs:[]` (gate on `.length`),
+  `rallies:null`, `shots:[]` (empty-state tile), `result` is `'win'`/`'loss'`. Doubles with no video shows a
+  "keine Videoanalyse" placeholder in the desktop span-8 so the grid doesn't collapse.
+- **Data-layer fix**: `useMatchReport` queried a non-existent `rallies.ending_shot_type`; the column is
+  `end_shot_type` (fixed), and the rally `endLine` shot name is localised via `shotDE`.
+
 ## Verification
 Seed the DB from `seed.sql` (mirrors `mock-data.js`) and compare against `Spielanalyse App.html` /
 `Spielanalyse Desktop.html` for pixel fidelity; check German formatting and the layout breakpoint.
+Verified `2026-06-10` (Einzel) + `2026-06-03` (Doppel) at <1200px and ≥1200px against the live DB:
+`npm run typecheck` + `npm test` + `npm run build` green; anon read OK (migration `0002_dev_anon_read`).
