@@ -1,0 +1,250 @@
+/* =============================================================
+   BC Rheinbach Design System — Colors & Type
+   Source: bc-rheinbach-website/src/app/globals.css + tailwind.config.js
+   ============================================================= */
+
+/* ------------ Fonts ------------
+   Website loads Inter (body) and Space Grotesk (headings)
+   via next/font/google.
+
+   IMPORTANT: @import inside this file can race first paint and is silently
+   dropped by some HTML-to-image/PPTX capture pipelines. In every HTML
+   artifact you ALSO put these <link> tags in the <head>, BEFORE this CSS:
+
+     <link rel="preconnect" href="https://fonts.googleapis.com">
+     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+   The @import below is a belt-and-braces fallback for files that forget. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+:root {
+  /* ---------- Brand color tokens (exact hex from globals.css) ---------- */
+  --bcr-orange:        #FA8832;  /* Primary   "Crusta"          */
+  --bcr-orange-shade:  #C66C27;  /* Button bubble shadow        */
+  --bcr-orange-dark:   #C86C29;  /* Contact section background  */
+  --bcr-orange-text:   #1A0500;  /* Dark text on orange button  */
+
+  --bcr-blue:          #1758A6;  /* Secondary "Fun Blue"         */
+  --bcr-red:           #C0392B;  /* Destructive "Tall Poppy"     */
+  --bcr-red-shade:     #9B2C23;
+
+  --bcr-beige:         #FEF4EA;  /* Muted / warm section tint    */
+  --bcr-white:         #FFFFFF;
+  --bcr-black:         #0A0A0B;
+
+  /* ---------- Semantic HSL vars (match globals.css) ---------- */
+  --background:        0 0% 100%;
+  --foreground:        222.2 84% 4.9%;
+  --card:              0 0% 100%;
+  --card-foreground:   222.2 84% 4.9%;
+
+  --primary:           26 95% 59%;
+  --primary-foreground: 0 0% 100%;
+  --secondary:         213 76% 37%;
+  --secondary-foreground: 0 0% 100%;
+  --destructive:       6 63% 46%;
+  --destructive-foreground: 0 0% 100%;
+
+  --muted:             30 90.9% 95.7%;
+  --muted-foreground:  215.4 16.3% 46.9%;
+  --accent:            30 90.9% 95.7%;
+  --accent-foreground: 222.2 47.4% 11.2%;
+
+  --border:            214.3 31.8% 91.4%;
+  --input:             214.3 31.8% 91.4%;
+  --ring:              26 95% 59%;
+
+  --contact-bg:        22 65% 47%;   /* #C86C29 */
+
+  /* ---------- Foreground / text semantics ---------- */
+  --fg1: hsl(var(--foreground));     /* body */
+  --fg2: hsl(var(--muted-foreground)); /* secondary, captions */
+  --fg-inverse: #ffffff;
+
+  /* ---------- Surface semantics ---------- */
+  --bg-page: hsl(var(--background));
+  --bg-muted: hsl(var(--muted));      /* #FEF4EA warm beige */
+  --bg-card:  hsl(var(--card));
+  --bg-contact: hsl(var(--contact-bg));
+
+  /* ---------- Radii (globals.css: --radius 0.5rem) ---------- */
+  --radius:    0.5rem;           /* rounded-lg (cards use 0.75rem / rounded-xl) */
+  --radius-sm: calc(var(--radius) - 4px); /* 4px */
+  --radius-md: calc(var(--radius) - 2px); /* 6px */
+  --radius-lg: var(--radius);             /* 8px */
+  --radius-xl: 0.75rem;                   /* 12px — ui/card.tsx */
+  --radius-2xl: 1rem;                     /* 16px — offerings */
+  --btn-radius: 8px;
+
+  /* ---------- Button bubble tokens ---------- */
+  --btn-primary-bg:      var(--bcr-orange);
+  --btn-primary-shade:   var(--bcr-orange-shade);
+  --btn-primary-text:    var(--bcr-orange-text);
+  --btn-secondary-bg:    #FFFFFF;
+  --btn-secondary-shade: #E5E7EB;
+  --btn-secondary-text:  #000000;
+  --btn-depth: 6px;
+
+  /* ---------- Shadows ---------- */
+  --shadow-sm:   0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow:      0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-md:   0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg:   0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+
+  /* ---------- Font stacks ---------- */
+  --font-body:    'Inter', ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --font-heading: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --font-mono:    ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ---------- Type scale
+     From Tailwind + observed usage. Headings scale aggressively
+     (homepage uses md:text-7xl / lg:text-8xl for section H2s). */
+  --text-xs:   0.75rem;
+  --text-sm:   0.875rem;
+  --text-base: 1rem;
+  --text-md:   1.125rem;
+  --text-lg:   1.25rem;
+  --text-xl:   1.5rem;
+  --text-2xl:  1.875rem;
+  --text-3xl:  2.25rem;
+  --text-4xl:  3rem;
+  --text-5xl:  3.75rem;   /* H2 mobile */
+  --text-7xl:  4.5rem;    /* H2 desktop md: */
+  --text-8xl:  6rem;      /* H2 desktop lg: + H1 md: */
+  --text-9xl:  8rem;      /* H1 desktop lg: */
+}
+
+/* ------------ Base element styles ------------ */
+html, body {
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--fg1);
+  background: var(--bg-page);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  color: var(--fg1);
+}
+
+/* Display sizes as used on the marketing site */
+h1, .h1 {
+  font-size: var(--text-5xl);
+  line-height: 1.05;
+}
+@media (min-width: 768px) { h1, .h1 { font-size: var(--text-8xl); } }
+@media (min-width: 1024px) { h1, .h1 { font-size: var(--text-9xl); } }
+
+h2, .h2 {
+  font-size: var(--text-5xl);
+  line-height: 1.05;
+}
+@media (min-width: 768px) { h2, .h2 { font-size: var(--text-7xl); } }
+@media (min-width: 1024px) { h2, .h2 { font-size: var(--text-8xl); } }
+
+h3, .h3 { font-size: var(--text-2xl); }
+@media (min-width: 768px) { h3, .h3 { font-size: var(--text-3xl); } }
+
+h4, .h4 { font-size: var(--text-xl); }
+h5, .h5 { font-size: var(--text-lg); }
+h6, .h6 { font-size: var(--text-md); font-weight: 600; }
+
+p  { font-family: var(--font-body); font-size: var(--text-base); color: var(--fg1); }
+.lead { font-size: var(--text-md); color: var(--fg2); }
+small, .caption { font-size: var(--text-sm); color: var(--fg2); }
+code, pre { font-family: var(--font-mono); font-size: 0.9em; }
+
+/* Eyebrow / section kicker — used above every homepage H2 */
+.eyebrow {
+  font-family: var(--font-body);
+  font-weight: 600;
+  color: hsl(var(--primary));
+  font-size: var(--text-base);
+  margin-bottom: 0.75rem;
+}
+
+a {
+  color: hsl(var(--primary));
+  text-decoration: none;
+  transition: color .15s ease;
+}
+a:hover { color: hsl(var(--primary)); text-decoration: underline; }
+
+/* ------------ Button bubble (copied verbatim from globals.css) ------------ */
+.btn-bubble {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 10px 24px;
+  font-family: var(--font-body);
+  font-size: 16px; font-weight: 600; line-height: 1.5;
+  border-radius: var(--btn-radius);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: transform .1s ease-in-out, box-shadow .1s ease-in-out;
+  text-decoration: none; user-select: none;
+}
+.btn-bubble.primary {
+  background: var(--btn-primary-bg); color: var(--btn-primary-text);
+  box-shadow: 0 var(--btn-depth) 0 var(--btn-primary-shade);
+  border-color: var(--btn-primary-shade);
+}
+.btn-bubble.secondary {
+  background: var(--btn-secondary-bg); color: var(--btn-secondary-text);
+  box-shadow: 0 var(--btn-depth) 0 var(--btn-secondary-shade);
+  border-color: var(--btn-secondary-shade);
+}
+.btn-bubble.secondary-transparent {
+  background: transparent; color: #fff;
+  box-shadow: 0 var(--btn-depth) 0 rgba(255,255,255,0.3);
+  border-color: rgba(255,255,255,0.5);
+}
+.btn-bubble.destructive {
+  background: hsl(var(--destructive)); color: #fff;
+  box-shadow: 0 var(--btn-depth) 0 var(--bcr-red-shade);
+  border-color: var(--bcr-red-shade);
+}
+.btn-bubble:hover,
+.btn-bubble:active {
+  transform: translateY(var(--btn-depth));
+  box-shadow: 0 0 0 transparent;
+}
+.btn-bubble.small   { padding: 6px 18px; font-size: 14px; }
+.btn-bubble.compact { padding: 6px 16px; font-size: 14px; --btn-depth: 4px; margin-bottom: 4px; }
+.btn-bubble.compact.primary   { box-shadow: 0 4px 0 var(--btn-primary-shade); }
+.btn-bubble.compact.secondary { box-shadow: 0 4px 0 var(--btn-secondary-shade); }
+.btn-bubble.compact:hover { transform: translateY(4px); box-shadow: 0 0 0 transparent !important; }
+.btn-bubble.full { width: 100%; }
+.btn-bubble:disabled { opacity: .5; cursor: not-allowed; pointer-events: none; transform: none; }
+
+/* ------------ Helpers ------------ */
+.container-bcr { width: 100%; max-width: 80rem; margin: 0 auto; padding: 0 5%; }
+.section { padding: 3rem 5%; }
+@media (min-width: 768px) { .section { padding: 4rem 5%; } }
+@media (min-width: 1024px) { .section { padding: 5rem 5%; } }
+.bg-muted-bcr { background: var(--bg-muted); }
+.card-surface {
+  background: var(--bg-card);
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+}
+.card-interactive { transition: all .2s ease; }
+.card-interactive:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+
+/* ------------ On-dark utility ------------
+   Global h1–h6 and p rules in this file set color:var(--fg1) (near-black).
+   When placing text over a dark photo, tinted block, or inverse card, apply
+   .on-dark to the WRAPPER — it forces headings, paragraphs, and spans to
+   white without per-element overrides. */
+.on-dark,
+.on-dark h1, .on-dark h2, .on-dark h3, .on-dark h4, .on-dark h5, .on-dark h6,
+.on-dark p, .on-dark span, .on-dark li, .on-dark small, .on-dark .caption,
+.on-dark .lead {
+  color: #fff;
+}
