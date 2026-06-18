@@ -1,5 +1,6 @@
 import type { ReportPlayer } from '../../types'
 import type { Anim } from '../../lib/motion'
+import type { OverlayInputs } from '../../lib/calibration'
 import { useVideoPlayer } from '../../hooks/useVideoPlayer'
 import { SectionCard } from './SectionCard'
 import { VideoOverlay } from './VideoOverlay'
@@ -8,14 +9,15 @@ import { VideoControls } from './VideoControls'
 
 interface Props {
   slug: string | undefined
-  video: { src: string; label: string }
+  video: { src: string; label: string; durationS?: number | null }
   players: ReportPlayer[]
+  oi: OverlayInputs
   anim?: Anim
 }
 
 /** Mobile "Video-Analyse" card: player surface + SVG overlay engine + toggle chips + controls.
- *  No real footage this slice → black backdrop with a synthetic demo clock (see useVideoPlayer). */
-export function VideoAnalysisCard({ slug, video, players }: Props) {
+ *  Real footage → signed-URL video + overlays from the computed track_keyframes; otherwise the demo. */
+export function VideoAnalysisCard({ slug, video, players, oi }: Props) {
   const hasFootage = Boolean(video.src)
   const player = useVideoPlayer(slug, hasFootage)
 
@@ -23,7 +25,11 @@ export function VideoAnalysisCard({ slug, video, players }: Props) {
     <SectionCard
       title="Video-Analyse"
       sub={video.label}
-      foot="Overlays aus der automatischen Auswertung — Demo-Daten auf Beispiel-Footage."
+      foot={
+        oi.isDemo
+          ? 'Overlays aus der automatischen Auswertung — Demo-Daten auf Beispiel-Footage.'
+          : 'Overlays aus der automatischen Auswertung dieser Aufnahme.'
+      }
     >
       <div
         style={{
@@ -51,7 +57,7 @@ export function VideoAnalysisCard({ slug, video, players }: Props) {
             style={{ width: '100%', display: 'block' }}
           />
         )}
-        <VideoOverlay time={player.time} players={players} ov={player.ov} />
+        <VideoOverlay time={player.time} players={players} ov={player.ov} H={oi.H} tracks={oi.tracks} />
       </div>
 
       <div style={{ marginTop: 12 }}>

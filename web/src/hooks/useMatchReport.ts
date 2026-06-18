@@ -60,6 +60,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
           const shots = (shotsByPlayer.get(mp.player_id) ?? []).sort((x, y) => y[1] - x[1])
           const player = Array.isArray(mp.players) ? mp.players[0] : mp.players
           return {
+            playerId: mp.player_id,
             name: player?.name ?? 'Unbekannt',
             first: player?.first_name ?? '',
             isViewer: mp.player_id === viewerPlayerId,
@@ -95,8 +96,36 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
         const dp = dateParts(m.played_on)
         const vid = ((vidRes.data ?? []) as any[])[0]
 
+        // Calibration + tracks key on vid.id (known only after the first batch) — one dependent fetch.
+        let calib: MatchReport['calib'] = null
+        let tracks: MatchReport['tracks'] = []
+        let videoSrc = ''
+        if (vid) {
+          const [srcUrl, calibRes, trackRes] = await Promise.all([
+            resolveVideoSrc(vid.storage_path),
+            supabase
+              .from('court_calibrations')
+              .select('confirmed_points, image_size')
+              .eq('video_id', vid.id)
+              .order('updated_at', { ascending: false })
+              .limit(1)
+              .maybeSingle(),
+            supabase.from('track_keyframes').select('subject, data').eq('video_id', vid.id),
+          ])
+          videoSrc = srcUrl
+          const cc = calibRes.data as any
+          calib = cc
+            ? { confirmedPoints: cc.confirmed_points ?? null, imageSize: cc.image_size ?? null }
+            : null
+          tracks = ((trackRes.data ?? []) as any[]).map((t) => ({ subject: t.subject, data: t.data }))
+        }
+
         const report: MatchReport = {
-          video: vid ? { src: resolveVideoSrc(vid.storage_path), label: vid.label ?? '' } : null,
+          video: vid
+            ? { src: videoSrc, label: vid.label ?? '', durationS: vid.duration_s ?? null }
+            : null,
+          calib,
+          tracks,
           meta: {
             id: mid, dateLabel: dp.dateLabel, weekday: m.weekday, dd: dp.dd,
             discipline: m.discipline, durationMin: m.duration_min, restMin: m.rest_min,

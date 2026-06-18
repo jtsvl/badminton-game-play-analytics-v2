@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { MatchReport } from '../types'
+import { overlayInputs } from '../lib/calibration'
 import { Reveal } from '../components/report/Reveal'
 import { ReportHero } from '../components/report/ReportHero'
 import { PlayerTabs } from '../components/report/PlayerTabs'
@@ -29,9 +30,10 @@ export function MatchReportMobile({ report, tab, setTab, slug }: Props) {
   const coverageSub = p.isViewer ? 'wo du gestanden hast' : `wo ${p.first} gestanden hat`
 
   // Sections in column order; conditionals keep the stacked column gap-free.
+  const oi = overlayInputs(report)
   const sections: ReactNode[] = []
   sections.push(<KeyStats player={p} />)
-  if (report.video) sections.push(<VideoAnalysisCard slug={slug} video={report.video} players={report.players} />)
+  if (report.video) sections.push(<VideoAnalysisCard slug={slug} video={report.video} players={report.players} oi={oi} />)
   sections.push(<CourtCoverageCard spots={s.heat} sub={coverageSub} width={222} />)
   sections.push(<ZoneCard zones={s.zones} />)
   sections.push(<ActivityCard points={s.timeline} />)

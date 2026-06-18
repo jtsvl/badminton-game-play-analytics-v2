@@ -26,6 +26,7 @@ afterEach(cleanup)
 
 function mkPlayer(over: { side: Side; first: string; name?: string; isViewer?: boolean; shots?: ShotPair[] }): ReportPlayer {
   return {
+    playerId: `p-${over.first}`,
     name: over.name ?? `${over.first} Muster`,
     first: over.first,
     isViewer: over.isViewer ?? false,
@@ -49,7 +50,9 @@ function mkPlayer(over: { side: Side; first: string; name?: string; isViewer?: b
 }
 
 const singles: MatchReport = {
-  video: { src: '', label: 'Demo-Aufnahme' },
+  video: { src: '', label: 'Demo-Aufnahme', durationS: null },
+  calib: null,
+  tracks: [],
   meta: {
     id: '1',
     dateLabel: '10. Juni 2026',
@@ -72,6 +75,8 @@ const singles: MatchReport = {
 // Doubles: no shots, no video, with pairs — exercises every guard.
 const doubles: MatchReport = {
   video: null,
+  calib: null,
+  tracks: [],
   meta: {
     id: '2',
     dateLabel: '3. Juni 2026',

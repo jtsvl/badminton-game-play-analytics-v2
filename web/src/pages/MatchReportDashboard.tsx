@@ -1,6 +1,7 @@
 import type { MatchReport } from '../types'
 import { deNum } from '../lib/format'
 import { disciplineDE } from '../lib/labels'
+import { overlayInputs } from '../lib/calibration'
 import { useVideoPlayer } from '../hooks/useVideoPlayer'
 import { Reveal } from '../components/report/Reveal'
 import { Icon, ICONS } from '../components/report/Icon'
@@ -32,6 +33,7 @@ export function MatchReportDashboard({ report, tab, setTab, slug }: Props) {
   const r = report.rallies
   const hasFootage = Boolean(report.video?.src)
   const vp = useVideoPlayer(slug, hasFootage)
+  const oi = overlayInputs(report)
 
   const opponent =
     report.pairs && report.pairs.length
@@ -105,7 +107,7 @@ export function MatchReportDashboard({ report, tab, setTab, slug }: Props) {
                       style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
                     />
                   )}
-                  <VideoOverlay time={vp.time} players={report.players} ov={vp.ov} />
+                  <VideoOverlay time={vp.time} players={report.players} ov={vp.ov} H={oi.H} tracks={oi.tracks} />
                 </div>
               </div>
               <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '6px 12px', background: 'var(--card)', borderTop: '1px solid var(--hairline)' }}>
