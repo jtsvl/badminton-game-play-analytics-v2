@@ -40,8 +40,12 @@ models/weights/
 
 # --- Pipeline intermediate caches ---
 worker/.cache/
+**/.cache/
 *.parquet
 frames_cache/
+*.MOV
+*.mov
+*.mp4
 
 # --- Build artifacts ---
 *.tsbuildinfo
