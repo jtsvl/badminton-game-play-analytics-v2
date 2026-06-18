@@ -1,6 +1,9 @@
 // TS types derived from specs/20-data-model.md. The DB rows are the worker↔web contract;
 // the assembled `MatchReport` mirrors handovers/**/mock-data.js shapes.
 
+import type { Pt } from './lib/homography'
+import type { TrackKey } from './lib/overlay'
+
 export type Discipline = 'singles' | 'doubles'
 export type Side = 'A' | 'B'
 export type MatchResultCode = 'win' | 'loss'
@@ -44,6 +47,7 @@ export type ShotPair = [string, number]
 export interface RallySummary { count: number; avgShots: number; avgSec: number; longShots: number; longSec: number; endLine: string }
 export interface PairStat { side: Side; label: string; fb: number; ss: number; rot: number }
 export interface ReportPlayer {
+  playerId: string // needed to map a player to its track_keyframes subject ('player:<playerId>')
   name: string; first: string; isViewer: boolean; side: Side
   stats: Omit<PlayerMatchStatsRow, 'match_id' | 'player_id'> & { shots: ShotPair[] }
 }
@@ -52,8 +56,21 @@ export interface ReportMeta {
   durationMin: number | null; restMin: number | null; court: number | null
   score: string | null; games: number[][]; result: MatchResultCode | null; resultLine: string
 }
+// Court calibration consumed by the overlay (the 4 confirmed corners are the source of truth;
+// the frontend derives court→frame via lib/calibration.homographyFromCorners).
+export interface CourtCalib {
+  confirmedPoints: Pt[] | null
+  imageSize: { w: number; h: number } | null
+}
+// One track_keyframes row: subject 'player:<id>' | 'shuttle', data [{t,u,v}] (t in seconds @ ~10 Hz).
+export interface TrackData {
+  subject: string
+  data: TrackKey[]
+}
 export interface MatchReport {
-  video: { src: string; label: string } | null
+  video: { src: string; label: string; durationS: number | null } | null
+  calib: CourtCalib | null
+  tracks: TrackData[]
   meta: ReportMeta
   rallies: RallySummary | null
   pairs: PairStat[] | null

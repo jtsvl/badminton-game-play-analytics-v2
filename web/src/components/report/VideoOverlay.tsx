@@ -1,13 +1,14 @@
 import type { ReportPlayer } from '../../types'
 import { projectUV } from '../../lib/homography'
-import { trackAt, shuttleAt } from '../../lib/overlay'
-import { H_DEMO, DEMO_TRACK_NEAR, DEMO_TRACK_FAR, DEMO_LOOP, FAR_Y, NEAR_Y } from '../../lib/demoOverlay'
+import { trackAt, type TrackKey } from '../../lib/overlay'
 import type { OverlayToggles } from '../../hooks/useVideoPlayer'
 
 interface Props {
-  time: number
+  time: number // seconds (real video.currentTime, or the synthetic demo clock)
   players: ReportPlayer[]
   ov: OverlayToggles
+  H: number[] // court(u,v) → frame fraction (real calibration or demo fallback)
+  tracks: Map<string, TrackKey[]> // by subject 'player:<id>' | 'shuttle'; t in seconds
 }
 
 const VB_W = 192
@@ -17,23 +18,23 @@ const BLUE = '#1758A6'
 
 const clamp = (x: number) => Math.max(0, Math.min(1, x))
 
-// Court (u,v) → viewBox px, with a nearness term `t` (0 far … 1 near) for perspective sizing.
-function frame(u: number, v: number) {
-  const p = projectUV(H_DEMO, u, v)
-  return { x: p.x * VB_W, y: p.y * VB_H, t: clamp((p.y - FAR_Y) / (NEAR_Y - FAR_Y)) }
-}
-
 /**
  * Shared SVG analysis-overlay engine over the video surface (mobile card + desktop Safari frame).
  * Geometry is computed in court coordinates and projected via the real homography (lib/homography.ts);
- * tracks are demo data for now (lib/demoOverlay.ts) — swap to track_keyframes + real calibration in P1.
+ * player positions come from real track_keyframes (P1) or the demo fallback (seeded matches). The
+ * nearness term is `v` itself (v=0 far baseline … v=1 near baseline) — calibration-independent.
  */
-export function VideoOverlay({ time, players, ov }: Props) {
-  const p = (time % DEMO_LOOP) / DEMO_LOOP
-  const near = players[0]
-  const far = players[1]
-  const nearPos = trackAt(DEMO_TRACK_NEAR, p)
-  const farPos = trackAt(DEMO_TRACK_FAR, p)
+export function VideoOverlay({ time, players, ov, H, tracks }: Props) {
+  // Court (u,v) → viewBox px, with a nearness term `t` for perspective sizing.
+  const frame = (u: number, v: number) => {
+    const p = projectUV(H, u, v)
+    return { x: p.x * VB_W, y: p.y * VB_H, t: clamp(v) }
+  }
+
+  const viewerSide = players[0]?.side
+  const keysFor = (p: ReportPlayer) => tracks.get(`player:${p.playerId}`) ?? []
+  const colorFor = (p: ReportPlayer) => (p.side === viewerSide ? ORANGE : BLUE)
+  const labelFor = (p: ReportPlayer) => (p.isViewer ? 'Du' : p.first)
 
   const playerBox = (pos: { u: number; v: number }, name: string, color: string) => {
     const pt = frame(pos.u, pos.v)
@@ -52,12 +53,10 @@ export function VideoOverlay({ time, players, ov }: Props) {
     )
   }
 
-  const trail = (keys: typeof DEMO_TRACK_NEAR, color: string) => {
+  const trail = (keys: TrackKey[], color: string) => {
     const pts: string[] = []
     for (let dt = 5; dt >= 0; dt -= 0.25) {
-      let tp = ((time - dt) % DEMO_LOOP) / DEMO_LOOP
-      if (tp < 0) tp += 1
-      const pos = trackAt(keys, tp)
+      const pos = trackAt(keys, time - dt) // trackAt clamps before the first / after the last key
       const fr = frame(pos.u, pos.v)
       pts.push(`${fr.x.toFixed(1)},${fr.y.toFixed(1)}`)
     }
@@ -70,7 +69,7 @@ export function VideoOverlay({ time, players, ov }: Props) {
   }
 
   const zones = () => {
-    const z = near?.stats.zones
+    const z = players[0]?.stats.zones
     const bands = [
       { v0: 0.5, v1: 0.65, pct: z?.front ?? 0 },
       { v0: 0.65, v1: 0.82, pct: z?.mid ?? 0 },
@@ -112,17 +111,12 @@ export function VideoOverlay({ time, players, ov }: Props) {
     )
   }
 
-  const shuttle = () => {
-    const s = shuttleAt(p, DEMO_TRACK_NEAR, DEMO_TRACK_FAR)
-    const cur = frame(s.u, s.v)
-    const from = frame(s.from.u, s.from.v)
-    return (
-      <g>
-        <line x1={from.x} y1={from.y - 4} x2={cur.x} y2={cur.y - 2} stroke="#FFFFFF" strokeWidth="0.4" strokeDasharray="1.3 1" opacity="0.7" />
-        <circle cx={cur.x} cy={cur.y - 2 - Math.sin(Math.PI * s.segP) * 6} r="1" fill="#FFFFFF" stroke="rgba(0,0,0,.3)" strokeWidth="0.2" />
-      </g>
-    )
-  }
+  // Players that actually have a track this frame (real CV, or the demo fallback). Draw far→near.
+  const tracked = players
+    .map((p) => ({ p, keys: keysFor(p) }))
+    .filter((x) => x.keys.length > 0)
+    .map((x) => ({ ...x, pos: trackAt(x.keys, time) }))
+    .sort((a, b) => a.pos.v - b.pos.v)
 
   return (
     <svg
@@ -131,11 +125,9 @@ export function VideoOverlay({ time, players, ov }: Props) {
       style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
     >
       {ov.zonen && zones()}
-      {ov.wege && trail(DEMO_TRACK_NEAR, ORANGE)}
-      {ov.wege && trail(DEMO_TRACK_FAR, BLUE)}
-      {ov.shuttle && shuttle()}
-      {ov.tracking && far && playerBox(farPos, far.first, BLUE)}
-      {ov.tracking && near && playerBox(nearPos, near.isViewer ? 'Du' : near.first, ORANGE)}
+      {ov.wege && tracked.map(({ p, keys }) => <g key={`t${p.playerId}`}>{trail(keys, colorFor(p))}</g>)}
+      {/* P1 has no shuttle tracking — the shuttle layer renders only once a 'shuttle' track exists. */}
+      {ov.tracking && tracked.map(({ p, pos }) => <g key={`b${p.playerId}`}>{playerBox(pos, labelFor(p), colorFor(p))}</g>)}
     </svg>
   )
 }

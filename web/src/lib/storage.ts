@@ -1,13 +1,20 @@
-// Resolve a Supabase Storage path to a playable video URL.
-//
-// This slice: the demo clip is not in Storage (all buckets are private and the referenced object is
-// absent), so there is no playable source — the video surface falls back to a synthetic demo clock
-// over a black backdrop while still rendering the SVG overlay engine. We return '' to signal "no source".
-//
-// TODO (P1): once real footage is uploaded, return a signed URL, e.g.
-//   const { data } = await supabase.storage.from('match-videos').createSignedUrl(path, 60 * 60)
-//   return data?.signedUrl ?? ''
-// (async — resolve inside useMatchReport's single fetch so the report arrives with a ready src).
-export function resolveVideoSrc(_storagePath: string | null): string {
-  return ''
+// Resolve Supabase Storage paths to signed URLs. Buckets are private, so the anon client needs a
+// storage read policy (dev: supabase/migrations/0003_dev_calibration_write.sql; prod: player-link RLS).
+// Awaited inside useMatchReport's single fetch so the report arrives with a ready src.
+import { supabase } from './supabase'
+
+/** Signed URL for an object in a bucket (1 h TTL), or '' if unavailable. */
+export async function signedUrl(bucket: string, path: string | null, ttl = 60 * 60): Promise<string> {
+  if (!path) return ''
+  try {
+    const { data } = await supabase.storage.from(bucket).createSignedUrl(path, ttl)
+    return data?.signedUrl ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** Playable URL for a match video storage path ('' → no source → synthetic demo clock fallback). */
+export function resolveVideoSrc(storagePath: string | null): Promise<string> {
+  return signedUrl('match-videos', storagePath)
 }
