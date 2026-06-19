@@ -11,6 +11,7 @@ Canonical confirmed-corner order is FL, FR, NR, NL, mapping to the unit square b
 from __future__ import annotations
 
 import math
+from statistics import median
 from typing import Dict, List, Sequence, Tuple
 
 from .insights import COURT_W_M, COURT_L_M
@@ -152,6 +153,39 @@ def foot_keypoint(
     return (x, y, conf)
 
 
+# Halpe-26 upper-body keypoints that stay visible when the lower body (ankles) is occluded — the
+# anchor for the Phase-4 head/height foot grounding. 17 = head top, 19 = mid-hip (pelvis centre).
+HEAD_KP: int = 17
+HIP_KP: int = 19
+
+
+def fit_head_foot_model(samples: Sequence[Tuple[float, float, float]]) -> float | None:
+    """Learn a per-player head→foot drop from confident, feet-visible frames (Phase-4 occlusion layer).
+
+    Each sample is `(head_y, hip_y, foot_y)` in image pixels from a frame where the ankle *and* head/hip
+    are confident. Returns the **median** `(foot_y - head_y) / (hip_y - head_y)` — the foot drop measured
+    in torso lengths, so it transfers across distance using only the head+hip that remain visible during
+    lower-body occlusion. Median makes it robust to the odd bad foot. None if no frame has a positive
+    torso (degenerate / too little signal to ground from).
+
+    Honest limits (surfaced as „Schätzung" downstream): real height varies ~±10 %, posture changes the
+    torso↔leg ratio (a deep lunge compresses it), and the low standing camera foreshortens the vertical
+    drop — a higher mount would sharpen it. Most valuable in doubles (P3) where players occlude each other.
+    """
+    ratios = [(fy - hy) / (py - hy) for hy, py, fy in samples if py - hy > 1e-6]
+    if not ratios:
+        return None
+    return median(ratios)
+
+
+def ground_foot_from_head(head_pt: Pt, hip_pt: Pt, ratio: float) -> Pt:
+    """Predict the (occluded) foot from the still-visible head + hip and a fitted `ratio`
+    (see fit_head_foot_model): foot sits `ratio` torso-lengths below the head, under the pelvis."""
+    hx, hy = head_pt
+    px, py = hip_pt
+    return (px, hy + ratio * (py - hy))
+
+
 def foot_from_keypoints(
     kp: Sequence[Pt], scores: Sequence[float], bbox: Tuple[float, float, float, float],
     k_fallback: float = 0.0, conf_thr: float = 0.3, foot_indices: Sequence[int] = FOOT_KP,
@@ -207,6 +241,45 @@ def enforce_n_tracks(counts: Dict[int, int], n: int) -> List[int]:
     return [tid for tid, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:n]]
 
 
+def stitch_role_fragments(
+    primaries: Dict[str, dict], fragments: Dict[int, dict], max_court_dist: float = 0.5
+) -> Dict[int, str]:
+    """Re-associate dropped in-court track fragments with the role they continue (Phase-4 re-ID, RC3).
+
+    BoT-SORT drops a small/low-contrast player (the far player on f35d0984) and re-acquires them under
+    a *new* track id, which `enforce_n_tracks` then discards as a short fragment — leaving a hole. Each
+    `fragments[tid]` is matched to a primary role iff it (a) is in the same court half, (b) does **not**
+    temporally overlap that role's primary coverage (so it genuinely fills the role's hole, not a frame
+    the role already has), and (c) is the nearest such role within `max_court_dist` (court-normalized) —
+    a guard against cross-court blips. This recovers *real detected* positions; it does not fabricate.
+
+    primaries: role -> {"median": (u,v), "span": (first_frame, last_frame)}.
+    fragments: track_id -> {"median": (u,v), "span": (first_frame, last_frame)}.
+    Returns {fragment_track_id: role}; fragments matching no role are omitted (stay dropped).
+    """
+    out: Dict[int, str] = {}
+    for tid, frag in fragments.items():
+        fu, fv = frag["median"]
+        fa, fb = frag["span"]
+        frag_far = fv < 0.5
+        best_role = None
+        best_dist = max_court_dist
+        for role, prim in primaries.items():
+            if role.startswith("far") != frag_far:
+                continue  # different court half
+            pa, pb = prim["span"]
+            if pa <= fb and fa <= pb:
+                continue  # overlaps the role's own coverage → fills no hole
+            pu, pv = prim["median"]
+            d = math.hypot(fu - pu, fv - pv)
+            if d <= best_dist:
+                best_dist = d
+                best_role = role
+        if best_role is not None:
+            out[tid] = best_role
+    return out
+
+
 def smooth_track(track: List[Sample], window: int = 5) -> List[Sample]:
     """Centered moving-average of (u,v), keeping each sample's t. Damps ankle-point jitter so
     per-step speeds aren't inflated into implausible sprints (monocular foot tracking is noisy)."""
@@ -220,6 +293,38 @@ def smooth_track(track: List[Sample], window: int = 5) -> List[Sample]:
         u = sum(s[1] for s in seg) / len(seg)
         v = sum(s[2] for s in seg) / len(seg)
         out.append((track[i][0], u, v))
+    return out
+
+
+FrameSample = Tuple[int, float, float]  # (frame, u, v)
+
+
+def fill_track_gaps(
+    samples: List[FrameSample], max_gap: int = 8
+) -> List[Tuple[int, float, float, bool]]:
+    """Fill short interior holes in a frame-indexed (frame, u, v) track by linear interpolation.
+
+    Phase-4 short-gap repair (RC3): when a role's coverage has a hole of 2..`max_gap` *missing*
+    frames between two confident detections, interpolate (u,v) at each missing frame — the same
+    linear blend as `resample_10hz`, but keyed on integer frames. Holes wider than `max_gap` are
+    left absent (a long dropout is recall, not a fillable gap), and nothing is produced before the
+    first or after the last sample: **interpolate between two anchors only, never extrapolate**
+    (a one-sided dropout — e.g. a player lost to the end of the clip — stays an honest hole).
+
+    Returns the densified track as (frame, u, v, is_filled); is_filled marks interpolated frames so
+    the caller can carry the higher uncertainty downstream (overlay „Schätzung")."""
+    samples = sorted(samples)
+    if len(samples) < 2:
+        return [(f, u, v, False) for f, u, v in samples]
+    out: List[Tuple[int, float, float, bool]] = []
+    for (fa, ua, va), (fb, ub, vb) in zip(samples, samples[1:]):
+        out.append((fa, ua, va, False))
+        span = fb - fa
+        if 1 < span <= max_gap:
+            for f in range(fa + 1, fb):
+                frac = (f - fa) / span
+                out.append((f, ua + (ub - ua) * frac, va + (vb - va) * frac, True))
+    out.append((samples[-1][0], samples[-1][1], samples[-1][2], False))
     return out
 
 

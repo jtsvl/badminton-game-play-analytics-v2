@@ -16,7 +16,9 @@ import logging
 import os
 from pathlib import Path
 
-from ..geometry import FOOT_KP, foot_keypoint
+from ..geometry import (
+    FOOT_KP, HEAD_KP, HIP_KP, fit_head_foot_model, foot_keypoint, ground_foot_from_head,
+)
 
 log = logging.getLogger("worker.pipeline.pose")
 
@@ -34,7 +36,11 @@ POSE_CONF_THR = float(os.environ.get("POSE_CONF_THR", "0.3"))
 def pose_row(frame: int, track: int, bbox, kp, scores,
              conf_thr: float = POSE_CONF_THR, foot_indices=FOOT_KP) -> dict:
     """Assemble one pose.parquet row: full keypoint array + the derived foot (mean confident ankle) and
-    its confidence. foot_conf < conf_thr signals gate_track to fall back to the bbox nudge."""
+    its confidence. foot_conf < conf_thr signals gate_track to fall back to the bbox nudge.
+
+    `foot_source` records *where* the foot came from for downstream uncertainty: "ankle" when the real
+    ankle keypoint is confident, else "none" — a placeholder the second pass (`ground_occluded_feet`)
+    may upgrade to "head" when it can predict the foot from the still-visible head + hip."""
     fk = foot_keypoint(kp, scores, foot_indices, conf_thr)
     fx, fy, fc = fk if fk is not None else (None, None, 0.0)
     return {
@@ -45,7 +51,44 @@ def pose_row(frame: int, track: int, bbox, kp, scores,
         "foot_x": fx,
         "foot_y": fy,
         "foot_conf": float(fc),
+        "foot_source": "ankle" if fc >= conf_thr else "none",
     }
+
+
+def ground_occluded_feet(rows: list, conf_thr: float = POSE_CONF_THR) -> list:
+    """Second pass (Phase-4 occlusion layer): recover the foot of ankle-occluded frames from the head.
+
+    Per track, fit a head→foot drop (`fit_head_foot_model`) from that player's *own* confident,
+    feet-visible frames (ankle, head and hip all ≥ conf_thr), then for each frame whose ankle is hidden
+    (foot_conf < conf_thr) but whose head + hip are still confident, predict the foot
+    (`ground_foot_from_head`) and mark `foot_source="head"`. The grounded foot carries a real but lower
+    confidence (min of head/hip), so it stays an estimate („Schätzung"). Rows are mutated in place and
+    returned. No fitted model for a track (no feet-visible frame) → that track is left untouched.
+
+    Honest limits: height varies ~±10 %, posture shifts the torso↔leg ratio, and the low standing camera
+    foreshortens the drop — see `geometry.fit_head_foot_model`. Most valuable in doubles (P3)."""
+    by_track: dict[int, list] = {}
+    for r in rows:
+        by_track.setdefault(r["track"], []).append(r)
+    for trows in by_track.values():
+        samples = [
+            (r["kp"][HEAD_KP][1], r["kp"][HIP_KP][1], r["foot_y"])
+            for r in trows
+            if r["foot_conf"] >= conf_thr
+            and r["kp_score"][HEAD_KP] >= conf_thr and r["kp_score"][HIP_KP] >= conf_thr
+        ]
+        ratio = fit_head_foot_model(samples)
+        if ratio is None:
+            continue
+        for r in trows:
+            if r["foot_conf"] >= conf_thr:
+                continue  # ankle already confident — leave it
+            hc, pc = r["kp_score"][HEAD_KP], r["kp_score"][HIP_KP]
+            if hc < conf_thr or pc < conf_thr:
+                continue  # head/hip also hidden — nothing to ground from
+            fx, fy = ground_foot_from_head(r["kp"][HEAD_KP], r["kp"][HIP_KP], ratio)
+            r["foot_x"], r["foot_y"], r["foot_conf"], r["foot_source"] = fx, fy, min(hc, pc), "head"
+    return rows
 
 
 def _load_model(frames_dir: Path, first_frame: int, first_bbox):
@@ -105,11 +148,14 @@ def run(ctx) -> None:
         for r, kp, sc in zip(dets, keypoints, scores):
             rows.append(pose_row(frame_idx, r["track"], (r["x"], r["y"], r["w"], r["h"]), kp, sc))
 
+    ground_occluded_feet(rows)  # Phase-4: head/height-ground the ankle-occluded frames
+
     out = cache / "pose.parquet"
     pl.DataFrame(rows, schema={
         "frame": pl.Int64, "track": pl.Int64,
         "kp": pl.List(pl.List(pl.Float64)), "kp_score": pl.List(pl.Float64),
         "foot_x": pl.Float64, "foot_y": pl.Float64, "foot_conf": pl.Float64,
+        "foot_source": pl.Utf8,
     }).write_parquet(out)
     ctx["pose_path"] = str(out)
 
@@ -117,6 +163,7 @@ def run(ctx) -> None:
     if store is not None:
         store.upload(cfg.artifact_bucket, f"{video_id}/pose.parquet", out.read_bytes(),
                      "application/octet-stream")
-    n_conf = sum(1 for r in rows if r["foot_conf"] >= POSE_CONF_THR)
-    log.info("pose: %d keypoint sets, %d/%d with confident foot (>=%.2f)",
-             len(rows), n_conf, len(rows), POSE_CONF_THR)
+    n_conf = sum(1 for r in rows if r["foot_source"] == "ankle")
+    n_head = sum(1 for r in rows if r["foot_source"] == "head")
+    log.info("pose: %d keypoint sets, %d ankle-foot / %d head-grounded / %d bbox-fallback (conf>=%.2f)",
+             len(rows), n_conf, n_head, len(rows) - n_conf - n_head, POSE_CONF_THR)

@@ -167,20 +167,60 @@ def pipeline_from_detections(
     return out
 
 
+def overlay_filled(
+    pipeline_map: Dict[Key, dict], track_rows: Sequence[dict], t_to_frame: Dict[float, int]
+) -> int:
+    """Merge Phase-4 filled court positions from tracks.parquet into the pipeline map (in place).
+
+    `pipeline_from_detections` is built from `detections.parquet`, which has no row in a dropout — so a
+    re-ID/interp-filled frame would stay invisible. This adds each tracks.parquet row's smoothed court
+    (u,v) under (frame, label) when that key has **no genuine detection** (detected positions always
+    win). Returns the number of filled positions added. Rows with no mappable role or timestamp are
+    skipped. Foot is None (a court-space fill has no real foot pixel); the `filled` flag carries the
+    higher uncertainty."""
+    n = 0
+    for r in track_rows:
+        label = ROLE_TO_LABEL.get(r.get("role") or "")
+        if not label:
+            continue
+        frame = t_to_frame.get(round(r["t"], 6))
+        if frame is None:
+            continue
+        key = (frame, label)
+        if key in pipeline_map:
+            continue  # a genuine detection is already scored there
+        pipeline_map[key] = {"foot": None, "uv": (r["u"], r["v"]), "filled": True,
+                             "source": r.get("source")}
+        n += 1
+    return n
+
+
 def score(pipeline_map: Dict[Key, dict], gt_map: Dict[Key, dict], w: int, h: int) -> dict:
     """Compare a pipeline position map against the ground-truth map; bucket errors near/far.
 
-    foot_px needs a foot in both maps; court_m needs a uv in both. Misses/spurious come from gt flags.
-    """
+    foot_px needs a foot in both maps; court_m needs a uv in both. spurious comes from gt flags.
+
+    A ground-truth `miss` (an 'added' correction — the pipeline originally detected nobody there) is
+    counted a **miss only while the pipeline still has nothing** at that key; once Phase-4 re-ID /
+    interp covers it, it becomes **recovered** and its court error goes to a *separate* `recovered`
+    bucket — never the detected near/far stats, so recovering far-court positions (which carry the
+    deferred-RC2 depth amplification) can't silently inflate the detected-accuracy headline."""
     buckets = {"near": {"foot_px": [], "court_m": []}, "far": {"foot_px": [], "court_m": []}}
-    matched = misses = spurious = 0
+    recovered_court = {"near": [], "far": []}
+    matched = misses = spurious = recovered = 0
     for key, g in gt_map.items():
         half = half_of(key[1])
         if g.get("spurious"):
             spurious += 1
-        if g.get("miss"):
-            misses += 1
         p = pipeline_map.get(key)
+        if g.get("miss"):
+            if p and p.get("uv"):
+                recovered += 1
+                if g.get("uv"):
+                    recovered_court[half].append(court_m_error(p["uv"], g["uv"]))
+            else:
+                misses += 1
+            continue  # a miss scores in the recovered bucket only, never the detected near/far stats
         if not p:
             continue
         if g.get("foot") and p.get("foot"):
@@ -197,7 +237,10 @@ def score(pipeline_map: Dict[Key, dict], gt_map: Dict[Key, dict], w: int, h: int
         all_foot += buckets[half]["foot_px"]
         all_court += buckets[half]["court_m"]
     rep["overall"] = {"foot_px": summarize(all_foot), "court_m": summarize(all_court)}
-    rep["counts"] = {"matched": matched, "misses": misses, "spurious": spurious, "gt_total": len(gt_map)}
+    rep["recovered"] = {"near": summarize(recovered_court["near"]),
+                        "far": summarize(recovered_court["far"])}
+    rep["counts"] = {"matched": matched, "misses": misses, "recovered": recovered,
+                     "spurious": spurious, "gt_total": len(gt_map)}
     return rep
 
 
@@ -214,10 +257,16 @@ def format_report(rep: dict) -> str:
     for half in ("near", "far", "overall"):
         lines.append(f"[{half.upper():7}] foot  {_fmt(rep[half]['foot_px'], 'px')}")
         lines.append(f"          court {_fmt(rep[half]['court_m'], 'm')}")
+    rec = rep.get("recovered", {})
+    if any(rec.get(half, {}).get("n") for half in ("near", "far")):
+        lines.append("- re-ID/interp fills (Schaetzung, not in the detected stats above) " + "-" * 14)
+        for half in ("near", "far"):
+            if rec[half]["n"]:
+                lines.append(f"[RECOV {half[:3]}] court {_fmt(rec[half], 'm')}")
     c = rep["counts"]
     lines.append("-" * 54)
     lines.append(f"matched={c['matched']}  misses(added)={c['misses']}  "
-                 f"spurious={c['spurious']}  gt_total={c['gt_total']}")
+                 f"recovered={c.get('recovered', 0)}  spurious={c['spurious']}  gt_total={c['gt_total']}")
     return "\n".join(lines)
 
 
@@ -276,12 +325,16 @@ def full_from_pipeline(video_id: str, corrections_path: str | None = None,
         pose_feet = {(pr["frame"], pr["track"]): (pr["foot_x"], pr["foot_y"], pr["foot_conf"])
                      for pr in pl.read_parquet(pose_path).iter_rows(named=True)}
 
-    labels = track_labels(pl.read_parquet(cache / "tracks.parquet").to_dicts())
+    track_rows = pl.read_parquet(cache / "tracks.parquet").to_dicts()
+    labels = track_labels(track_rows)
     pm = pipeline_from_detections(pl.read_parquet(cache / "detections.parquet").to_dicts(),
                                   labels, H, foot_k, w, h, pose_feet, pose_conf_thr)
+    # Phase-4: credit re-ID/interp positions that have no detection row of their own (the filled gap).
+    t_to_frame = {round(f["t"], 6): f["frame"] for f in manifest["frames"]}
+    n_overlay = overlay_filled(pm, track_rows, t_to_frame)
     rep = score(pm, gt, w, h)
     rep["meta"] = {"video_id": video_id, "foot_k": foot_k, "w": w, "h": h, "labels": labels,
-                   "pose": bool(pose_feet), "pose_conf_thr": pose_conf_thr}
+                   "pose": bool(pose_feet), "pose_conf_thr": pose_conf_thr, "overlay_filled": n_overlay}
     return rep
 
 
@@ -304,7 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         m = rep["meta"]
         foot_src = f"pose(thr={m['pose_conf_thr']})+bbox(k={m['foot_k']})" if m["pose"] else f"bbox(k={m['foot_k']})"
         print(f"[full mode] video={m['video_id']}  foot={foot_src}  "
-              f"frame={m['w']}x{m['h']}  roles={m['labels']}")
+              f"frame={m['w']}x{m['h']}  filled-overlay={m.get('overlay_filled', 0)}  roles={m['labels']}")
         print(format_report(rep))
         return 0
 

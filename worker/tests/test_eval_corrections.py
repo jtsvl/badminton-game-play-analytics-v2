@@ -158,5 +158,58 @@ class TestScore(unittest.TestCase):
         self.assertEqual(rep["counts"]["misses"], 1)
 
 
+class TestScoreRecovered(unittest.TestCase):
+    """Phase-4: a 'miss' that the pipeline now covers (re-ID / interp fill) counts as recovered, not a
+    miss, and its court error is reported in a SEPARATE bucket so the detected near/far stays honest."""
+
+    def test_covered_miss_is_recovered_and_kept_out_of_detected_buckets(self):
+        w = h = 1000
+        gt = {
+            (1, "B1"): {"foot": (0.5, 0.5), "uv": (0.5, 0.10), "miss": False, "spurious": False},
+            (9, "B1"): {"foot": (0.4, 0.48), "uv": (0.40, 0.0), "miss": True, "spurious": False},
+        }
+        pipe = {
+            (1, "B1"): {"foot": (0.5, 0.5), "uv": (0.5, 0.10)},     # detected, exact -> 0 error
+            (9, "B1"): {"uv": (0.45, 0.0), "filled": True},          # recovered (re-ID/interp), du=0.05
+        }
+        rep = e.score(pipe, gt, w, h)
+        self.assertEqual(rep["counts"]["misses"], 0)
+        self.assertEqual(rep["counts"]["recovered"], 1)
+        # the detected far court_m sees ONLY the genuinely-detected exact point -> mean 0 (not inflated)
+        self.assertAlmostEqual(rep["far"]["court_m"]["mean"], 0.0, places=6)
+        # the recovered point's error is bucketed separately (0.05 of court width)
+        self.assertAlmostEqual(rep["recovered"]["far"]["mean"], 0.05 * COURT_W_M, places=4)
+
+    def test_uncovered_miss_still_counts_as_a_miss(self):
+        gt = {(9, "B1"): {"foot": (0.4, 0.48), "uv": (0.4, 0.0), "miss": True, "spurious": False}}
+        rep = e.score({}, gt, 1000, 1000)
+        self.assertEqual(rep["counts"]["misses"], 1)
+        self.assertEqual(rep["counts"]["recovered"], 0)
+
+
+class TestOverlayFilled(unittest.TestCase):
+    """Phase-4: pull the filled (re-ID/interp) court positions out of tracks.parquet into the pipeline
+    map for frames that have no detection of their own — without overriding a genuine detection."""
+
+    def test_adds_filled_uv_without_overriding_detected(self):
+        pm = {(2, "B1"): {"foot": (0.5, 0.5), "uv": (0.5, 0.10)}}  # genuinely detected at frame 2
+        tracks = [
+            {"t": 0.2, "u": 0.55, "v": 0.05, "role": "far_left", "source": "detected"},  # frame 2 -> skip
+            {"t": 0.3, "u": 0.60, "v": 0.02, "role": "far_left", "source": "interp"},    # frame 3 -> add
+        ]
+        n = e.overlay_filled(pm, tracks, {0.2: 2, 0.3: 3})
+        self.assertEqual(n, 1)
+        self.assertEqual(pm[(2, "B1")]["uv"], (0.5, 0.10))   # detected position untouched
+        self.assertEqual(pm[(3, "B1")]["uv"], (0.60, 0.02))  # filled position added
+        self.assertTrue(pm[(3, "B1")]["filled"])
+
+    def test_unknown_role_or_unmapped_time_is_ignored(self):
+        pm: dict = {}
+        tracks = [{"t": 9.9, "u": 0.5, "v": 0.5, "role": "far_left", "source": "interp"},  # t not in map
+                  {"t": 0.2, "u": 0.5, "v": 0.5, "role": "", "source": "interp"}]          # no role
+        self.assertEqual(e.overlay_filled(pm, tracks, {0.2: 2}), 0)
+        self.assertEqual(pm, {})
+
+
 if __name__ == "__main__":
     unittest.main()

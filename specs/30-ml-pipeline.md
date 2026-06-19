@@ -33,6 +33,25 @@ global tracklet association (**gta-link**, MIT). *Avoid Deep-EIoU (no license).*
 ReID alone (same-club kit) — spatial+motion continuity is primary.
 *Accept:* IDF1/ID-switches under target on labeled clips; correct side/role assignment after manual confirm.
 
+**Built (P1, Phase 4 — far-player robustness, RC3):** when BoT-SORT drops a small/low-contrast player and
+re-acquires them under a fresh id, `enforce_n_tracks` discards that short fragment, leaving a hole. Two layers
+recover it in `gate_track.build_role_tracks` (pure, unit-tested) before output:
+1. **Role re-ID** (`geometry.stitch_role_fragments`): a dropped in-court fragment is re-associated with the role
+   it continues — same court half, frame span **not overlapping** the role's primary coverage (it fills the
+   role's hole), nearest within `max_court_dist`. This recovers **real detected** positions, tagged
+   `source="reid"`; it never fabricates.
+2. **Bounded short-hole interp** (`geometry.fill_track_gaps`): holes of ≤ `GAP_FILL_MAX_FRAMES` (default 8) frames
+   between two anchors are linearly interpolated (`source="interp"`); longer one-sided dropouts are **left
+   absent** (never extrapolated). `tracks.parquet` gains a **`source`** column (`detected`/`reid`/`interp`) so the
+   overlay surfaces re-ID/interp positions as estimates („Schätzung").
+*Measured (f35d0984: far player B1 lost frames 284–355, 69 manual re-adds):* re-ID stitched the two dropped far
+fragments back into B1 → the `eval_corrections` scorecard **misses 69 → 0** (k=0.16) / 69 → 4 (k=0 default),
+recovering 63 real detections + 6 interp fills; the **detected** near/far cm is unchanged (re-ID/interp only add
+previously-absent positions). The recovered far positions carry the deferred-RC2 depth amplification (~1.3 m),
+reported in the scorecard's **separate** recovered bucket, never folded into the detected headline. *Honesty:*
+re-ID recovers identity + lateral position (median ~0.1 m); far-court **depth** stays an estimate (deferred RC2).
+The upstream **recall** cause (far-half detection) is still deferred — see specs/fix-later.md.
+
 ## Stage 4 — Pose (FR-24/25)
 **RTMPose-m/-l top-down** (Apache), fed by the detector (2–4 crops → cheap). RTMPose-26 (body+feet) for footwork;
 wholebody-133 for racket-hand only when needed. Fallbacks: RTMO (wide frames), YOLO11-pose (single-model path).
@@ -42,15 +61,27 @@ Auto-label hard frames offline with ViTPose++/Sapiens (label-only). Optional 3D 
 **Built (P1, foot-accuracy pull-forward):** RTMPose-m **body26 (Halpe-26)** run via **`rtmlib` on ONNXRuntime**
 (no mmcv); `device='mps'` selects the **CoreML EP** (CLAUDE.md sanctions CoreML for RTMPose), one-time NaN probe
 falls back to CPU. Top-down on the detector bboxes → `pose.parquet (frame,track,kp[],kp_score[],foot_x,foot_y,
-foot_conf)`, the foot = mean of the confident ankle keypoints (`geometry.foot_keypoint`). Runs **before**
-`gate_track` (`detect → pose → gate_track`) so the court position uses the real ankle, not the bbox bottom;
-`gate_track` takes the confident pose foot (`USE_POSE_FOOT=1`, `POSE_CONF_THR`) else the Phase-2 bbox nudge —
-the first two layers of the three-layer foot (pose → nudge → Phase-4 head/height grounding). The full keypoint
-array (incl. head) is retained for that occlusion fallback + the stroke stage. *Measured (f35d0984, CoreML, 30 s,
-99.8 % confident feet):* un-fitted pose cut far-court median error 1.6 → 0.5 m vs the raw bbox default; a clip-
-fitted `FOOT_BIAS_K=0.16` still edged it (0.3 m) on its own box-drag answer key. Both off by default; verify per
-clip with the `eval_corrections` full-mode scorecard. *Honesty:* foot keypoints on the tiny far player are noise-
-amplified by the far homography (deferred RC2), so monocular far-court position stays an estimate („Schätzung").
+foot_conf,foot_source)`, the foot = mean of the confident ankle keypoints (`geometry.foot_keypoint`). Runs
+**before** `gate_track` (`detect → pose → gate_track`) so the court position uses the real ankle, not the bbox
+bottom; `gate_track` takes the confident pose foot (`USE_POSE_FOOT=1`, `POSE_CONF_THR`) else the Phase-2 bbox
+nudge. *Measured (f35d0984, CoreML, 30 s, 99.8 % confident feet):* un-fitted pose cut far-court median error
+1.6 → 0.5 m vs the raw bbox default; a clip-fitted `FOOT_BIAS_K=0.16` still edged it (0.3 m) on its own box-drag
+answer key. Both off by default; verify per clip with the `eval_corrections` full-mode scorecard. *Honesty:* foot
+keypoints on the tiny far player are noise-amplified by the far homography (deferred RC2), so monocular far-court
+position stays an estimate („Schätzung").
+
+**Built (P1, Phase 4 — head/height occlusion grounding):** the **third layer** of the three-layer foot
+(pose ankle → head/height → bbox nudge). A second pass (`pose.ground_occluded_feet`, pure helpers
+`geometry.fit_head_foot_model` / `ground_foot_from_head`, unit-tested) learns, **per track**, the head→foot drop
+from that player's own confident, feet-visible frames — measured as `(foot_y − head_y)/(hip_y − head_y)`, i.e. in
+**torso lengths** (head kp 17, mid-hip kp 19, both visible under lower-body occlusion; *not* bbox height, which the
+detector truncates — the RC1 problem this avoids). When the ankle is hidden but head+hip are confident it predicts
+the foot from the head and marks `foot_source="head"` with a lower (head/hip) confidence so it stays an estimate.
+`pose.parquet` gains a **`foot_source`** column (`ankle`/`head`/`none`). *Honest limits (it moves nothing on
+f35d0984 — the lost far player has no detection there at all, so no head either; value is partial-occlusion,
+mostly doubles P3):* real height varies ~±10 %, posture shifts the torso↔leg ratio (a deep lunge compresses it),
+and the low standing camera foreshortens the drop. Verified by **synthetic unit test** (mask the ankle → recover
+foot within tolerance); real/multi-clip verification awaits a partial-occlusion answer key (specs/fix-later.md).
 
 ## Stage 5 — Shuttle tracking + white-wall problem (FR-15/16/17)
 **WASB (MIT) primary; TrackNetV3 (MIT) strong alternative — benchmark both.** White-shuttle-vs-white-wall is the

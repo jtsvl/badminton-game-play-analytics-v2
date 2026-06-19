@@ -36,12 +36,20 @@ real-data `python -m worker.eval_corrections --mode full --video-id <id>` (loads
 
 _Raised 2026-06-19 from the trainer's f35d0984 review; pose stage built + scored same day._
 
-## Missed-detection gaps for the far player (P1) — planned
-On f35d0984 the far player (B1) was **undetected for 72 frames / ~6 s** (idx 284–355) and re-added by hand
-(69 `added` corrections). YOLO11@`conf=0.25,imgsz=1280`+BoT-SORT drop the small/low-contrast far player and
-never re-acquire within the run; `gate_track` has **no gap interpolation**, so the track has a 6 s hole.
-**Fix (planned, Phase 4):** short-gap `(u,v)` interpolation between confident detections + role re-ID after a
-dropout; higher-res inference for the far half (tiling). Shares the pose/occlusion fallback design.
+## Missed-detection gaps for the far player (P1) — re-ID + interp BUILT; recall still deferred
+On f35d0984 the far player (B1) was "undetected" for ~6 s (idx 284–355), re-added by hand (69 `added`).
+**Measure-first finding (2026-06-19):** it was *not* a fillable interpolation gap — B1 is a terminal dropout (lost
+after 282, never re-acquired before the clip ends) and the true path is non-linear (13 m moved). But the far
+player *was* re-detected through most of the span under short-lived track ids (64, 286–337; 68, 342–355) that
+`enforce_n_tracks` discarded. **Built (Phase 4):** role re-ID (`stitch_role_fragments`) re-associates those
+fragments with B1 + bounded short-hole interp (`fill_track_gaps`) — scorecard **misses 69 → 0** (k=0.16) / → 4
+(k=0), recovering real detections; detected near/far cm unchanged; recovered far error (~1.3 m, deferred RC2 depth)
+in a separate scorecard bucket. See specs/30-ml-pipeline.md stage 3.
+**Still deferred (the upstream cause):** far-half detection **recall** — BoT-SORT fragments/loses the small,
+low-contrast far player (`conf=0.25,imgsz=1280`); re-ID mitigates downstream but doesn't fix recall. Wants tiling
+/ higher-res inference for the far half and/or stronger BoT-SORT ReID persistence. Also: **head/height occlusion
+grounding** (`pose.ground_occluded_feet`) is built + unit-tested but **unverified on real data** — it can't help
+this clip (no detection → no head) and needs a partial-occlusion answer key (mostly doubles, P3) to prove.
 
 ## Far-court top-speed inflation (P1 movement tier)
 The two players furthest from the camera show an inflated **top speed** (~30–34 km/h on the
