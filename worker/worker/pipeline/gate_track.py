@@ -10,14 +10,25 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from statistics import median
 
-from ..geometry import ankle_point, apply_homography, enforce_n_tracks, role_assign, smooth_track
+from ..geometry import apply_homography, enforce_n_tracks, foot_point, role_assign, smooth_track
 
 log = logging.getLogger("worker.pipeline.gate_track")
 
 MARGIN = 0.06  # court-normalized gating margin (~37 cm wide / 80 cm long)
+# Interim foot-truncation correction: push the foot down k*bbox-height before projecting (RC1).
+# 0 = off (identical to the old bbox-bottom). k≈0.16 fitted on f35d0984 (see eval_corrections).
+# Used as the FALLBACK when the pose stage has no confident ankle (Phase-3 three-layer foot).
+FOOT_BIAS_K = float(os.environ.get("FOOT_BIAS_K", "0"))
+# Phase-3 pose foot: use the real ankle keypoint for the court position. Default OFF (like FOOT_BIAS_K),
+# enabled after the trainer reviews the numbers — on f35d0984 the un-fitted pose ankle beats the raw
+# bbox bottom big (far 1.6→0.49 m) but a clip-fitted FOOT_BIAS_K=0.16 still edges it (far 0.30 m); see
+# eval_corrections / specs/fix-later.md. The pose stage always runs (keypoints feed Phase 4 + stroke).
+USE_POSE_FOOT = os.environ.get("USE_POSE_FOOT", "0").lower() not in ("0", "", "false", "no")
+POSE_CONF_THR = float(os.environ.get("POSE_CONF_THR", "0.3"))  # min ankle confidence to trust the pose foot
 
 ROLE_TO_SIDESLOT = {
     "near": ("A", 0),
@@ -57,19 +68,34 @@ def run(ctx) -> None:
 
     import polars as pl  # lazy
 
+    # Pose foot (Phase 3): real ankle per (frame, track) when confident; else the bbox nudge below.
+    # Only consulted when USE_POSE_FOOT is set (default off — no silent change to court positions).
+    pose_path = ctx.get("pose_path") or (cache / "pose.parquet")
+    pose_feet: dict[tuple, tuple] = {}
+    if USE_POSE_FOOT and Path(pose_path).exists():
+        for pr in pl.read_parquet(pose_path).iter_rows(named=True):
+            pose_feet[(pr["frame"], pr["track"])] = (pr["foot_x"], pr["foot_y"], pr["foot_conf"])
+
     det = pl.read_parquet(detections_path)
     samples: list[tuple] = []  # (t, track_id, u, v)
     counts: dict[int, int] = {}
+    n_pose = 0
     for r in det.iter_rows(named=True):
         tid = r["track"]
         if tid is None:
             continue
-        ax, ay = ankle_point((r["x"], r["y"], r["w"], r["h"]))
+        pf = pose_feet.get((r["frame"], tid))
+        used_pose = pf is not None and pf[0] is not None and pf[2] >= POSE_CONF_THR
+        if used_pose:
+            ax, ay = pf[0], pf[1]  # real ankle keypoint
+        else:
+            ax, ay = foot_point((r["x"], r["y"], r["w"], r["h"]), FOOT_BIAS_K)  # fallback (Phase 2)
         u, v = apply_homography(H, ax, ay)
         if not (-MARGIN <= u <= 1 + MARGIN and -MARGIN <= v <= 1 + MARGIN):
             continue  # off-court (adjacent court / spectator) → drop
         samples.append((frame_t.get(r["frame"], 0.0), int(tid), u, v))
         counts[int(tid)] = counts.get(int(tid), 0) + 1
+        n_pose += int(used_pose)
 
     if not samples:
         raise RuntimeError("gate_track: no in-court detections after gating (check calibration)")
@@ -100,8 +126,8 @@ def run(ctx) -> None:
 
     _auto_map(store, match_id, roles)
     log.info(
-        "gate_track: kept %d tracks (%s), %d in-court samples, roles=%s",
-        len(keep), discipline, len(samples), roles,
+        "gate_track: kept %d tracks (%s), %d in-court samples (%d pose-foot / %d bbox-fallback), roles=%s",
+        len(keep), discipline, len(samples), n_pose, len(samples) - n_pose, roles,
     )
 
 

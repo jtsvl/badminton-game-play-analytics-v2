@@ -39,6 +39,19 @@ wholebody-133 for racket-hand only when needed. Fallbacks: RTMO (wide frames), Y
 Auto-label hard frames offline with ViTPose++/Sapiens (label-only). Optional 3D later: MonoTrack/MotionBERT (approx).
 *Accept:* keypoint AP adequate for foot placement & swing arm; sanity vs manual on lunges.
 
+**Built (P1, foot-accuracy pull-forward):** RTMPose-m **body26 (Halpe-26)** run via **`rtmlib` on ONNXRuntime**
+(no mmcv); `device='mps'` selects the **CoreML EP** (CLAUDE.md sanctions CoreML for RTMPose), one-time NaN probe
+falls back to CPU. Top-down on the detector bboxes → `pose.parquet (frame,track,kp[],kp_score[],foot_x,foot_y,
+foot_conf)`, the foot = mean of the confident ankle keypoints (`geometry.foot_keypoint`). Runs **before**
+`gate_track` (`detect → pose → gate_track`) so the court position uses the real ankle, not the bbox bottom;
+`gate_track` takes the confident pose foot (`USE_POSE_FOOT=1`, `POSE_CONF_THR`) else the Phase-2 bbox nudge —
+the first two layers of the three-layer foot (pose → nudge → Phase-4 head/height grounding). The full keypoint
+array (incl. head) is retained for that occlusion fallback + the stroke stage. *Measured (f35d0984, CoreML, 30 s,
+99.8 % confident feet):* un-fitted pose cut far-court median error 1.6 → 0.5 m vs the raw bbox default; a clip-
+fitted `FOOT_BIAS_K=0.16` still edged it (0.3 m) on its own box-drag answer key. Both off by default; verify per
+clip with the `eval_corrections` full-mode scorecard. *Honesty:* foot keypoints on the tiny far player are noise-
+amplified by the far homography (deferred RC2), so monocular far-court position stays an estimate („Schätzung").
+
 ## Stage 5 — Shuttle tracking + white-wall problem (FR-15/16/17)
 **WASB (MIT) primary; TrackNetV3 (MIT) strong alternative — benchmark both.** White-shuttle-vs-white-wall is the
 hardest case (video-camouflage: low appearance, distinct motion). Layered mitigations:

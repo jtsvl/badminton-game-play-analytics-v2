@@ -38,7 +38,33 @@ ROLE_COLOR = {
     "far_left": (23, 88, 166), "far_right": (96, 156, 222),
     "near": (250, 136, 50), "far": (23, 88, 166),
 }
+# colour keyed by the on-screen label ("A1"…) — for corrections, which carry labels not internal roles
+LABEL_COLOR = {ROLE_LABEL[k]: v for k, v in ROLE_COLOR.items()}
 OUT_W = 1280
+
+
+def resolve_cors(cors) -> dict:
+    """Collapse a frame's corrections to one effective override per player label.
+    Returns {label: {"box":[x,y,w,h]|None, "foot":[nx,ny]|None, "uv":[u,v]|None,
+                     "label":str|None, "spurious":bool}} — all normalised 0..1.
+    Geometry precedence: an explicit box (bbox/added) wins; otherwise the latest foot_norm."""
+    out: dict[str, dict] = {}
+    for c in cors:
+        role = c.get("role")
+        if not role:
+            continue
+        o = out.setdefault(role, {"box": None, "foot": None, "uv": None, "label": None, "spurious": False})
+        if c.get("type") == "spurious":
+            o["spurious"] = True
+        if c.get("correct_role"):           # wrong_role → relabel
+            o["label"] = c["correct_role"]
+        if c.get("bbox"):                   # bbox/added carry an explicit box
+            o["box"] = c["bbox"]
+        if c.get("foot_norm"):
+            o["foot"] = c["foot_norm"]
+        if c.get("court_uv"):
+            o["uv"] = c["court_uv"]
+    return out
 
 
 @dataclass
@@ -114,7 +140,7 @@ def kept_detections(data: DebugData, idx: int) -> list[dict]:
     return out
 
 
-def annotate(data: DebugData, idx: int, *, show_all=True, show_court=True, show_map=True, hide=()) -> Image.Image:
+def annotate(data: DebugData, idx: int, *, show_all=True, show_court=True, show_map=True, hide=(), cors=()) -> Image.Image:
     import polars as pl
 
     fmeta = data.frames[idx]
@@ -123,6 +149,7 @@ def annotate(data: DebugData, idx: int, *, show_all=True, show_court=True, show_
     sw = max(W, H) / 640
     font = ImageFont.load_default(size=int(max(W, H) * 0.02))
     kept_ids = list(data.role_by_tid)
+    cor = resolve_cors(cors)   # {label: effective override} — moves the bold box/dot/label/map-dot
 
     img = Image.open(data.cache / "frames" / f"{fmeta['frame']:06d}.jpg").convert("RGB")
     d = ImageDraw.Draw(img)
@@ -135,16 +162,43 @@ def annotate(data: DebugData, idx: int, *, show_all=True, show_court=True, show_
         d.line([*[tuple(p) for p in data.corners], tuple(data.corners[0])], fill=(255, 255, 255), width=int(sw * 2.2))
         d.line([apply_homography(data.h_uv2px, 0, 0.5), apply_homography(data.h_uv2px, 1, 0.5)], fill=(255, 255, 255), width=int(sw * 1.6))
 
-    for r in data.det.filter((pl.col("frame") == fmeta["frame"]) & (pl.col("track").is_in(kept_ids))).iter_rows(named=True):
-        role = data.role_by_tid.get(int(r["track"]), "")
-        if ROLE_LABEL.get(role, role) in hide:   # hidden player → don't bake the bold box/dot/label
-            continue
-        col = ROLE_COLOR.get(role, (250, 136, 50))
-        x, y, w, h = r["x"], r["y"], r["w"], r["h"]
+    def draw_player(x, y, w, h, col, text):   # bold box + foot dot + label, at whatever (x,y,w,h) it's given
         d.rectangle([x, y, x + w, y + h], outline=col, width=int(sw * 3))
         ax, ay = ankle_point((x, y, w, h))
         d.ellipse([ax - sw * 5, ay - sw * 5, ax + sw * 5, ay + sw * 5], fill=col, outline=(255, 255, 255), width=int(sw))
-        d.text((x, y - max(W, H) * 0.026), ROLE_LABEL.get(role, role), fill=col, font=font, stroke_width=int(sw), stroke_fill=(0, 0, 0))
+        d.text((x, y - max(W, H) * 0.026), text, fill=col, font=font, stroke_width=int(sw), stroke_fill=(0, 0, 0))
+
+    drawn = set()   # labels already baked from the parquet → don't double-draw as added/missing below
+    for r in data.det.filter((pl.col("frame") == fmeta["frame"]) & (pl.col("track").is_in(kept_ids))).iter_rows(named=True):
+        role = data.role_by_tid.get(int(r["track"]), "")
+        label = ROLE_LABEL.get(role, role)
+        if label in hide:   # hidden player → don't bake the bold box/dot/label
+            continue
+        drawn.add(label)
+        o = cor.get(label)
+        col = ROLE_COLOR.get(role, (250, 136, 50))
+        x, y, w, h = r["x"], r["y"], r["w"], r["h"]
+        if o and o["box"]:                                   # explicit corrected box
+            x, y, w, h = o["box"][0] * W, o["box"][1] * H, o["box"][2] * W, o["box"][3] * H
+        elif o and o["foot"]:                                # position fix → slide the box to the new ankle
+            x, y = o["foot"][0] * W - w / 2, o["foot"][1] * H - h
+        if o and o["spurious"]:                              # "kein Spieler" → thin struck box, no bold marker
+            d.rectangle([x, y, x + w, y + h], outline=(120, 120, 120), width=int(sw))
+            d.line([x, y, x + w, y + h], fill=(200, 80, 80), width=int(sw))
+            d.line([x + w, y, x, y + h], fill=(200, 80, 80), width=int(sw))
+            continue
+        draw_player(x, y, w, h, col, (o["label"] if o else None) or label)
+
+    for label, o in cor.items():                             # added / missing players (no parquet detection)
+        if label in drawn or label in hide or o["spurious"]:
+            continue
+        col = LABEL_COLOR.get(label, (250, 136, 50))
+        if o["box"]:
+            draw_player(o["box"][0] * W, o["box"][1] * H, o["box"][2] * W, o["box"][3] * H, col, o["label"] or label)
+        elif o["foot"]:
+            ax, ay = o["foot"][0] * W, o["foot"][1] * H
+            d.ellipse([ax - sw * 5, ay - sw * 5, ax + sw * 5, ay + sw * 5], fill=col, outline=(255, 255, 255), width=int(sw))
+            d.text((ax, ay - max(W, H) * 0.046), o["label"] or label, fill=col, font=font, stroke_width=int(sw), stroke_fill=(0, 0, 0))
 
     if show_map:
         mw = int(max(W, H) * 0.11)
@@ -173,15 +227,31 @@ def annotate(data: DebugData, idx: int, *, show_all=True, show_court=True, show_
         cx = mx + mw / 2
         d.line([(cx, my), (cx, fy(6.70 - 1.98))], fill=LN, width=int(sw))
         d.line([(cx, fy(6.70 + 1.98)), (cx, my + mh)], fill=LN, width=int(sw))
+        def map_dot(u, v, col):
+            px, py = mx + u * mw, my + v * mh
+            d.ellipse([px - sw * 6, py - sw * 6, px + sw * 6, py + sw * 6], fill=col, outline=(255, 255, 255), width=int(sw))
+
+        covered = set()
         for tid, role in data.role_by_tid.items():
-            if ROLE_LABEL.get(role, role) in hide:   # hidden player → no map dot either
+            label = ROLE_LABEL.get(role, role)
+            covered.add(label)
+            if label in hide:   # hidden player → no map dot either
+                continue
+            o = cor.get(label)
+            if o and o["spurious"]:
+                continue
+            if o and o["uv"]:                            # corrected court position
+                map_dot(o["uv"][0], o["uv"][1], ROLE_COLOR.get(role, (250, 136, 50)))
                 continue
             sub = sorted(data.trk.filter(pl.col("track_id") == tid).iter_rows(named=True), key=lambda r: abs(r["t"] - t))
             if not sub:
                 continue
-            col = ROLE_COLOR.get(role, (250, 136, 50))
-            px, py = mx + sub[0]["u"] * mw, my + sub[0]["v"] * mh
-            d.ellipse([px - sw * 6, py - sw * 6, px + sw * 6, py + sw * 6], fill=col, outline=(255, 255, 255), width=int(sw))
+            map_dot(sub[0]["u"], sub[0]["v"], ROLE_COLOR.get(role, (250, 136, 50)))
+
+        for label, o in cor.items():                     # added / missing players' court dots
+            if label in covered or label in hide or o["spurious"] or not o["uv"]:
+                continue
+            map_dot(o["uv"][0], o["uv"][1], LABEL_COLOR.get(label, (250, 136, 50)))
 
     return img.resize((OUT_W, int(OUT_W * H / W)))
 
@@ -217,9 +287,13 @@ textarea{background:#1a1a1c;color:#eee;border:1px solid #333;border-radius:6px;p
 .marker:active{cursor:grabbing}
 /* corrected marker: subtle white ring glow */
 .marker.corrected{box-shadow:0 0 0 3px rgba(255,255,255,0.9),0 0 10px 2px rgba(255,255,255,0.25)}
-/* ghost dot showing the original (pre-correction) position */
+/* "kein Spieler" marker: dimmed + struck */
+.marker.spurious{opacity:.45;box-shadow:none;filter:grayscale(.6);text-decoration:line-through}
+.mmarker.spurious{opacity:.4;filter:grayscale(.6)}
+/* ghost markers showing the original (pre-correction) position */
 .orig-dot{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;
   border:2px dashed rgba(255,255,255,0.45);background:transparent;pointer-events:none}
+.orig-box{position:absolute;border:2px dashed rgba(255,255,255,0.42);pointer-events:none;border-radius:2px}
 /* draggable rings over the court-map dots (Vogelperspektive) */
 .mmarker{position:absolute;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;
   border:3px solid #fff;background:transparent;cursor:grab;touch-action:none;box-shadow:0 0 0 1px rgba(0,0,0,.6)}
@@ -337,6 +411,7 @@ let corrections = {};     // {frameIdx: [correction, ...]}
 let els = {dot:{}, ring:{}, box:{}};  // live overlay elements per role, for live sync
 let suppressClick = false;            // swallow the click that ends a box-draw drag
 let hidden = new Set();               // roles whose overlay + baked box are hidden (declutter overlaps)
+let corrVersion = 0;                  // bumped on every save/delete → busts the <img> cache so the re-baked frame loads
 const $ = id => document.getElementById(id);
 const round4 = x => Math.round(x * 10000) / 10000;
 const clampN = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
@@ -352,10 +427,14 @@ function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n>>
 
 // ── navigation ───────────────────────────────────────────────────────────────
 
+function frameSrc() {
+  const hide = [...hidden].sort().join(',');
+  return `/frame?idx=${i}&all=${$('all').checked?1:0}&court=${$('court').checked?1:0}&map=${$('map').checked?1:0}&hide=${hide}&v=${corrVersion}`;
+}
+
 async function render() {
   closePopup();
-  const hide = [...hidden].sort().join(',');
-  $('frame').src = `/frame?idx=${i}&all=${$('all').checked?1:0}&court=${$('court').checked?1:0}&map=${$('map').checked?1:0}&hide=${hide}`;
+  $('frame').src = frameSrc();
   $('sl').value = i; $('num').value = i;
   updateMeta();
   await loadDets();
@@ -413,59 +492,109 @@ function ovPos(e) {
   return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
 }
 
+// collapse this frame's corrections to one effective override per label (mirrors the server)
+function resolveCors() {
+  const out = {};
+  for (const c of (corrections[i] || [])) {
+    const o = out[c.role] || (out[c.role] = {box:null, foot:null, uv:null, label:null, spurious:false, origFoot:null, origBox:null});
+    if (c.type === 'spurious') o.spurious = true;
+    if (c.correct_role) o.label = c.correct_role;
+    if (c.bbox) o.box = c.bbox;
+    if (c.foot_norm) o.foot = c.foot_norm;
+    if (c.court_uv) o.uv = c.court_uv;
+    if (c.orig_foot) o.origFoot = c.orig_foot;
+    if (c.orig_bbox) o.origBox = c.orig_bbox;
+  }
+  return out;
+}
+
+// subtle dashed rectangle marking a box's former position
+function addGhostBox(box, color) {
+  const g = document.createElement('div');
+  g.className = 'orig-box';
+  g.style.left = (box[0]*100)+'%'; g.style.top = (box[1]*100)+'%';
+  g.style.width = (box[2]*100)+'%'; g.style.height = (box[3]*100)+'%';
+  g.style.borderColor = color ? hexA(color, .42) : 'rgba(255,255,255,.42)';
+  $('overlay').appendChild(g);
+}
+
 function buildOverlay() {
   const ov = $('overlay');
   ov.innerHTML = '';
   els = {dot: {}, ring: {}, box: {}};
   const boxMode = $('boxedit').checked;
+  const mapOn = mapRect && $('map').checked;
+  const cors = resolveCors();
 
-  // editable person boxes (drawn first so the dots/handles sit on top)
+  // one row per detection, plus any corrected label with no detection (added / missing players)
+  const detByLabel = {};
+  for (const d of dets) detByLabel[d.label] = d;
+  const rows = dets.map(d => ({label: d.label, det: d, cor: cors[d.label]}));
+  for (const label in cors) if (!(label in detByLabel)) rows.push({label, det: null, cor: cors[label]});
+
+  // effective (corrected if present) + original positions per row
+  const resolve = ({label, det, cor}) => ({
+    label, det, cor,
+    color: ROLE_COLORS[label] || '#FA8832',
+    foot: (cor && cor.foot) || (det && det.ankle) || null,
+    uv:   (cor && cor.uv)   || (det && det.uv)   || null,
+    box:  (cor && cor.box)  || (det && det.bbox) || null,
+    origFoot: det ? det.ankle : (cor && cor.origFoot) || null,
+    origBox:  (cor && cor.origBox) || (det && det.bbox) || null,
+    moved: !!(cor && (cor.foot || cor.box)),
+  });
+
+  // editable person boxes first, so the dots/handles sit on top
   if (boxMode) {
-    for (const d of dets) if (!hidden.has(d.label)) addEditableBox({x:d.bbox[0], y:d.bbox[1], w:d.bbox[2], h:d.bbox[3]}, d.label, false);
+    for (const row of rows) {
+      if (hidden.has(row.label)) continue;
+      const r = resolve(row);
+      if (!r.box) continue;
+      if (r.cor && r.cor.box && r.origBox) addGhostBox(r.origBox, r.color);   // former box
+      addEditableBox({x:r.box[0], y:r.box[1], w:r.box[2], h:r.box[3]}, r.label, false);
+    }
   }
 
-  // index latest correction per role for the current frame
-  const frameCors = {};
-  for (const c of (corrections[i] || [])) frameCors[c.role] = c;
+  for (const row of rows) {
+    if (hidden.has(row.label)) continue;
+    const r = resolve(row);
+    const drag = r.det || {label: r.label, ankle: r.foot, uv: r.uv, bbox: r.box};   // pseudo-det for added/missing
 
-  // video foot dots — drag corrects the position; the map ring follows live
-  for (const d of dets) {
-    if (hidden.has(d.label)) continue;
-    const cor = frameCors[d.label];
-    // ghost dot at the original (pre-correction) ankle position
-    if (cor && cor.orig_foot) {
+    // ghost dot at the former position when this player was moved
+    if (r.cor && r.moved && r.origFoot) {
       const g = document.createElement('div');
-      g.className = 'orig-dot';
-      g.style.left = (cor.orig_foot[0] * 100) + '%';
-      g.style.top  = (cor.orig_foot[1] * 100) + '%';
-      g.style.borderColor = ROLE_COLORS[d.label] || '#FA8832';
+      g.className = 'orig-dot'; g.dataset.role = r.label;
+      g.style.left = (r.origFoot[0] * 100) + '%';
+      g.style.top  = (r.origFoot[1] * 100) + '%';
+      g.style.borderColor = r.color;
       ov.appendChild(g);
     }
-    const m = document.createElement('div');
-    m.className = 'marker' + (cor ? ' corrected' : '');
-    m.style.left = (d.ankle[0] * 100) + '%';
-    m.style.top  = (d.ankle[1] * 100) + '%';
-    m.style.background = ROLE_COLORS[d.label] || '#FA8832';
-    m.textContent = d.label;
-    m.title = d.label + ' — ziehen: Position (Bild + Karte synchron)';
-    attachPosDrag(m, d);
-    ov.appendChild(m);
-    els.dot[d.label] = m;
-  }
 
-  // matching rings on the court map — drag corrects the court position; the video dot follows live
-  if (mapRect && $('map').checked) {
-    for (const d of dets) {
-      if (!d.uv || hidden.has(d.label)) continue;
+    // video foot dot — drag corrects the position; the map ring follows live
+    if (r.foot) {
       const m = document.createElement('div');
-      m.className = 'mmarker';
-      m.style.left = ((mapRect.x + d.uv[0] * mapRect.w) * 100) + '%';
-      m.style.top  = ((mapRect.y + d.uv[1] * mapRect.h) * 100) + '%';
-      m.style.borderColor = ROLE_COLORS[d.label] || '#FA8832';
-      m.title = d.label + ' — ziehen: Court-Position (Karte + Bild synchron)';
-      attachRingDrag(m, d);
+      m.className = 'marker' + (r.cor ? ' corrected' : '') + (r.cor && r.cor.spurious ? ' spurious' : '');
+      m.style.left = (r.foot[0] * 100) + '%';
+      m.style.top  = (r.foot[1] * 100) + '%';
+      m.style.background = r.color;
+      m.textContent = (r.cor && r.cor.label) || r.label;
+      m.title = r.label + ' — ziehen: Position (Bild + Karte synchron)';
+      attachPosDrag(m, drag);
       ov.appendChild(m);
-      els.ring[d.label] = m;
+      els.dot[r.label] = m;
+    }
+
+    // matching ring on the court map — drag corrects the court position; the video dot follows live
+    if (mapOn && r.uv) {
+      const m = document.createElement('div');
+      m.className = 'mmarker' + (r.cor && r.cor.spurious ? ' spurious' : '');
+      m.style.left = ((mapRect.x + r.uv[0] * mapRect.w) * 100) + '%';
+      m.style.top  = ((mapRect.y + r.uv[1] * mapRect.h) * 100) + '%';
+      m.style.borderColor = r.color;
+      m.title = r.label + ' — ziehen: Court-Position (Karte + Bild synchron)';
+      attachRingDrag(m, drag);
+      ov.appendChild(m);
+      els.ring[r.label] = m;
     }
   }
 }
@@ -765,20 +894,23 @@ async function save(c) {
   for (let k = arr.length - 1; k >= 0; k--) if (arr[k].role === c.role && arr[k].type === c.type) arr.splice(k, 1);
   arr.push(c);
   closePopup();
-  updateMeta();      // refresh the ⚑ count without reloading the frame (keeps a dragged marker in place)
+  corrVersion++;                 // re-bake: the bold box/dot/label + map-dot move to the corrected spot
+  $('frame').src = frameSrc();
+  updateMeta();
   renderList();
   renderFlagBar();
-  buildOverlay();    // apply corrected highlight + ghost dot immediately
+  buildOverlay();                // corrections-aware → marker stays at the corrected position, glow + ghost applied
 }
 
 async function deleteCorrection(fidx, cidx) {
   await fetch(`/correct?frame=${fidx}&idx=${cidx}`, {method: 'DELETE'});
   corrections[fidx].splice(cidx, 1);
   if (!corrections[fidx].length) delete corrections[fidx];
+  corrVersion++;
   updateMeta();
   renderList();
   renderFlagBar();
-  if (fidx === i) buildOverlay();   // refresh highlight state for the current frame
+  if (fidx === i) { $('frame').src = frameSrc(); buildOverlay(); }   // restore the original bake + overlay
 }
 
 // ── sidebar rendering ────────────────────────────────────────────────────────────
@@ -895,11 +1027,17 @@ def _serve(data: DebugData, video_id: str, port: int) -> None:
 
     _load()
 
+    def _cor_sig(idx: int) -> str:
+        """Cache key for the frame's correction state. Every save/delete assigns a fresh _id,
+        so the set of _ids on a frame changes exactly when its corrections do."""
+        return ",".join(str(c["_id"]) for c in corrections.get(idx, []))
+
     @lru_cache(maxsize=512)
-    def render_jpeg(idx: int, show_all: bool, show_court: bool, show_map: bool, hide_key: str = "") -> bytes:
+    def render_jpeg(idx: int, show_all: bool, show_court: bool, show_map: bool, hide_key: str = "", cor_sig: str = "") -> bytes:
         hide = tuple(h for h in hide_key.split(",") if h)
         buf = io.BytesIO()
-        annotate(data, idx, show_all=show_all, show_court=show_court, show_map=show_map, hide=hide).save(buf, "JPEG", quality=85)
+        annotate(data, idx, show_all=show_all, show_court=show_court, show_map=show_map,
+                 hide=hide, cors=corrections.get(idx, [])).save(buf, "JPEG", quality=85)
         return buf.getvalue()
 
     class Handler(BaseHTTPRequestHandler):
@@ -930,7 +1068,8 @@ def _serve(data: DebugData, video_id: str, port: int) -> None:
                 q = parse_qs(u.query)
                 idx = max(0, min(nmax, int(q.get("idx", ["0"])[0])))
                 hide_key = ",".join(sorted(h for h in q.get("hide", [""])[0].split(",") if h))
-                png = render_jpeg(idx, q.get("all", ["1"])[0] == "1", q.get("court", ["1"])[0] == "1", q.get("map", ["1"])[0] == "1", hide_key)
+                png = render_jpeg(idx, q.get("all", ["1"])[0] == "1", q.get("court", ["1"])[0] == "1",
+                                  q.get("map", ["1"])[0] == "1", hide_key, _cor_sig(idx))
                 self._send_bytes(png, "image/jpeg")
                 return
             if u.path == "/dets":

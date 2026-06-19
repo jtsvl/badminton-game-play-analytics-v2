@@ -3,7 +3,6 @@
 Pure math only — no numpy/cv2/torch — so these run under the dev extra without the ml stack.
 Expected values are hand-computed from clean affine cases.
 """
-import math
 import unittest
 
 from worker import geometry as g
@@ -75,6 +74,54 @@ class TestAnklePoint(unittest.TestCase):
     def test_bottom_center_of_top_left_bbox(self):
         # bbox = (x, y, w, h) top-left + size
         self.assertEqual(g.ankle_point((100.0, 200.0, 40.0, 80.0)), (120.0, 280.0))
+
+
+class TestFootPoint(unittest.TestCase):
+    def test_default_k_is_identical_to_ankle_point(self):
+        bbox = (100.0, 200.0, 40.0, 80.0)
+        self.assertEqual(g.foot_point(bbox), g.ankle_point(bbox))
+
+    def test_biases_foot_down_by_k_times_height(self):
+        # Correct the detector's bbox-bottom truncation: push the foot down k*height.
+        fx, fy = g.foot_point((100.0, 200.0, 40.0, 80.0), 0.25)
+        self.assertEqual(fx, 120.0)            # x unchanged (centre)
+        self.assertEqual(fy, 280.0 + 0.25 * 80.0)  # 280 + 20 = 300
+
+
+class TestFootFromKeypoints(unittest.TestCase):
+    """Phase-3 durable foot: ankle/foot keypoint when confident, else the Phase-2 bbox nudge."""
+
+    def _kp(self):
+        kp = [(0.0, 0.0)] * 26  # Halpe-26
+        kp[15], kp[16] = (100.0, 500.0), (120.0, 510.0)  # left/right ankle
+        return kp
+
+    def test_confident_ankles_give_mean_ankle_foot(self):
+        scores = [0.0] * 26
+        scores[15], scores[16] = 0.9, 0.8
+        foot = g.foot_from_keypoints(self._kp(), scores, bbox=(0.0, 0.0, 200.0, 400.0),
+                                     k_fallback=0.16, conf_thr=0.3)
+        self.assertAlmostEqual(foot[0], 110.0)  # mean ankle x
+        self.assertAlmostEqual(foot[1], 505.0)  # mean ankle y
+
+    def test_low_confidence_falls_back_to_bbox_nudge(self):
+        scores = [0.0] * 26
+        scores[15], scores[16] = 0.1, 0.05  # both below conf_thr
+        bbox = (0.0, 0.0, 200.0, 400.0)
+        foot = g.foot_from_keypoints(self._kp(), scores, bbox=bbox, k_fallback=0.16, conf_thr=0.3)
+        self.assertEqual(foot, g.foot_point(bbox, 0.16))
+
+    def test_empty_keypoints_falls_back(self):
+        bbox = (0.0, 0.0, 10.0, 20.0)
+        self.assertEqual(g.foot_from_keypoints([], [], bbox=bbox, k_fallback=0.0),
+                         g.foot_point(bbox, 0.0))
+
+    def test_foot_keypoint_reports_zero_conf_when_all_below_threshold(self):
+        scores = [0.0] * 26
+        scores[15], scores[16] = 0.1, 0.2
+        fk = g.foot_keypoint(self._kp(), scores, conf_thr=0.3)
+        self.assertIsNotNone(fk)
+        self.assertEqual(fk[2], 0.0)  # conf 0 => caller must fall back
 
 
 class TestNetDepth(unittest.TestCase):

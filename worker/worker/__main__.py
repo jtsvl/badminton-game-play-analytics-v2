@@ -2,7 +2,7 @@
 
 Job `stage` selects the slice to run, honoring the gates (specs/40-worker-contract.md):
   ingest    → [ingest]                                 then match.status='calibrating'
-  calibrate → [calibrate,detect,gate_track,aggregate,overlay]  then match.status='review'
+  calibrate → [calibrate,detect,pose,gate_track,aggregate,overlay]  then match.status='review'
 The trainer confirms corners in the web UI between the two jobs.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .pipeline import StageContext, run_pipeline
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("worker")
 
-RESUME_STAGES = ["calibrate", "detect", "gate_track", "aggregate", "overlay"]
+RESUME_STAGES = ["calibrate", "detect", "pose", "gate_track", "aggregate", "overlay"]
 
 
 def _slice_for(job: dict) -> tuple[list[str], str | None]:
@@ -71,6 +71,12 @@ def main() -> None:
         from .verify import verify_cli
 
         verify_cli(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "import-corrections":
+        from .import_corrections import import_cli
+
+        import_cli(sys.argv[2:])
         return
 
     once = "--once" in sys.argv[1:]  # drain queued jobs then exit (dev / cron)

@@ -22,15 +22,16 @@ Studio; it owns no HTTP surface — it **polls** `processing_jobs`, does work, a
 
 ## Stage order & I/O
 Stages mirror `30-ml-pipeline.md`. Each stage reads the frame cache + prior artifacts and writes the next.
-`stage` string ∈ `ingest · calibrate · detect · gate_track · pose · shuttle · rally_hit · stroke · aggregate · overlay`.
+`stage` string ∈ `ingest · calibrate · detect · pose · gate_track · shuttle · rally_hit · stroke · aggregate · overlay`.
+(pose runs **before** gate_track: it supplies the ankle foot that gate_track projects instead of the bbox bottom.)
 
 | Stage | Reads | Writes |
 |---|---|---|
 | ingest | storage video | frame cache, `match_videos` fps/dims/duration |
 | calibrate | frames, user corners | `court_calibrations` (homography, mask_polygon, state) |
 | detect | frames | detections.parquet `(frame,track?,x,y,w,h,score)` |
-| gate_track | detections, homography | tracks.parquet `(t,track_id,u,v,role)` (in-court only) |
-| pose | frames, tracks | pose.parquet `(t,track_id,kp[])` |
+| pose | frames, detections | pose.parquet `(frame,track,kp[],kp_score[],foot_x,foot_y,foot_conf)` |
+| gate_track | detections, pose, homography | tracks.parquet `(t,track_id,u,v,role)` (in-court only) |
 | shuttle | frames, bg-median | shuttle.parquet `(t,u,v,visibility)` |
 | rally_hit | shuttle, tracks | `rallies`, `events`(type=hit) |
 | stroke | pose, shuttle, court xy | `events`(hit shot_type), `player_shot_stats` |

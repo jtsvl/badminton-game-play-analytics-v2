@@ -22,6 +22,8 @@ ml = [
   "lap>=0.5.12",        # linear assignment for BoT-SORT/ByteTrack (ultralytics tracker dependency)
   "polars>=1.0",        # Parquet intermediates (detections/tracks); pulled transitively by ultralytics
   "pillow>=10.0",       # JPEG frame cache + calibration still (PyAV frame.to_image)
+  "rtmlib>=0.0.13",     # RTMPose top-down inference w/o mmcv (Apache); pose stage 4
+  "onnxruntime>=1.18",  # RTMPose backend; device='mps' -> CoreML EP on Apple Silicon (CLAUDE.md)
 ]
 dev = [
   "pytest>=8.3",
