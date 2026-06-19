@@ -7,8 +7,10 @@ from typing import Callable, Dict, List
 log = logging.getLogger("worker.pipeline")
 
 # Ordered stage names (40-worker-contract.md). Side-angle videos run a reduced subset.
+# pose runs BEFORE gate_track: it derives the foot from the real ankle keypoint, which gate_track then
+# projects through the homography instead of the bbox bottom (specs/30-ml-pipeline.md stage 4).
 STAGE_ORDER: List[str] = [
-    "ingest", "calibrate", "detect", "gate_track", "pose",
+    "ingest", "calibrate", "detect", "pose", "gate_track",
     "shuttle", "rally_hit", "stroke", "aggregate", "overlay",
 ]
 SIDE_ANGLE_STAGES: List[str] = ["ingest", "calibrate", "detect", "pose", "shuttle", "rally_hit", "stroke", "overlay"]
@@ -20,7 +22,7 @@ class StageContext(dict):
 
 def _todo(name: str) -> Callable[[StageContext], None]:
     def stage(ctx: StageContext) -> None:
-        # P2/P3 stages (pose, shuttle, rally_hit, stroke) still stubbed.
+        # P2 stages (shuttle, rally_hit, stroke) still stubbed; pose is real (Phase 3 foot fix).
         log.info("stage %s: not yet implemented (stub)", name)
     stage.__name__ = name
     return stage
@@ -36,9 +38,9 @@ def _lazy(name: str) -> Callable[[StageContext], None]:
     return stage
 
 
-# Real stages (P1 reliable movement tier). pose/shuttle/rally_hit/stroke stay stubbed for P2/P3.
-# A name not listed here runs the no-op _todo stub.
-_REAL = ("ingest", "calibrate", "detect", "gate_track", "aggregate", "overlay")
+# Real stages. pose is the Phase-3 durable foot fix (RTMPose); shuttle/rally_hit/stroke stay stubbed
+# for P2/P3. A name not listed here runs the no-op _todo stub.
+_REAL = ("ingest", "calibrate", "detect", "pose", "gate_track", "aggregate", "overlay")
 STAGES: Dict[str, Callable[[StageContext], None]] = {name: _todo(name) for name in STAGE_ORDER}
 STAGES.update({name: _lazy(name) for name in _REAL})
 

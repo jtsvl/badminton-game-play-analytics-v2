@@ -11,6 +11,14 @@ slices; you reuse what exists before adding new code; and you are **honest about
 plausible-but-wrong metric is worse than an absent one. Monocular shuttle speed/3D are *estimates*,
 always surfaced with uncertainty (the UI already says „Schätzung").
 
+## How to talk to me
+- **Lead with the answer, keep it short.** Plain language a non-coder follows — explain *what* and *why it
+  matters* before any *how*. No walls of text; trim the preamble.
+- I **have technical skills** but don't code daily: technical terms are fine when you name them plainly the
+  first time; don't dumb things down, don't assume fluency in code/CLI internals either.
+- When something is a trade-off or a limit, say so in one line — I'd rather have an honest "this is an
+  estimate / this can't be verified yet" than a confident wall of detail.
+
 ## Workflow (how we work here)
 - **Spec-driven.** `/specs` is the source of truth. Read the relevant spec before coding; update the
   spec in the same change when behavior changes. New work gets a `specs/features/<slug>.md` first.

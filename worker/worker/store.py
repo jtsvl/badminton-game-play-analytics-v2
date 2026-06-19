@@ -169,6 +169,15 @@ class Store:
             on_conflict="video_id,subject",
         ).execute()
 
+    def upsert_detection_corrections(self, rows: List[dict]) -> None:
+        """Persist verify-tool corrections (the scorecard answer key). Idempotent on (video_id,source_id)
+        so re-importing the same corrections.json replaces rather than duplicates (0004 migration)."""
+        if not rows:
+            return
+        self._sb.table("detection_corrections").upsert(
+            rows, on_conflict="video_id,source_id"
+        ).execute()
+
     def log_job_run(
         self, job: str, match_id: Optional[str], is_ok: bool, detail: str = ""
     ) -> None:

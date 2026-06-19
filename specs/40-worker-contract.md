@@ -22,15 +22,16 @@ Studio; it owns no HTTP surface — it **polls** `processing_jobs`, does work, a
 
 ## Stage order & I/O
 Stages mirror `30-ml-pipeline.md`. Each stage reads the frame cache + prior artifacts and writes the next.
-`stage` string ∈ `ingest · calibrate · detect · gate_track · pose · shuttle · rally_hit · stroke · aggregate · overlay`.
+`stage` string ∈ `ingest · calibrate · detect · pose · gate_track · shuttle · rally_hit · stroke · aggregate · overlay`.
+(pose runs **before** gate_track: it supplies the ankle foot that gate_track projects instead of the bbox bottom.)
 
 | Stage | Reads | Writes |
 |---|---|---|
 | ingest | storage video | frame cache, `match_videos` fps/dims/duration |
 | calibrate | frames, user corners | `court_calibrations` (homography, mask_polygon, state) |
 | detect | frames | detections.parquet `(frame,track?,x,y,w,h,score)` |
-| gate_track | detections, homography | tracks.parquet `(t,track_id,u,v,role)` (in-court only) |
-| pose | frames, tracks | pose.parquet `(t,track_id,kp[])` |
+| pose | frames, detections | pose.parquet `(frame,track,kp[],kp_score[],foot_x,foot_y,foot_conf,foot_source)` |
+| gate_track | detections, pose, homography | tracks.parquet `(t,track_id,u,v,role,source)` (in-court only) |
 | shuttle | frames, bg-median | shuttle.parquet `(t,u,v,visibility)` |
 | rally_hit | shuttle, tracks | `rallies`, `events`(type=hit) |
 | stroke | pose, shuttle, court xy | `events`(hit shot_type), `player_shot_stats` |
@@ -53,10 +54,16 @@ Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web'
 - After detection+tracking, set `matches.status='awaiting_mapping'` until the trainer confirms `match_players.track_label`
   (identity mapping), then continue to stroke/aggregate.
 - Estimates (`fastest`, speeds) carry their estimate nature (the UI labels them; don't present as measured).
+- Phase-4 recovery is self-labelling: `tracks.parquet.source` ∈ `detected`/`reid`/`interp` and
+  `pose.parquet.foot_source` ∈ `ankle`/`head`/`none` mark re-ID'd, interpolated or head-grounded positions so the
+  overlay surfaces them as „Schätzung" — never as a plain detection. The `eval_corrections` scorecard reports
+  recovered (re-ID/interp) court error in a **separate** bucket, never folded into the detected near/far stats.
 
 ## Config / env
 `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL`, buckets, `WORKER_ID`,
 `WORKER_POLL_INTERVAL_SECONDS`, `WORKER_FRAME_CACHE_DIR`, `PYTORCH_ENABLE_MPS_FALLBACK=1`. See `.env.example`.
+Foot/recovery tuning (all default off / conservative): `FOOT_BIAS_K` (bbox-nudge, 0), `USE_POSE_FOOT` (0),
+`POSE_CONF_THR` (0.3), `GAP_FILL_MAX_FRAMES` (longest short hole the re-ID interp will fill, 8).
 
 ## Testing
 Per-stage unit/integration tests on a short labeled clip assert the contracted artifacts/rows and numeric

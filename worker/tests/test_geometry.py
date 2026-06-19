@@ -3,7 +3,6 @@
 Pure math only — no numpy/cv2/torch — so these run under the dev extra without the ml stack.
 Expected values are hand-computed from clean affine cases.
 """
-import math
 import unittest
 
 from worker import geometry as g
@@ -77,6 +76,83 @@ class TestAnklePoint(unittest.TestCase):
         self.assertEqual(g.ankle_point((100.0, 200.0, 40.0, 80.0)), (120.0, 280.0))
 
 
+class TestFootPoint(unittest.TestCase):
+    def test_default_k_is_identical_to_ankle_point(self):
+        bbox = (100.0, 200.0, 40.0, 80.0)
+        self.assertEqual(g.foot_point(bbox), g.ankle_point(bbox))
+
+    def test_biases_foot_down_by_k_times_height(self):
+        # Correct the detector's bbox-bottom truncation: push the foot down k*height.
+        fx, fy = g.foot_point((100.0, 200.0, 40.0, 80.0), 0.25)
+        self.assertEqual(fx, 120.0)            # x unchanged (centre)
+        self.assertEqual(fy, 280.0 + 0.25 * 80.0)  # 280 + 20 = 300
+
+
+class TestFootFromKeypoints(unittest.TestCase):
+    """Phase-3 durable foot: ankle/foot keypoint when confident, else the Phase-2 bbox nudge."""
+
+    def _kp(self):
+        kp = [(0.0, 0.0)] * 26  # Halpe-26
+        kp[15], kp[16] = (100.0, 500.0), (120.0, 510.0)  # left/right ankle
+        return kp
+
+    def test_confident_ankles_give_mean_ankle_foot(self):
+        scores = [0.0] * 26
+        scores[15], scores[16] = 0.9, 0.8
+        foot = g.foot_from_keypoints(self._kp(), scores, bbox=(0.0, 0.0, 200.0, 400.0),
+                                     k_fallback=0.16, conf_thr=0.3)
+        self.assertAlmostEqual(foot[0], 110.0)  # mean ankle x
+        self.assertAlmostEqual(foot[1], 505.0)  # mean ankle y
+
+    def test_low_confidence_falls_back_to_bbox_nudge(self):
+        scores = [0.0] * 26
+        scores[15], scores[16] = 0.1, 0.05  # both below conf_thr
+        bbox = (0.0, 0.0, 200.0, 400.0)
+        foot = g.foot_from_keypoints(self._kp(), scores, bbox=bbox, k_fallback=0.16, conf_thr=0.3)
+        self.assertEqual(foot, g.foot_point(bbox, 0.16))
+
+    def test_empty_keypoints_falls_back(self):
+        bbox = (0.0, 0.0, 10.0, 20.0)
+        self.assertEqual(g.foot_from_keypoints([], [], bbox=bbox, k_fallback=0.0),
+                         g.foot_point(bbox, 0.0))
+
+    def test_foot_keypoint_reports_zero_conf_when_all_below_threshold(self):
+        scores = [0.0] * 26
+        scores[15], scores[16] = 0.1, 0.2
+        fk = g.foot_keypoint(self._kp(), scores, conf_thr=0.3)
+        self.assertIsNotNone(fk)
+        self.assertEqual(fk[2], 0.0)  # conf 0 => caller must fall back
+
+
+class TestHeadFootGrounding(unittest.TestCase):
+    """Phase-4 occlusion layer: when the ankle is hidden but the head + hip are still visible, predict
+    the foot from the head using a head->foot drop learned (per player) from their own confident,
+    feet-visible frames. Scaled by torso length (hip_y-head_y) — visible under lower-body occlusion —
+    not bbox height (which the detector truncates, the very RC1 problem this avoids)."""
+
+    def test_halpe26_head_and_hip_indices(self):
+        self.assertEqual(g.HEAD_KP, 17)
+        self.assertEqual(g.HIP_KP, 19)
+
+    def test_fit_learns_median_foot_over_torso_ratio(self):
+        # each sample: foot_y-head_y is 3x the torso (hip_y-head_y) -> ratio 3.0.
+        samples = [(0.0, 100.0, 300.0), (10.0, 60.0, 160.0), (0.0, 50.0, 150.0)]
+        self.assertAlmostEqual(g.fit_head_foot_model(samples), 3.0, places=6)
+
+    def test_fit_is_robust_to_an_outlier_via_median(self):
+        samples = [(0.0, 100.0, 300.0), (0.0, 100.0, 300.0), (0.0, 100.0, 999.0)]  # one bad foot
+        self.assertAlmostEqual(g.fit_head_foot_model(samples), 3.0, places=6)
+
+    def test_fit_returns_none_when_no_valid_torso(self):
+        self.assertIsNone(g.fit_head_foot_model([]))
+        self.assertIsNone(g.fit_head_foot_model([(100.0, 100.0, 300.0)]))  # hip==head, zero torso
+
+    def test_ground_predicts_foot_below_pelvis_from_head_and_hip(self):
+        foot = g.ground_foot_from_head((40.0, 0.0), (50.0, 100.0), 3.0)
+        self.assertAlmostEqual(foot[0], 50.0)   # foot x under the pelvis (hip x)
+        self.assertAlmostEqual(foot[1], 300.0)  # head_y + 3*(hip_y-head_y)
+
+
 class TestNetDepth(unittest.TestCase):
     def test_near_role(self):
         self.assertAlmostEqual(g.net_depth(1.0, "near"), 1.0)   # own baseline -> rear
@@ -144,6 +220,79 @@ class TestResample10Hz(unittest.TestCase):
         at7 = next(s for s in out if abs(s[0] - 0.7) < 1e-9)
         self.assertAlmostEqual(at7[1], 0.5, places=6)
         self.assertAlmostEqual(at7[2], 0.2, places=6)
+
+
+class TestStitchRoleFragments(unittest.TestCase):
+    """Phase-4 role re-ID: re-associate dropped in-court track fragments with the role they continue,
+    so a player lost by BoT-SORT and re-detected under a fresh id resumes the same role. Modelled on
+    f35d0984: far-left player (B1) lost after frame 282, re-detected as short fragments 64 & 68."""
+
+    PRIMARIES = {
+        "near_left": {"median": (0.30, 0.80), "span": (0, 355)},
+        "near_right": {"median": (0.70, 0.80), "span": (0, 355)},
+        "far_left": {"median": (0.55, 0.05), "span": (0, 282)},   # lost after 282 (the hole)
+        "far_right": {"median": (0.50, 0.20), "span": (0, 355)},  # fully detected (no hole)
+    }
+
+    def test_far_fragments_stitch_into_the_role_with_the_temporal_hole(self):
+        frags = {64: {"median": (0.70, 0.05), "span": (286, 337)},
+                 68: {"median": (0.50, 0.02), "span": (342, 355)}}
+        self.assertEqual(g.stitch_role_fragments(self.PRIMARIES, frags),
+                         {64: "far_left", 68: "far_left"})
+
+    def test_overlapping_role_is_not_claimed_even_if_nearest(self):
+        # fragment sits exactly on far_right's median, but far_right is present the whole time
+        # (overlap) → it must fall to far_left, the role with the actual hole.
+        frags = {64: {"median": (0.50, 0.20), "span": (286, 337)}}
+        self.assertEqual(g.stitch_role_fragments(self.PRIMARIES, frags), {64: "far_left"})
+
+    def test_fragment_overlapping_every_same_half_role_is_dropped(self):
+        # a far blip while both far roles are present fills no hole → not stitched.
+        prim = dict(self.PRIMARIES, far_left={"median": (0.55, 0.05), "span": (0, 355)})
+        frags = {64: {"median": (0.70, 0.05), "span": (286, 337)}}
+        self.assertEqual(g.stitch_role_fragments(prim, frags), {})
+
+    def test_other_half_roles_are_ignored(self):
+        # a near-half fragment is never assigned to a far role and vice-versa.
+        frags = {64: {"median": (0.70, 0.05), "span": (286, 337)}}  # far (v<0.5)
+        out = g.stitch_role_fragments(self.PRIMARIES, frags)
+        self.assertNotIn(out.get(64), ("near_left", "near_right"))
+
+    def test_spatially_distant_fragment_is_rejected(self):
+        # far-half but nowhere near either far role's position → guarded out (not a continuation).
+        frags = {99: {"median": (0.02, 0.45), "span": (286, 337)}}
+        self.assertEqual(g.stitch_role_fragments(self.PRIMARIES, frags, max_court_dist=0.4), {})
+
+
+class TestFillTrackGaps(unittest.TestCase):
+    """Phase-4 bounded short-hole interpolation: fill interior gaps of <= max_gap missing frames
+    between two confident detections; never extrapolate past the ends (no second anchor → leave absent)."""
+
+    def test_fills_short_interior_gap_with_linear_interp(self):
+        # frames 0 and 4 present, 1..3 missing (a 3-frame hole, <= max_gap) -> filled linearly.
+        out = g.fill_track_gaps([(0, 0.0, 0.0), (4, 4.0, 0.0)], max_gap=8)
+        frames = [f for f, _, _, _ in out]
+        self.assertEqual(frames, [0, 1, 2, 3, 4])
+        filled = {f: (u, v, is_filled) for f, u, v, is_filled in out}
+        self.assertEqual(filled[2], (2.0, 0.0, True))   # midpoint interp, flagged filled
+        self.assertFalse(filled[0][2])                  # anchors not flagged
+        self.assertFalse(filled[4][2])
+
+    def test_gap_larger_than_max_is_left_unfilled(self):
+        # 20-frame hole > max_gap -> no fabricated positions across the void.
+        out = g.fill_track_gaps([(0, 0.0, 0.0), (20, 20.0, 0.0)], max_gap=8)
+        self.assertEqual([f for f, _, _, _ in out], [0, 20])
+
+    def test_never_extrapolates_before_first_or_after_last(self):
+        # only interior frames are produced; ends are the existing anchors, nothing beyond.
+        out = g.fill_track_gaps([(5, 0.0, 0.0), (7, 2.0, 0.0)], max_gap=8)
+        frames = [f for f, _, _, _ in out]
+        self.assertEqual(min(frames), 5)
+        self.assertEqual(max(frames), 7)
+
+    def test_single_or_empty_track_unchanged(self):
+        self.assertEqual(g.fill_track_gaps([(3, 0.1, 0.2)], max_gap=8), [(3, 0.1, 0.2, False)])
+        self.assertEqual(g.fill_track_gaps([], max_gap=8), [])
 
 
 class TestSmoothTrack(unittest.TestCase):
