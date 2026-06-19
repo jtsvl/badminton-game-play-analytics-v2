@@ -32,7 +32,7 @@ Stages mirror `30-ml-pipeline.md`. Each stage reads the frame cache + prior arti
 | detect | frames | detections.parquet `(frame,track?,x,y,w,h,score)` |
 | pose | frames, detections | pose.parquet `(frame,track,kp[],kp_score[],foot_x,foot_y,foot_conf,foot_source)` |
 | gate_track | detections, pose, homography | tracks.parquet `(t,track_id,u,v,role,source)` (in-court only) |
-| shuttle | frames, bg-median | shuttle.parquet `(t,u,v,visibility)` |
+| shuttle | frames, calibration (H + `mask_polygon_px`) | shuttle.parquet `(t,u,v,visibility[,frame,px,py,conf,tracker])` |
 | rally_hit | shuttle, tracks | `rallies`, `events`(type=hit) |
 | stroke | pose, shuttle, court xy | `events`(hit shot_type), `player_shot_stats` |
 | aggregate | tracks, shots, rallies | `player_match_stats`, `pair_match_stats`, `match_rally_stats` inputs |
@@ -64,6 +64,14 @@ Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web'
 `WORKER_POLL_INTERVAL_SECONDS`, `WORKER_FRAME_CACHE_DIR`, `PYTORCH_ENABLE_MPS_FALLBACK=1`. See `.env.example`.
 Foot/recovery tuning (all default off / conservative): `FOOT_BIAS_K` (bbox-nudge, 0), `USE_POSE_FOOT` (0),
 `POSE_CONF_THR` (0.3), `GAP_FILL_MAX_FRAMES` (longest short hole the re-ID interp will fill, 8).
+Shuttle (stage 5): `SHUTTLE_TRACKER` (wasb|tracknetv3|fake, default wasb), `SHUTTLE_CONF_THR` (0.5 — peak
+below = a real dropout, not a fabricated point), `SHUTTLE_MAX_STEP` (0.5 court units, isolated-spike guard),
+`SHUTTLE_MASK` (1 — black out outside the target-court airspace), `SHUTTLE_AIR_UP`/`SHUTTLE_AIR_SIDE`
+(airspace shape), `SHUTTLE_BBOX_MARGIN`, `SHUTTLE_OVERLAY_GAP_S` (0.3, overlay gap cap),
+`WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL` (vendored repo + weights, git-ignored).
+`visibility` = tracker heatmap peak confidence in [0,1]; sub-threshold frames are absent (an honest gap).
+`shuttle` is in `_REAL` but **not yet in `RESUME_STAGES`** — it joins the resume only once it yields a
+usable court track (see specs/features/shuttle-tracking.md); until then run standalone via `eval_shuttle`.
 
 ## Testing
 Per-stage unit/integration tests on a short labeled clip assert the contracted artifacts/rows and numeric
