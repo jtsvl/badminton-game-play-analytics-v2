@@ -215,6 +215,11 @@ textarea{background:#1a1a1c;color:#eee;border:1px solid #333;border-radius:6px;p
   border:2px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.55);cursor:grab;touch-action:none;
   display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#1A0500;user-select:none}
 .marker:active{cursor:grabbing}
+/* corrected marker: subtle white ring glow */
+.marker.corrected{box-shadow:0 0 0 3px rgba(255,255,255,0.9),0 0 10px 2px rgba(255,255,255,0.25)}
+/* ghost dot showing the original (pre-correction) position */
+.orig-dot{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;
+  border:2px dashed rgba(255,255,255,0.45);background:transparent;pointer-events:none}
 /* draggable rings over the court-map dots (Vogelperspektive) */
 .mmarker{position:absolute;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;
   border:3px solid #fff;background:transparent;cursor:grab;touch-action:none;box-shadow:0 0 0 1px rgba(0,0,0,.6)}
@@ -384,6 +389,12 @@ function step(d) { go(i + d); }
 
 document.addEventListener('keydown', e => {
   if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
+  if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+    e.preventDefault();
+    const list = corrections[i] || [];
+    if (list.length) deleteCorrection(i, list.length - 1);
+    return;
+  }
   if (e.key === 'ArrowRight') step(1);
   if (e.key === 'ArrowLeft') step(-1);
   if (e.key === 'Escape') closePopup();
@@ -413,11 +424,25 @@ function buildOverlay() {
     for (const d of dets) if (!hidden.has(d.label)) addEditableBox({x:d.bbox[0], y:d.bbox[1], w:d.bbox[2], h:d.bbox[3]}, d.label, false);
   }
 
+  // index latest correction per role for the current frame
+  const frameCors = {};
+  for (const c of (corrections[i] || [])) frameCors[c.role] = c;
+
   // video foot dots — drag corrects the position; the map ring follows live
   for (const d of dets) {
     if (hidden.has(d.label)) continue;
+    const cor = frameCors[d.label];
+    // ghost dot at the original (pre-correction) ankle position
+    if (cor && cor.orig_foot) {
+      const g = document.createElement('div');
+      g.className = 'orig-dot';
+      g.style.left = (cor.orig_foot[0] * 100) + '%';
+      g.style.top  = (cor.orig_foot[1] * 100) + '%';
+      g.style.borderColor = ROLE_COLORS[d.label] || '#FA8832';
+      ov.appendChild(g);
+    }
     const m = document.createElement('div');
-    m.className = 'marker';
+    m.className = 'marker' + (cor ? ' corrected' : '');
     m.style.left = (d.ankle[0] * 100) + '%';
     m.style.top  = (d.ankle[1] * 100) + '%';
     m.style.background = ROLE_COLORS[d.label] || '#FA8832';
@@ -743,6 +768,7 @@ async function save(c) {
   updateMeta();      // refresh the ⚑ count without reloading the frame (keeps a dragged marker in place)
   renderList();
   renderFlagBar();
+  buildOverlay();    // apply corrected highlight + ghost dot immediately
 }
 
 async function deleteCorrection(fidx, cidx) {
@@ -752,6 +778,7 @@ async function deleteCorrection(fidx, cidx) {
   updateMeta();
   renderList();
   renderFlagBar();
+  if (fidx === i) buildOverlay();   // refresh highlight state for the current frame
 }
 
 // ── sidebar rendering ────────────────────────────────────────────────────────────
