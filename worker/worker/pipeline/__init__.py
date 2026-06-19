@@ -22,7 +22,7 @@ class StageContext(dict):
 
 def _todo(name: str) -> Callable[[StageContext], None]:
     def stage(ctx: StageContext) -> None:
-        # P2 stages (shuttle, rally_hit, stroke) still stubbed; pose is real (Phase 3 foot fix).
+        # rally_hit, stroke still stubbed for P2/P3; shuttle (stage 5) and pose are real.
         log.info("stage %s: not yet implemented (stub)", name)
     stage.__name__ = name
     return stage
@@ -38,9 +38,10 @@ def _lazy(name: str) -> Callable[[StageContext], None]:
     return stage
 
 
-# Real stages. pose is the Phase-3 durable foot fix (RTMPose); shuttle/rally_hit/stroke stay stubbed
-# for P2/P3. A name not listed here runs the no-op _todo stub.
-_REAL = ("ingest", "calibrate", "detect", "pose", "gate_track", "aggregate", "overlay")
+# Real stages. pose is the Phase-3 durable foot fix (RTMPose); shuttle is stage 5 (WASB/TrackNetV3
+# behind shuttle.get_tracker). rally_hit/stroke stay stubbed for P2/P3. A name not listed here runs the
+# no-op _todo stub. shuttle joins RESUME_STAGES (__main__) only once verified on real footage.
+_REAL = ("ingest", "calibrate", "detect", "pose", "gate_track", "shuttle", "aggregate", "overlay")
 STAGES: Dict[str, Callable[[StageContext], None]] = {name: _todo(name) for name in STAGE_ORDER}
 STAGES.update({name: _lazy(name) for name in _REAL})
 

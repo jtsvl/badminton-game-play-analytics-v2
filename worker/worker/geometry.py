@@ -328,6 +328,108 @@ def fill_track_gaps(
     return out
 
 
+# --- Stage 5 (shuttle) crop geometry + light spike removal -----------------------------------------
+# The shuttle is a handful of pixels in a wide 4K DJI shot, and the hall holds several courts at once.
+# Cropping to the target court's calibration polygon (a) isolates that court (ignore other shuttles) and
+# (b) restores effective shuttle resolution before a tracker downsizes to its ~512x288 input.
+
+
+def court_crop_box(
+    poly_px: Sequence[Pt], frame_w: int, frame_h: int,
+    up: float = 0.5, side: float = 0.12, down: float = 0.05,
+) -> Tuple[int, int, int, int]:
+    """Pixel crop box (x0,y0,x1,y1) around the target court's mask polygon, clamped to the frame.
+
+    The polygon bounding box is expanded UPWARD by `up`*height (image up = smaller y) to keep the
+    shuttle's arc over the net, sideways by `side`*width, and down by `down`*height. A tighter `up`
+    isolates better (less white wall / fewer adjacent courts re-enter at the top) but clips high
+    clears — the white-wall region where detection fails anyway (specs/30 stage 5)."""
+    xs = [p[0] for p in poly_px]
+    ys = [p[1] for p in poly_px]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    w, h = x1 - x0, y1 - y0
+    bx0 = max(0.0, min(x0 - side * w, frame_w))
+    bx1 = max(0.0, min(x1 + side * w, frame_w))
+    by0 = max(0.0, min(y0 - up * h, frame_h))
+    by1 = max(0.0, min(y1 + down * h, frame_h))
+    return (int(round(bx0)), int(round(by0)), int(round(bx1)), int(round(by1)))
+
+
+def court_airspace_polygon(
+    poly_px: Sequence[Pt], frame_w: int, frame_h: int, up: float = 0.7, side: float = 0.08,
+) -> List[Pt]:
+    """Target-court AIRSPACE polygon for the stage-5 isolation mask — the ground quad with its far (top)
+    edge raised by `up`*court-height (image up = smaller y) and widened by `side`*court-width, so it
+    covers where the shuttle actually flies while its sidelines still exclude the neighbouring courts.
+
+    A strict ground-quad mask would black out the airborne shuttle (it sits well above the floor); this
+    keeps the column of space above the target court. Robust to corner input order (far = the two with
+    smaller y). Returns [far_left_up, far_right_up, near_right, near_left], clamped to the frame."""
+    pts = sorted(poly_px, key=lambda p: p[1])
+    far = sorted(pts[:2], key=lambda p: p[0])    # smaller y = far baseline (higher in image)
+    near = sorted(pts[2:], key=lambda p: p[0])
+    (fl, fr), (nl, nr) = far, near
+    height = (nl[1] + nr[1]) / 2 - (fl[1] + fr[1]) / 2
+    width = max(p[0] for p in poly_px) - min(p[0] for p in poly_px)
+
+    def clamp(x, y):
+        return (max(0.0, min(x, frame_w)), max(0.0, min(y, frame_h)))
+
+    fl_up = clamp(fl[0] - side * width, fl[1] - up * height)
+    fr_up = clamp(fr[0] + side * width, fr[1] - up * height)
+    return [fl_up, fr_up, (nr[0], nr[1]), (nl[0], nl[1])]
+
+
+def map_detection_to_frame(
+    mx: float, my: float, crop_box: Tuple[int, int, int, int], model_w: int, model_h: int,
+) -> Pt:
+    """Map a tracker peak (mx,my) in model-input pixels back to full-frame pixels.
+
+    The crop is resized straight to the model input (independent x/y scale), so invert that scale and
+    add the crop offset. The result feeds `apply_homography` to reach court (u,v)."""
+    x0, y0, x1, y1 = crop_box
+    return (x0 + mx * (x1 - x0) / model_w, y0 + my * (y1 - y0) / model_h)
+
+
+def reject_shuttle_outliers(track: List[Sample], max_step: float) -> List[Sample]:
+    """Drop isolated court-space spikes: a point that juts > max_step from BOTH neighbours while those
+    neighbours stay within max_step of each other (a false positive on another court / a misdetection).
+
+    A genuine fast smash is consecutive large *collinear* steps — there the neighbours are also far
+    apart, so nothing is dropped. This is deliberately light: it removes blips, it does NOT smooth the
+    arc (averaging would flatten the very peaks we want). `track` items are (frame_or_t, u, v)."""
+    if len(track) <= 2:
+        return list(track)
+
+    def d(a: Sample, b: Sample) -> float:
+        return math.hypot(a[1] - b[1], a[2] - b[2])
+
+    keep = [True] * len(track)
+    for i in range(1, len(track) - 1):
+        prev, cur, nxt = track[i - 1], track[i], track[i + 1]
+        if d(cur, prev) > max_step and d(cur, nxt) > max_step and d(prev, nxt) <= max_step:
+            keep[i] = False
+    return [p for p, k in zip(track, keep) if k]
+
+
+def split_on_gaps(track: List[Sample], max_dt: float) -> List[List[Sample]]:
+    """Split a time-sorted (t,u,v) track wherever consecutive samples are more than `max_dt` apart.
+
+    Used by the overlay for the shuttle: a real dropout (white-wall camouflage) must stay a gap, not be
+    bridged by `resample_10hz`'s straight-line interpolation. Each returned segment is resampled on its
+    own. An empty track yields no segments; a contiguous track yields one."""
+    if not track:
+        return []
+    segments: List[List[Sample]] = [[track[0]]]
+    for prev, cur in zip(track, track[1:]):
+        if cur[0] - prev[0] > max_dt:
+            segments.append([cur])
+        else:
+            segments[-1].append(cur)
+    return segments
+
+
 def resample_10hz(track: List[Sample], hz: int = 10) -> List[Sample]:
     """Resample a (t,u,v) track to a fixed hz with linear interpolation; endpoints preserved."""
     if not track:

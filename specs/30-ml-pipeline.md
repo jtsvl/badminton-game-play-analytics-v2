@@ -85,7 +85,13 @@ foot within tolerance); real/multi-clip verification awaits a partial-occlusion 
 
 ## Stage 5 — Shuttle tracking + white-wall problem (FR-15/16/17)
 **WASB (MIT) primary; TrackNetV3 (MIT) strong alternative — benchmark both.** White-shuttle-vs-white-wall is the
-hardest case (video-camouflage: low appearance, distinct motion). Layered mitigations:
+hardest case (video-camouflage: low appearance, distinct motion).
+**Multi-court isolation (first-class):** training sessions run several courts at once → several shuttles in
+frame. Isolate the **target** court before/around detection via the calibration mask (`mask_polygon_px` /
+`geometry.point_in_poly`) and a court-region crop (`geometry.court_crop_box`) — the crop also restores the
+tiny shuttle's effective resolution before a tracker downsizes to ~512×288. SOTA as of 2026 (web-checked):
+WASB (BMVC2023) tops the PwC badminton benchmark; TrackNetV3 leads recall (inpainting); TrackNetV4/V5 are
+incremental — keep WASB/TrackNetV3 for now. Layered mitigations:
 1. **Background-median subtraction** (per-clip; static tripod) removes the white wall — TrackNetV3 has it built-in.
 2. **Motion cues**: multi-frame input; optional frame-difference channel (OpenCV MOG2; avoid RAFT on MPS).
 3. **TrackNetV4 motion-attention** (now MIT) grafted on for small/blurry shuttles.
@@ -95,6 +101,25 @@ hardest case (video-camouflage: low appearance, distinct motion). Layered mitiga
 6. Optional mild **CLAHE on L** front-end (train+infer on the same enhanced frames; verify it helps).
 Speed = homography + fps, **labeled estimate** with uncertainty (~5–8 km/h MAE best case). **2D only.**
 *Accept:* shuttle F1/recall on own white-wall test clips ≥ target; gaps over a wall bridged within an arc.
+
+**Built (P1 slice 1 — thin baseline, run-both):** swappable backends behind `shuttle.ShuttleTracker`
+(WASB HRNet + TrackNetV3 conv-UNet, both MIT, vendored + weights git-ignored; FakeTracker for weightless
+end-to-end runs). Stage `pipeline/shuttle.py`: court crop → tracker peaks → `shuttle.track.build_shuttle_track`
+(map crop→frame→court via `apply_homography`, drop <conf_thr, reject isolated spikes) → `shuttle.parquet
+(t,u,v,visibility + debug)`; overlay emits subject='shuttle' (gap-aware via `split_on_gaps`). Pure math TDD'd
+(`court_crop_box`/`map_detection_to_frame`/`reject_shuttle_outliers`/`split_on_gaps`/`build_shuttle_track`).
+**Measured (f35d0984, eval_shuttle --compare):** TrackNetV3 81% / WASB 60% frame coverage, but **only 7–8%
+of detections land on-court** and inter-frame court steps reach kilometres. *Honest finding (tracker-independent):*
+(1) the **ground** homography can't place an **airborne** shuttle — pixels above the court horizon project
+toward infinity, so court-space (u,v) is unusable for high shots, not just noisy; (2) the target court fills
+the wide DJI frame, so a bbox crop doesn't isolate it from the side courts (detections hop between courts).
+**Airspace-mask follow-up (same slice):** masking each frame to the target-court **airspace** (ground quad
+raised up, `geometry.court_airspace_polygon`, `SHUTTLE_MASK=1`) before the tracker removed the cross-court
+scatter and ~tripled on-court (TrackNetV3 7→26%, WASB 8→20%), but coverage *dropped* (46%/33%) and the
+survivors cluster on the far net/players — so **isolation is solved, out-of-domain detection is the
+residual**. **Next slice = label → fine-tune** (shuttle labeler in verify.py → answer key → fine-tune
+WASB/TrackNetV3 on own white-wall footage, the #1 ML ROI → re-benchmark raw pixel detection); image-space /
+horizon-guarded projection + mitigations 2–6 + speed follow. See `specs/features/shuttle-tracking.md`.
 
 ## Stage 6 — Rally segmentation + hit detection (FR-18/19/20)
 Rallies from shuttle continuity + player motion energy + serve detector (shuttle low, players settled).
