@@ -404,6 +404,18 @@ class TestMapDetectionToFrame(unittest.TestCase):
         self.assertEqual(g.map_detection_to_frame(0, 0, self.BOX, 512, 288), (100.0, 200.0))
         self.assertEqual(g.map_detection_to_frame(512, 288, self.BOX, 512, 288), (300.0, 260.0))
 
+    def test_frame_to_model_is_exact_inverse(self):
+        # round-trip identity: a label click -> 512x288 -> back to full-frame must return the click.
+        for px, py in [(100.0, 200.0), (300.0, 260.0), (200.0, 230.0), (157.3, 241.8)]:
+            mx, my = g.frame_to_model_xy(px, py, self.BOX, 512, 288)
+            bx, by = g.map_detection_to_frame(mx, my, self.BOX, 512, 288)
+            self.assertAlmostEqual(bx, px)
+            self.assertAlmostEqual(by, py)
+
+    def test_frame_to_model_corners(self):
+        self.assertEqual(g.frame_to_model_xy(100.0, 200.0, self.BOX, 512, 288), (0.0, 0.0))
+        self.assertEqual(g.frame_to_model_xy(300.0, 260.0, self.BOX, 512, 288), (512.0, 288.0))
+
 
 class TestRejectShuttleOutliers(unittest.TestCase):
     """Light spike removal in court space: drop a point only when it juts away from BOTH neighbours

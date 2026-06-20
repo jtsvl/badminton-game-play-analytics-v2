@@ -1125,10 +1125,425 @@ def _serve(data: DebugData, video_id: str, port: int) -> None:
         print("stopped.")
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# Shuttle labeler (`verify --shuttle`) — a focused sibling of the player tool above.
+#
+# Same building blocks (ThreadingHTTPServer + HTML/JS canvas + frames cache + Cmd+Z undo + ←/→ nav +
+# JSON persistence), but the shuttle is a handful of low-contrast pixels, so it serves the NATIVE 4K
+# frame (no 1280 downscale) and adds a hover-loupe for true-pixel clicks. The trainer clicks sparse
+# anchors on each arc; the pure shuttle.label.interpolate_anchors fills every frame, and the server
+# returns that dense path live so the user adds anchors where the line drifts off the shuttle.
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class ShuttleData:
+    cache: Path
+    frames: list[dict]           # manifest frames [{frame, t}, ...]
+    width: int
+    height: int
+    guide: list | None           # airspace polygon, normalised image coords (faint mask outline) or None
+    crop: list | None            # crop box [x0,y0,x1,y1] normalised, or None — both just visual guides
+
+
+def load_shuttle_data(video_id: str, cfg) -> ShuttleData:
+    """Frames manifest + cache for the shuttle labeler. Calibration is OPTIONAL: when present it adds a
+    faint airspace/crop guide (the region the tracker actually sees) so the user labels where it matters,
+    but labeling works without it."""
+    cache = Path(cfg.frame_cache_dir).expanduser() / video_id
+    manifest = json.loads((cache / "frames.json").read_text())
+    w, h = int(manifest["width"]), int(manifest["height"])
+    guide = crop = None
+    try:
+        cal = Store(cfg.supabase_url, cfg.service_role_key).get_calibration(video_id)
+        poly = (cal or {}).get("mask_polygon_px") or (cal or {}).get("confirmed_points")
+        if poly:
+            from .geometry import court_airspace_polygon, court_crop_box
+            from .pipeline.shuttle import AIR_SIDE, AIR_UP, BBOX_MARGIN
+
+            pts = [(float(x), float(y)) for x, y in poly]
+            air = court_airspace_polygon(pts, w, h, up=AIR_UP, side=AIR_SIDE)
+            cb = court_crop_box(air, w, h, up=0.0, side=BBOX_MARGIN, down=0.0)
+            guide = [[round(px / w, 5), round(py / h, 5)] for px, py in air]
+            crop = [round(cb[0] / w, 5), round(cb[1] / h, 5), round(cb[2] / w, 5), round(cb[3] / h, 5)]
+    except Exception as e:  # noqa: BLE001 — the guide is a nicety; never block labeling on calibration
+        log.warning("shuttle labeler: no calibration guide (%s)", e)
+    return ShuttleData(cache=cache, frames=manifest["frames"], width=w, height=h, guide=guide, crop=crop)
+
+
+_SHUTTLE_PAGE = """<!doctype html><html lang="de"><head><meta charset="utf-8">
+<title>Shuttle markieren</title><style>
+*{box-sizing:border-box}
+body{margin:0;background:#0a0a0b;color:#eee;font-family:Inter,system-ui,sans-serif}
+header{padding:10px 16px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #222}
+h1{font-size:15px;margin:0;color:#FA8832;font-weight:700}
+.meta{font-size:13px;color:#aaa}
+.legend{font-size:12px;color:#bbb;display:flex;gap:12px}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle}
+#wrap{padding:12px 16px;display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+#imgcol{flex:1;min-width:0}
+#stage{position:relative;display:block;width:100%;aspect-ratio:var(--ar,16 / 9);margin:0 auto}
+img#frame{width:100%;height:100%;display:block;border-radius:8px;background:#000}
+#ov{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+.ctl{display:flex;gap:12px;align-items:center;margin:10px 0;flex-wrap:wrap}
+input[type=range]{flex:1;min-width:240px;accent-color:#FA8832}
+button{background:#1a1a1c;color:#eee;border:1px solid #333;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:14px}
+button:hover{border-color:#FA8832}
+label{font-size:13px;color:#ccc}
+input[type=number]{width:80px;background:#1a1a1c;color:#eee;border:1px solid #333;border-radius:6px;padding:4px}
+/* loupe: a magnified inset of the NATIVE 4k frame, following the cursor */
+#loupe{position:absolute;width:200px;height:200px;border-radius:50%;border:2px solid #FA8832;
+  box-shadow:0 4px 18px rgba(0,0,0,.7);pointer-events:none;display:none;z-index:30;
+  background-repeat:no-repeat;background-color:#000}
+#loupe::after{content:"";position:absolute;left:50%;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;
+  border:1px solid rgba(250,136,50,.9);border-radius:50%}
+#loupe::before{content:"";position:absolute;left:50%;top:50%;width:1px;height:1px;
+  box-shadow:0 0 0 1px #FA8832, 6px 0 0 0 #FA8832,-6px 0 0 0 #FA8832,0 6px 0 0 #FA8832,0 -6px 0 0 #FA8832}
+#side{width:280px;min-width:240px;background:#111;border:1px solid #222;border-radius:10px;padding:12px;flex-shrink:0}
+#side h2{margin:0 0 4px;font-size:14px;color:#FA8832;font-weight:700}
+#help{font-size:12px;color:#888;margin:0 0 10px;line-height:1.55}
+#help b{color:#bbb}
+.flagbar{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.flagbar a{font-size:11px;color:#FA8832;text-decoration:none;background:#1a1a1c;border:1px solid #333;border-radius:4px;padding:1px 5px}
+.flagbar a.bnd{color:#e74c3c;border-color:#5a2a2a}
+.flagbar a.occ{color:#888}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#FA8832;color:#1A0500;
+  font-weight:700;font-size:13px;padding:8px 16px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.show{opacity:1}
+svg .air{fill:rgba(250,136,50,.05);stroke:rgba(250,136,50,.45);stroke-width:2;vector-effect:non-scaling-stroke}
+svg .crop{fill:none;stroke:rgba(255,255,255,.28);stroke-width:1;stroke-dasharray:6 6;vector-effect:non-scaling-stroke}
+svg .fill{fill:#39d98a;opacity:.85}
+svg .gap{fill:#e74c3c;opacity:.85}
+svg .anc{fill:#FA8832;stroke:#1A0500;stroke-width:2;vector-effect:non-scaling-stroke}
+svg .occ{fill:none;stroke:#888;stroke-width:3;vector-effect:non-scaling-stroke}
+svg .cur{stroke:#fff;stroke-width:3;vector-effect:non-scaling-stroke}
+svg polyline.path{fill:none;stroke:rgba(57,217,138,.5);stroke-width:1.5;vector-effect:non-scaling-stroke}
+</style></head><body>
+<header>
+  <h1>Shuttle markieren</h1>
+  <span class="meta" id="meta"></span>
+  <span class="legend">
+    <span><span class="dot" style="background:#FA8832"></span>Anker (Klick)</span>
+    <span><span class="dot" style="background:#39d98a"></span>interpoliert</span>
+    <span><span class="dot" style="background:#e74c3c"></span>Lücke / Grenze</span>
+  </span>
+</header>
+<div id="wrap">
+  <div id="imgcol">
+    <div class="ctl">
+      <button onclick="step(-1)">&#9664; Zurück</button>
+      <input id="sl" type="range" min="0" max="__NMAX__" value="0" oninput="go(+this.value)">
+      <button onclick="step(1)">Weiter &#9654;</button>
+      <label>Frame <input id="num" type="number" min="0" max="__NMAX__" value="0" onchange="go(+this.value)"></label>
+    </div>
+    <div id="stage">
+      <img id="frame" src="">
+      <svg id="ov" preserveAspectRatio="none" viewBox="0 0 __IMG_W__ __IMG_H__"></svg>
+      <div id="loupe"></div>
+    </div>
+  </div>
+  <div id="side">
+    <h2>Shuttle-Spur</h2>
+    <p id="help"><b>Klick</b> = Shuttle-Punkt (Anker) im aktuellen Frame. <b>Shift-/Rechtsklick</b> = Frame
+       als <b>verdeckt</b> markieren (visibility 0). Taste <b>A</b> = <b>Schlag-/Segmentgrenze</b> (es wird
+       nie darüber interpoliert). <b>Cmd/Ctrl+Z</b> = Anker im Frame löschen. Die <b>Lupe</b> folgt dem Cursor
+       für pixelgenaue Klicks. Setz Anker dort, wo die grüne Linie vom Shuttle abweicht (am Scheitelpunkt dicht).</p>
+    <div id="info" style="font-size:12px;color:#aaa"></div>
+    <div id="flagbar" class="flagbar"></div>
+    <button onclick="downloadJSON()" style="width:100%;margin-top:12px">JSON herunterladen</button>
+  </div>
+</div>
+<div id="toast"></div>
+<script>
+const FRAMES = __FRAMES__;
+const VIDEO_ID = "__VIDEO_ID__";
+const NMAX = __NMAX__;
+const IMG_W = __IMG_W__, IMG_H = __IMG_H__;
+const GUIDE = __GUIDE__;   // airspace polygon (normalised) or null
+const CROP = __CROP__;     // crop box [x0,y0,x1,y1] normalised or null
+const ZOOM = 4;            // loupe magnification (screen px per source px)
+const $ = id => document.getElementById(id);
+const round4 = x => Math.round(x * 10000) / 10000;
+const clampN = v => Math.max(0, Math.min(1, v));
+
+let i = 0;
+let path = [];                 // dense [[frame,px,py,vis,interp], ...] from the server
+let anchors = {};              // frameIdx -> anchor (for the nav strip)
+let boundaries = new Set();
+
+function frameSrc() { return `/frame?idx=${i}`; }   // native 4k, label-independent → browser caches it
+
+function ovXY(e) {
+  const r = $('ov').getBoundingClientRect();
+  return [clampN((e.clientX - r.left) / r.width), clampN((e.clientY - r.top) / r.height)];
+}
+
+function drawOverlay() {
+  let s = '';
+  if (CROP) s += `<rect class="crop" x="${CROP[0]*IMG_W}" y="${CROP[1]*IMG_H}" width="${(CROP[2]-CROP[0])*IMG_W}" height="${(CROP[3]-CROP[1])*IMG_H}"/>`;
+  if (GUIDE) s += `<polygon class="air" points="${GUIDE.map(p => `${p[0]*IMG_W},${p[1]*IMG_H}`).join(' ')}"/>`;
+  const line = path.filter(r => r[3] === 1 && r[1] != null).map(r => `${r[1]*IMG_W},${r[2]*IMG_H}`).join(' ');
+  if (line) s += `<polyline class="path" points="${line}"/>`;
+  const R = IMG_W * 0.0035;
+  for (const [f, px, py, vis, interp] of path) {
+    const cur = f === i ? ' cur' : '';
+    if (vis === 1 && px != null) {
+      const cls = interp ? 'fill' : 'anc';
+      s += `<circle class="${cls}${cur}" cx="${px*IMG_W}" cy="${py*IMG_H}" r="${interp ? R : R*1.8}"/>`;
+    }
+  }
+  // occlusion + current-frame crosshair markers that have no image position: draw on the frame edge isn't
+  // useful, so they live in the nav strip instead. Show the current frame's anchor highlight only.
+  $('ov').innerHTML = s;
+}
+
+function renderStrip() {
+  const frames = Object.keys(anchors).map(Number).sort((a, b) => a - b);
+  const html = frames.map(f => {
+    const occ = anchors[f].visibility === 0 ? ' occ' : '';
+    return `<a href="#" class="anc${occ}" onclick="go(${f});return false;" title="${occ ? 'verdeckt' : 'Anker'}">${f}</a>`;
+  }).concat([...boundaries].sort((a, b) => a - b).map(b =>
+    `<a href="#" class="bnd" onclick="go(${b});return false;" title="Grenze">|${b}</a>`)).join('');
+  $('flagbar').innerHTML = html;
+  const nVis = path.filter(r => r[3] === 1).length;
+  $('info').textContent = `${frames.length} Anker · ${boundaries.size} Grenzen · ${path.length} Frames markiert (${nVis} sichtbar)`;
+}
+
+function updateMeta() {
+  const f = FRAMES[i];
+  const a = anchors[i] ? (anchors[i].visibility === 0 ? ' · ⛔ verdeckt' : ' · ● Anker') : '';
+  const b = boundaries.has(i) ? ' · | Grenze' : '';
+  $('meta').textContent = `Frame ${i}/${NMAX} · ${f.t.toFixed(2)} s${a}${b}`;
+}
+
+function render() {
+  $('frame').src = frameSrc();
+  $('sl').value = i; $('num').value = i;
+  updateMeta(); drawOverlay(); renderStrip();
+}
+function go(n) { i = Math.max(0, Math.min(NMAX, n)); render(); }
+function step(d) { go(i + d); }
+
+function applyState(d) {   // server response carries the fresh anchors/boundaries/dense path
+  path = d.path || [];
+  anchors = {};
+  for (const a of d.anchors || []) anchors[a.frame_idx] = a;
+  boundaries = new Set(d.boundaries || []);
+}
+
+async function placeAnchor(nx, ny, visible) {
+  const body = {frame_idx: i, t_s: FRAMES[i].t, visibility: visible ? 1 : 0};
+  if (visible) { body.px = round4(nx); body.py = round4(ny); }
+  applyState(await (await fetch('/anchor', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})).json());
+  toast(visible ? 'Anker gesetzt' : 'als verdeckt markiert');
+  drawOverlay(); renderStrip(); updateMeta();
+}
+async function toggleBoundary() {
+  applyState(await (await fetch('/boundary', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({frame_idx: i})})).json());
+  toast(boundaries.has(i) ? 'Grenze gesetzt' : 'Grenze entfernt');
+  drawOverlay(); renderStrip(); updateMeta();
+}
+async function undo() {
+  if (!anchors[i]) { toast('kein Anker in diesem Frame'); return; }
+  applyState(await (await fetch(`/anchor?frame=${i}`, {method: 'DELETE'})).json());
+  toast('Anker gelöscht');
+  drawOverlay(); renderStrip(); updateMeta();
+}
+
+$('ov').addEventListener('click', e => { const [nx, ny] = ovXY(e); placeAnchor(nx, ny, !e.shiftKey); });
+$('ov').addEventListener('contextmenu', e => { e.preventDefault(); const [nx, ny] = ovXY(e); placeAnchor(nx, ny, false); });
+
+// ── loupe: magnify the native 4k frame around the cursor ──────────────────────────
+const loupe = $('loupe');
+$('stage').addEventListener('mousemove', e => {
+  const st = $('stage').getBoundingClientRect();
+  const lx = e.clientX - st.left, ly = e.clientY - st.top;
+  if (lx < 0 || ly < 0 || lx > st.width || ly > st.height) { loupe.style.display = 'none'; return; }
+  const nx = lx / st.width, ny = ly / st.height;
+  loupe.style.backgroundImage = `url(${frameSrc()})`;
+  loupe.style.backgroundSize = `${IMG_W * ZOOM}px ${IMG_H * ZOOM}px`;
+  loupe.style.backgroundPosition = `${100 - nx * IMG_W * ZOOM}px ${100 - ny * IMG_H * ZOOM}px`;
+  loupe.style.left = (lx + 24) + 'px';
+  loupe.style.top = (ly - 220) + 'px';
+  loupe.style.display = 'block';
+});
+$('stage').addEventListener('mouseleave', () => { loupe.style.display = 'none'; });
+
+document.addEventListener('keydown', e => {
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+  if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.preventDefault(); undo(); return; }
+  if (e.key === 'a' || e.key === 'A') { e.preventDefault(); toggleBoundary(); return; }
+  if (e.key === 'ArrowRight') step(1);
+  if (e.key === 'ArrowLeft') step(-1);
+});
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove('show'), 1500);
+}
+async function downloadJSON() {
+  const text = await (await fetch('/labels')).text();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+  a.download = `shuttle_labels_${VIDEO_ID.slice(0, 8)}.json`;
+  a.click();
+}
+
+function fitStage() {
+  const stage = $('stage');
+  stage.style.maxWidth = '';
+  const avail = window.innerHeight - stage.getBoundingClientRect().top - 16;
+  stage.style.maxWidth = Math.max(360, avail * (IMG_W / IMG_H)) + 'px';
+}
+window.addEventListener('resize', fitStage);
+document.documentElement.style.setProperty('--ar', IMG_W + ' / ' + IMG_H);
+fitStage();
+(async () => { applyState(await (await fetch('/labels')).json()); render(); })();
+</script>
+</body></html>"""
+
+
+def _serve_shuttle(data: ShuttleData, video_id: str, port: int) -> None:
+    from .shuttle.label import interpolate_anchors
+
+    frames_meta = json.dumps([{"t": round(f["t"], 3)} for f in data.frames])
+    nmax = len(data.frames) - 1
+    page = (
+        _SHUTTLE_PAGE
+        .replace("__NMAX__", str(nmax))
+        .replace("__FRAMES__", frames_meta)
+        .replace("__VIDEO_ID__", video_id)
+        .replace("__IMG_W__", str(data.width))
+        .replace("__IMG_H__", str(data.height))
+        .replace("__GUIDE__", json.dumps(data.guide))
+        .replace("__CROP__", json.dumps(data.crop))
+    )
+
+    labels_path = data.cache / "shuttle_labels.json"
+    anchors: dict[int, dict] = {}     # frame_idx -> anchor (one per frame; re-clicking replaces)
+    boundaries: set[int] = set()
+    _id_counter = [0]
+
+    def _load():
+        if labels_path.exists():
+            d = json.loads(labels_path.read_text())
+            for a in d.get("anchors", []):
+                a.setdefault("_id", _id_counter[0])
+                _id_counter[0] += 1
+                anchors[int(a["frame_idx"])] = a
+            boundaries.update(int(b) for b in d.get("boundaries", []))
+
+    def _anchor_list() -> list[dict]:
+        return sorted(anchors.values(), key=lambda a: a["frame_idx"])
+
+    def _save():
+        labels_path.write_text(json.dumps(
+            {"video_id": video_id, "anchors": _anchor_list(), "boundaries": sorted(boundaries)},
+            indent=2, ensure_ascii=False))
+
+    def _state() -> dict:
+        # the dense interpolated path is the single tested source of truth (shuttle.label) — the same
+        # function the importer + exporter use, so the live preview can't drift from the answer key.
+        return {"video_id": video_id, "anchors": _anchor_list(), "boundaries": sorted(boundaries),
+                "path": interpolate_anchors(_anchor_list(), boundaries)}
+
+    _load()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send_json(self, body, status: int = 200) -> None:
+            raw = json.dumps(body, ensure_ascii=False).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _send_bytes(self, raw: bytes, ctype: str) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path == "/":
+                self._send_bytes(page.encode(), "text/html; charset=utf-8")
+                return
+            if u.path == "/frame":
+                idx = max(0, min(nmax, int(parse_qs(u.query).get("idx", ["0"])[0])))
+                fnum = int(data.frames[idx]["frame"])
+                jpg = data.cache / "frames" / f"{fnum:06d}.jpg"   # native 4k — streamed straight, no re-encode
+                if not jpg.exists():
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self._send_bytes(jpg.read_bytes(), "image/jpeg")
+                return
+            if u.path == "/labels":
+                self._send_json(_state())
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            u = urlparse(self.path)
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            if u.path == "/anchor":
+                fidx = int(body["frame_idx"])
+                a = {"frame_idx": fidx, "t_s": body.get("t_s"), "visibility": int(body.get("visibility", 1)),
+                     "_id": _id_counter[0]}
+                _id_counter[0] += 1
+                if a["visibility"] == 1:                 # a visible anchor carries the clicked pixel
+                    a["px"], a["py"] = body.get("px"), body.get("py")
+                anchors[fidx] = a                        # one anchor per frame — re-clicking replaces
+                _save()
+                self._send_json(_state())
+                return
+            if u.path == "/boundary":
+                fidx = int(body["frame_idx"])
+                boundaries.discard(fidx) if fidx in boundaries else boundaries.add(fidx)
+                _save()
+                self._send_json(_state())
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_DELETE(self):
+            u = urlparse(self.path)
+            if u.path == "/anchor":
+                fidx = int(parse_qs(u.query)["frame"][0])
+                anchors.pop(fidx, None)
+                _save()
+                self._send_json(_state())
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    url = f"http://127.0.0.1:{port}/"
+    log.info("shuttle labeler for %s — open %s  (Ctrl-C to stop)", video_id, url)
+    n_anchor = len(anchors)
+    note = f" · {n_anchor} Anker geladen" if n_anchor else ""
+    print(f"\n  ▶ Shuttle markieren: {url}\n    {len(data.frames)} Frames · Klick=Anker, Shift/Rechtsklick=verdeckt, "
+          f"A=Grenze, Cmd+Z=löschen{note}\n")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("stopped.")
+
+
 def verify_cli(argv: list[str]) -> None:
     video_id = "f35d0984-207c-4ee1-8283-ef8ba58eca82"
     port = 8000
+    shuttle = False
     rest = list(argv)
+    if "--shuttle" in rest:
+        shuttle = True
+        rest.remove("--shuttle")
     if "--port" in rest:
         p = rest.index("--port")
         port = int(rest[p + 1])
@@ -1138,4 +1553,7 @@ def verify_cli(argv: list[str]) -> None:
     cfg = load_config()
     if not cfg.configured:
         raise SystemExit("not configured — fill .env")
-    _serve(load_data(video_id, cfg), video_id, port)
+    if shuttle:
+        _serve_shuttle(load_shuttle_data(video_id, cfg), video_id, port)
+    else:
+        _serve(load_data(video_id, cfg), video_id, port)

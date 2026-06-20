@@ -178,6 +178,16 @@ class Store:
             rows, on_conflict="video_id,source_id"
         ).execute()
 
+    def upsert_shuttle_labels(self, rows: List[dict]) -> None:
+        """Persist verify-tool shuttle labels (the fine-tune answer key + scoreboard GT). Idempotent on
+        (video_id,source_id) where source_id = frame_idx, so re-importing the same shuttle_labels.json
+        replaces rather than duplicates (0005 migration)."""
+        if not rows:
+            return
+        self._sb.table("shuttle_labels").upsert(
+            rows, on_conflict="video_id,source_id"
+        ).execute()
+
     def log_job_run(
         self, job: str, match_id: Optional[str], is_ok: bool, detail: str = ""
     ) -> None:

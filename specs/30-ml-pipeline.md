@@ -117,9 +117,12 @@ the wide DJI frame, so a bbox crop doesn't isolate it from the side courts (dete
 raised up, `geometry.court_airspace_polygon`, `SHUTTLE_MASK=1`) before the tracker removed the cross-court
 scatter and ~tripled on-court (TrackNetV3 7→26%, WASB 8→20%), but coverage *dropped* (46%/33%) and the
 survivors cluster on the far net/players — so **isolation is solved, out-of-domain detection is the
-residual**. **Next slice = label → fine-tune** (shuttle labeler in verify.py → answer key → fine-tune
-WASB/TrackNetV3 on own white-wall footage, the #1 ML ROI → re-benchmark raw pixel detection); image-space /
-horizon-guarded projection + mitigations 2–6 + speed follow. See `specs/features/shuttle-tracking.md`.
+residual**. **Label → fine-tune** is the #1 ML ROI: the answer-key + scoreboard infrastructure is **built**
+(Slice 2a — `verify --shuttle` labeler, `shuttle_labels` table `0005`, `shuttle/dataset_export.py`,
+`eval_shuttle --labels` precision/recall, TrackNetV3 MPS training patch); the fine-tune **run** (Slice 2b)
+is blocked on recording ≥3–4 clips. Locked: **TrackNetV3 only** (WASB frozen as the benchmark), **local MPS**
+(see Apple Silicon note), held-out-clip metric. Then image-space / horizon-guarded projection + mitigations
+2–6 + speed. See `specs/features/shuttle-tracking.md` + `specs/features/shuttle-finetune-plan.md`.
 
 ## Stage 6 — Rally segmentation + hit detection (FR-18/19/20)
 Rallies from shuttle continuity + player motion energy + serve detector (shuttle low, players settled).
@@ -150,8 +153,12 @@ FiftyOne (curation/label-error mining); pre-label with SAM + pretrained models. 
 ## Apple Silicon execution
 PyTorch **MPS** primary (`PYTORCH_ENABLE_MPS_FALLBACK=1`, fp32, validate vs CPU once for NaNs). **CoreML** only for
 the two hot fixed-shape models (detector, RTMPose) — export at a single fixed input shape; benchmark vs MPS, keep
-winner; validate INT8 doesn't hurt the tiny shuttle. **No MLX** (slow on Conv2d). Process locally; cloud NVIDIA only
-for fine-tuning runs / large backfills.
+winner; validate INT8 doesn't hurt the tiny shuttle. **No MLX** (slow on Conv2d). Process locally; cloud NVIDIA
+for fine-tuning runs / large backfills — **exception: the stage-5 TrackNetV3 shuttle fine-tune runs locally on
+the Mac Studio M4 Max (MPS)** (small fine-tune; keeps the label→train→benchmark loop on one box against the
+real frame cache/weights). This needs the vendored TrackNetV3 `.cuda()`→MPS patch in `worker/training/`
+(`PYTORCH_ENABLE_MPS_FALLBACK=1` alone does NOT redirect explicit `.cuda()`). See
+`specs/features/shuttle-finetune-plan.md` §6.
 
 ## Honesty / estimates (must be surfaced in UI)
 3D trajectory & absolute speed (monocular, not Hawk-Eye), reaction time, footwork "efficiency" absolutes, and
