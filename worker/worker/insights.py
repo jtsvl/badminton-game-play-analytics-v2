@@ -39,11 +39,32 @@ def step_speeds_kmh(track: List[Sample], w_m: float = COURT_W_M, l_m: float = CO
     return out
 
 
-def avg_top_speed_kmh(speeds: List[float], moving_threshold: float = 0.5) -> Tuple[float, float]:
-    """Average over moving samples, peak over all. Rounded to 1 decimal."""
+def percentile(values: List[float], q: float) -> float:
+    """Linear-interpolated percentile, q in [0,1]. Empty -> 0.0. A robust, outlier-resistant
+    alternative to max(): with <=1 value it equals that value, so short tracks are unchanged."""
+    if not values:
+        return 0.0
+    xs = sorted(values)
+    if len(xs) == 1:
+        return xs[0]
+    pos = q * (len(xs) - 1)
+    lo = math.floor(pos)
+    hi = min(lo + 1, len(xs) - 1)
+    return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
+
+
+def avg_top_speed_kmh(
+    speeds: List[float], moving_threshold: float = 0.5, top_pct: float = 0.98
+) -> Tuple[float, float]:
+    """Average over moving samples, robust peak (high percentile) over all. Rounded to 1 decimal.
+
+    `top` is a high percentile, not max(): on the pixel-starved far court (~610 px baseline) a single
+    jittery frame-pair inflates max() into an implausible sprint (~30-34 km/h) — see specs/fix-later.md.
+    p98 keeps genuine bursts but rejects the lone outlier; with <=2 samples p98 ~= max, so short tracks
+    are unchanged."""
     moving = [s for s in speeds if s >= moving_threshold]
     avg = sum(moving) / len(moving) if moving else 0.0
-    top = max(speeds) if speeds else 0.0
+    top = percentile(speeds, top_pct)
     return round(avg, 1), round(top, 1)
 
 

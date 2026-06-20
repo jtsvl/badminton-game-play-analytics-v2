@@ -24,21 +24,26 @@ Layout: `MatchReportMobile`, `MatchReportDashboard`, `ReportHero`; `pages/MatchR
 - `homography.ts` — **production projection engine** replacing the prototype `vidProject`/`VID_QUAD`:
   `solveHomography(srcQuad, dstQuad)` (4-point DLT) + `projectUV(H, u, v) → {x, y}` (court u,v∈[0,1] → frame fraction 0..1).
 - `overlay.ts` — `trackAt(keys, p)` (smoothstep over `[{t,u,v}]`) + `shuttleAt(p, near, far)` (alternating hits).
-- `demoOverlay.ts` — **demo input only** (clearly labeled): court-corner↔frame correspondences derived from the
-  prototype baseline quad → `H_DEMO = solveHomography(...)`; demo near/far tracks + `DEMO_LOOP`. The demo feeds
-  the *same* `projectUV` engine production will use. **TODO (P1):** replace with `court_calibrations.homography`
-  + `track_keyframes` rows.
-- `storage.ts` — `resolveVideoSrc(path)`. This slice: returns no playable URL (Storage buckets are private and
-  the demo clip is absent) so the player uses the synthetic-clock placeholder. **TODO (P1):** signed URL via
-  `supabase.storage.from('match-videos').createSignedUrl(path, ttl)`.
+- `demoOverlay.ts` — the **fallback for uncalibrated (seeded) matches** (clearly labeled): court-corner↔frame
+  correspondences derived from the prototype baseline quad → `H_DEMO = solveHomography(...)`; demo near/far
+  tracks + `DEMO_LOOP`. The demo feeds the *same* `projectUV` engine production uses. **Done (P1, commit
+  22fc7e7):** the live path is `calibration.ts` `overlayInputs` — it derives the court→frame homography from
+  `court_calibrations.confirmed_points` and uses real `track_keyframes` whenever a calibration exists. (We do
+  not read the stored `court_calibrations.homography`: it's the inverse direction, image-px→u,v, for worker
+  gating; the web re-derives court→frame from the 4 corners.)
+- `storage.ts` — `resolveVideoSrc(path)`. **Done (P1, commit 22fc7e7):** returns a signed URL via
+  `supabase.storage.from('match-videos').createSignedUrl(path, ttl)` (1 h TTL), or `''` when no footage exists
+  → the player then falls back to the synthetic-clock placeholder. Dev anon storage read is granted (test
+  footage only) by migration `0003_dev_calibration_write.sql`.
 
 ## Decisions / deviations from the prototype (keep in sync with `specs/50-web-app.md`)
 1. **Heatmap default style = `raster`** (12×13), per `specs/50-web-app.md` — overrides the prototype theme-A `heat:'blobs'`.
 2. **Projection = a single planar homography** (the correct court model). It can drift slightly from the
    prototype's hand-tuned depth `k`; this is intentional. We never ship `VID_QUAD` as the engine.
-3. **Video = placeholder backdrop** for this slice: full player (Safari chrome, controls, toggle chips, SVG
-   overlays from demo tracks) over a black surface; a **synthetic 16 s clock** advances `time` so overlays
-   animate without footage. Real signed-URL footage + real tracks land in P1.
+3. **Video = real-or-placeholder.** With footage, the player loads the signed-URL `<video>` and reads its
+   clock; without it (seeded demo matches) it falls back to a black surface + **synthetic 16 s clock** so the
+   demo overlays still animate. Real signed-URL footage + real `track_keyframes` landed in P1 (commit 22fc7e7);
+   the synthetic clock + demo tracks remain only as the uncalibrated fallback.
 4. **`ShotMix compact` and `KeyStats variant='bare'` are net-new** (the prototype passes `compact` but the
    component ignores it). Designed against the desktop dashboard tile sizing.
 5. **Doubles renders as-is**: no shots → empty-state Schlagverteilung tile (keeps the 4-tile desktop row);

@@ -24,6 +24,10 @@ log = logging.getLogger("worker.pipeline.gate_track")
 
 MARGIN = 0.06  # court-normalized gating margin (~37 cm wide / 80 cm long)
 MAX_GAP = int(os.environ.get("GAP_FILL_MAX_FRAMES", "8"))  # longest short hole to interpolate (RC3)
+# Centered moving-average window for per-role jitter smoothing. 9 @ ~12 Hz ≈ 0.75 s: the far court's
+# few px/m amplify ankle-point jitter into implausible far-court top speeds, so smooth harder than the
+# old 5 without flattening genuine bursts (specs/fix-later.md "Far-court top-speed inflation").
+SMOOTH_WINDOW = int(os.environ.get("SMOOTH_WINDOW", "9"))
 # Interim foot-truncation correction: push the foot down k*bbox-height before projecting (RC1).
 # 0 = off (identical to the old bbox-bottom). k≈0.16 fitted on f35d0984 (see eval_corrections).
 # Used as the FALLBACK when the pose stage has no confident ankle (Phase-3 three-layer foot).
@@ -45,7 +49,7 @@ ROLE_TO_SIDESLOT = {
 }
 
 
-def build_role_tracks(samples, counts, frame_t, n, discipline, max_gap=MAX_GAP):
+def build_role_tracks(samples, counts, frame_t, n, discipline, max_gap=MAX_GAP, smooth_window=SMOOTH_WINDOW):
     """Turn in-court samples into role-labelled, gap-repaired output rows (pure — no I/O).
 
     `samples`: list of (t, frame, track_id, u, v) that passed court gating. `counts`: in-court frame
@@ -91,7 +95,7 @@ def build_role_tracks(samples, counts, frame_t, n, discipline, max_gap=MAX_GAP):
         meta = {f: (tid, src) for f, u, v, tid, src in segs}
         primary_tid = Counter(s[3] for s in segs).most_common(1)[0][0]
         filled = fill_track_gaps([(f, u, v) for f, u, v, _, _ in segs], max_gap)
-        smoothed = smooth_track([(frame_t.get(f, 0.0), u, v) for f, u, v, _ in filled])
+        smoothed = smooth_track([(frame_t.get(f, 0.0), u, v) for f, u, v, _ in filled], window=smooth_window)
         for (f, _, _, is_filled), (t, su, sv) in zip(filled, smoothed):
             tid, src = (primary_tid, "interp") if is_filled else meta[f]
             out_rows.append({"t": t, "track_id": int(tid), "u": su, "v": sv, "role": role, "source": src})

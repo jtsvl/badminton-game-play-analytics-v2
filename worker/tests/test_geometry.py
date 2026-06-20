@@ -317,6 +317,19 @@ class TestSmoothTrack(unittest.TestCase):
         track = [(0, 0.2, 0.3), (1, 0.4, 0.5)]
         self.assertEqual(g.smooth_track(track, window=5), track)
 
+    def test_wider_window_damps_jitter_more(self):
+        # zig-zag jitter around a fixed point: a wider window must reduce the residual amplitude more.
+        track = [(i, 0.5 + (0.1 if i % 2 == 0 else -0.1), 0.5) for i in range(20)]
+        amp = lambda out: max(abs(s[1] - 0.5) for s in out[2:-2])  # ignore edge windows
+        self.assertLess(amp(g.smooth_track(track, window=9)), amp(g.smooth_track(track, window=5)))
+
+    def test_wider_window_preserves_monotone_trend(self):
+        # a steady ramp (genuine motion) must still be monotonically increasing after window=9.
+        track = [(i, 0.02 * i, 0.5) for i in range(20)]
+        us = [s[1] for s in g.smooth_track(track, window=9)]
+        self.assertTrue(all(b >= a for a, b in zip(us, us[1:])))
+        self.assertGreater(us[-1], us[0])
+
 
 class TestCourtCropBox(unittest.TestCase):
     """Stage-5 multi-court isolation + tiny-shuttle resolution: crop to the target court's polygon,

@@ -1,7 +1,10 @@
-// DEMO overlay input — feeds the real projection engine (lib/homography.ts) until the CV phase.
-// TODO (P1): replace H_DEMO with `court_calibrations.homography` and the tracks with `track_keyframes`
-// rows for the video. This is the only place the prototype's hand-tuned geometry survives, and even
-// here it is converted to the canonical homography the production path uses — we never project via a quad.
+// DEMO overlay input — the intentional FALLBACK for uncalibrated (seeded) matches, feeding the real
+// projection engine (lib/homography.ts). The live path landed in P1 (commit 22fc7e7): lib/calibration.ts
+// `overlayInputs` derives the court→frame homography from `court_calibrations.confirmed_points` and uses
+// the real `track_keyframes` whenever a calibration exists, only dropping to this demo otherwise. Note we
+// do NOT read `court_calibrations.homography` — that stored matrix is the inverse direction (image-px→u,v,
+// for the worker's gating); the web re-derives the court→frame-fraction direction from the 4 corners.
+// This is the only place the prototype's hand-tuned geometry survives, still as a canonical homography.
 
 import { solveHomography, type Pt } from './homography'
 import type { TrackKey } from './overlay'

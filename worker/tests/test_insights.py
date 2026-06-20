@@ -25,7 +25,31 @@ class TestInsights(unittest.TestCase):
         self.assertEqual(len(speeds), 1)
         self.assertAlmostEqual(speeds[0], 13.40 * 3.6, places=2)
         avg, top = insights.avg_top_speed_kmh(speeds)
+        # single sample -> p98 == that sample (short tracks unchanged vs the old max())
         self.assertAlmostEqual(top, round(13.40 * 3.6, 1), places=1)
+
+    def test_percentile(self):
+        self.assertEqual(insights.percentile([], 0.5), 0.0)
+        self.assertEqual(insights.percentile([7.0], 0.98), 7.0)  # single value -> itself
+        xs = [float(i) for i in range(101)]  # 0..100
+        self.assertAlmostEqual(insights.percentile(xs, 0.0), 0.0)
+        self.assertAlmostEqual(insights.percentile(xs, 1.0), 100.0)
+        self.assertAlmostEqual(insights.percentile(xs, 0.5), 50.0)
+        self.assertAlmostEqual(insights.percentile(xs, 0.98), 98.0)
+        self.assertAlmostEqual(insights.percentile([3.0, 1.0, 2.0], 0.5), 2.0)  # unsorted input
+
+    def test_top_speed_rejects_single_outlier(self):
+        # steady ~12 km/h with one 40 km/h jitter spike (the far-court failure mode).
+        speeds = [12.0] * 50 + [40.0]
+        _, top = insights.avg_top_speed_kmh(speeds)
+        self.assertLess(top, 20.0)  # p98 stays near the steady value...
+        self.assertEqual(40.0, max(speeds))  # ...where the old max() would have returned 40
+
+    def test_top_speed_keeps_genuine_burst(self):
+        # a real sustained burst (many high samples) must survive the percentile.
+        speeds = [10.0] * 30 + [24.0] * 10
+        _, top = insights.avg_top_speed_kmh(speeds)
+        self.assertGreaterEqual(top, 23.0)
 
     def test_sprint_count_counts_bursts(self):
         speeds = [2, 20, 22, 3, 1, 18, 4]  # two separate bursts >= 15
