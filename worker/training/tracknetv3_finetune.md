@@ -101,6 +101,21 @@ cd ../../..
   headline lever, 87.72→97.51% acc); small **`--batch_size` 2–4**; keep `WBCELoss`. fp32.
 - `--device mps` (or `auto`); the patched NaN probe falls back to CPU automatically if MPS produces NaNs.
 
+> **Prior art from the v1 app (`jtsvl/badminton-game-play-analytics`) — white wall.** v1 hit the same wall:
+> out-of-the-box TrackNetV3 detected **≈0% of the shuttle at the apex** on the white wall (16px accurate when
+> it *did* fire) — detection/contrast is the failure, not localization. v1 shipped background-median-concat +
+> court gating but **never** inference-time CLAHE/contrast; it concluded the fix is **fine-tune + augmentation**
+> (this slice) and never built it. Fold v1's stated recipe in when adding augmentation here:
+> - Wide **brightness / contrast / gamma jitter** (simulate the white-wall regime) and **CLAHE / local-contrast
+>   jitter AS AUGMENTATION** (teach the cue internally — *not* an inference-time preprocessing step; the
+>   labeler's CLAHE view is only a human spotting aid).
+> - **Motion blur** (smashes), background-swap, and **hard negatives** (player shirts/faces → zero-target
+>   heatmap). **Horizontal flip only** — never vertical (net/wall asymmetry).
+> - Parked lever: v1's high-pass white-wall "bridge" recovered the shuttle **100% hand-seeded but 0%
+>   autonomously** (drifts onto bright clutter). Revisit only as a **TrackNet-seeded assist** (fill gaps from
+>   confident detections, never self-acquire) **if the white-wall gap persists after this fine-tune** — so
+>   `--alpha 0.5` mixup + white-wall-heavy data is the first lever, not the bridge.
+
 ## 6. Preserve the baseline; promote only on a measured win
 `train.py` saves its winner to `{save_dir}/TrackNet_best.pt`. Using a **fresh `--save_dir exp_ft` keeps the
 inference baseline untouched**. Before anything:

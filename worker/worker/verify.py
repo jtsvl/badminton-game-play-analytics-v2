@@ -1235,6 +1235,17 @@ svg polyline.path{fill:none;stroke:rgba(57,217,138,.5);stroke-width:1.5;vector-e
       <input id="sl" type="range" min="0" max="__NMAX__" value="0" oninput="go(+this.value)">
       <button onclick="step(1)">Weiter &#9654;</button>
       <label>Frame <input id="num" type="number" min="0" max="__NMAX__" value="0" onchange="go(+this.value)"></label>
+      <label>Ansicht
+        <select id="view" onchange="setView(this.value)" title="Kontrast/Sichtbarkeit (Taste C blättert)">
+          <option value="normal">Normal</option>
+          <option value="kontrast">Kontrast</option>
+          <option value="abgedunkelt">Abgedunkelt</option>
+          <option value="invertiert">Invertiert</option>
+          <option value="graustufen">Graustufen</option>
+          <option value="lokalkontrast">Lokalkontrast (CLAHE)</option>
+          <option value="bewegung">Bewegung (Hintergrund)</option>
+        </select>
+      </label>
     </div>
     <div id="stage">
       <img id="frame" src="">
@@ -1271,7 +1282,39 @@ let path = [];                 // dense [[frame,px,py,vis,interp], ...] from the
 let anchors = {};              // frameIdx -> anchor (for the nav strip)
 let boundaries = new Set();
 
-function frameSrc() { return `/frame?idx=${i}`; }   // native 4k, label-independent → browser caches it
+// Contrast/visibility views — make the low-contrast white shuttle easier to spot on the white wall.
+// CSS-filter presets are applied to the frame AND the loupe (never the SVG markers, so anchors stay
+// crisp + on-brand); "bewegung" instead asks the server for the background-difference frame. 'c' cycles.
+const VIEWS = ['normal', 'kontrast', 'abgedunkelt', 'invertiert', 'graustufen', 'lokalkontrast', 'bewegung'];
+const FILTER = {
+  normal: 'none',
+  kontrast: 'contrast(1.9) brightness(0.95)',
+  abgedunkelt: 'brightness(0.5) contrast(2.4)',
+  invertiert: 'invert(1) contrast(1.5)',
+  graustufen: 'grayscale(1) contrast(2.2) brightness(0.95)',
+  lokalkontrast: 'none',                     // server applies CLAHE; no extra CSS
+  bewegung: 'none',                          // server subtracts the background; no extra CSS
+};
+const SERVER_ENH = { lokalkontrast: 'clahe', bewegung: 'diff' };   // these views are rendered server-side
+let view = localStorage.getItem('shuttleView') || 'normal';
+if (!VIEWS.includes(view)) view = 'normal';
+const serverEnh = () => SERVER_ENH[view] || 'none';
+
+function frameSrc() { return `/frame?idx=${i}&enh=${serverEnh()}`; }   // browser caches per (idx, view)
+
+function applyView() {
+  const f = FILTER[view] || 'none';
+  $('frame').style.filter = f;
+  $('loupe').style.filter = f;             // loupe magnifies the same source → keep it enhanced too
+  const sel = $('view'); if (sel) sel.value = view;
+}
+function setView(v) {
+  view = VIEWS.includes(v) ? v : 'normal';
+  localStorage.setItem('shuttleView', view);
+  applyView();
+  $('frame').src = frameSrc();             // re-fetch (server enh may have changed); loupe follows on hover
+}
+function cycleView() { setView(VIEWS[(VIEWS.indexOf(view) + 1) % VIEWS.length]); }
 
 function ovXY(e) {
   const r = $('ov').getBoundingClientRect();
@@ -1373,6 +1416,7 @@ document.addEventListener('keydown', e => {
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
   if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.preventDefault(); undo(); return; }
   if (e.key === 'a' || e.key === 'A') { e.preventDefault(); toggleBoundary(); return; }
+  if (e.key === 'c' || e.key === 'C') { e.preventDefault(); cycleView(); return; }
   if (e.key === 'ArrowRight') step(1);
   if (e.key === 'ArrowLeft') step(-1);
 });
@@ -1398,6 +1442,7 @@ function fitStage() {
 window.addEventListener('resize', fitStage);
 document.documentElement.style.setProperty('--ar', IMG_W + ' / ' + IMG_H);
 fitStage();
+applyView();   // restore the saved contrast view (filter + selector) before the first frame loads
 (async () => { applyState(await (await fetch('/labels')).json()); render(); })();
 </script>
 </body></html>"""
@@ -1449,6 +1494,58 @@ def _serve_shuttle(data: ShuttleData, video_id: str, port: int) -> None:
 
     _load()
 
+    # Background-difference view ("Bewegung"): subtract the static per-clip median so the moving shuttle
+    # pops on the white wall — the labeler's strongest spotting aid. Median is built once from a sample of
+    # frames; per-frame diff JPEGs are lru-cached. cv2/numpy imported lazily (ml extra) as in pipeline/shuttle.
+    _median = [None]
+
+    def _background_median():
+        if _median[0] is None:
+            import cv2
+            import numpy as np
+
+            step = max(1, len(data.frames) // 25)   # ~25 evenly-spaced frames is plenty for a static wall
+            stack = []
+            for k in range(0, len(data.frames), step):
+                img = cv2.imread(str(data.cache / "frames" / f"{int(data.frames[k]['frame']):06d}.jpg"))
+                if img is not None:
+                    stack.append(img)
+            if not stack:
+                raise RuntimeError("no frames to build background median")
+            _median[0] = np.median(np.stack(stack), axis=0).astype("uint8")
+            log.info("shuttle labeler: background median from %d sampled frames", len(stack))
+        return _median[0]
+
+    def _read_frame(idx: int):
+        import cv2
+
+        fnum = int(data.frames[idx]["frame"])
+        img = cv2.imread(str(data.cache / "frames" / f"{fnum:06d}.jpg"))
+        if img is None:
+            raise FileNotFoundError(f"{fnum:06d}.jpg")
+        return img
+
+    def _encode(img) -> bytes:
+        import cv2
+
+        _ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return buf.tobytes()
+
+    @lru_cache(maxsize=512)
+    def _diff_jpeg(idx: int) -> bytes:
+        from .shuttle.enhance import diff_view
+
+        return _encode(diff_view(_read_frame(idx), _background_median()))
+
+    @lru_cache(maxsize=512)
+    def _clahe_jpeg(idx: int) -> bytes:
+        # Local-contrast (CLAHE on L) — v1's named white-shuttle cue; complements the diff view at the apex.
+        from .shuttle.enhance import clahe_view
+
+        return _encode(clahe_view(_read_frame(idx)))
+
+    _ENH = {"diff": _diff_jpeg, "clahe": _clahe_jpeg}
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -1474,9 +1571,17 @@ def _serve_shuttle(data: ShuttleData, video_id: str, port: int) -> None:
                 self._send_bytes(page.encode(), "text/html; charset=utf-8")
                 return
             if u.path == "/frame":
-                idx = max(0, min(nmax, int(parse_qs(u.query).get("idx", ["0"])[0])))
+                q = parse_qs(u.query)
+                idx = max(0, min(nmax, int(q.get("idx", ["0"])[0])))
                 fnum = int(data.frames[idx]["frame"])
                 jpg = data.cache / "frames" / f"{fnum:06d}.jpg"   # native 4k — streamed straight, no re-encode
+                enh = _ENH.get(q.get("enh", ["none"])[0])
+                if enh is not None:
+                    try:
+                        self._send_bytes(enh(idx), "image/jpeg")
+                        return
+                    except Exception as e:  # noqa: BLE001 — fall back to the raw frame if cv2/median fails
+                        log.warning("shuttle labeler: enhanced view failed (%s) — serving raw frame", e)
                 if not jpg.exists():
                     self.send_response(404)
                     self.end_headers()

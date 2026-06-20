@@ -106,7 +106,10 @@ held-out clip** (whole-clip train/val/test splits, never random frames).
 **Slice 2a — answer-key + scoreboard infrastructure: BUILT** (this change).
 - **Shuttle labeler** `verify --shuttle` — native-4K frame + hover-loupe for the few-pixel shuttle; click =
   anchor, Shift/right-click = visibility 0, `a` = segment boundary; server-rendered live interpolation
-  preview. Persists sparse anchors+boundaries to `shuttle_labels.json`.
+  preview. Persists sparse anchors+boundaries to `shuttle_labels.json`. **Contrast/visibility views** (`c`
+  cycles; CSS presets + server-side **background-difference** "Bewegung" and **CLAHE** "Lokalkontrast" views,
+  `shuttle/enhance.py`) make the white-on-white shuttle easier to spot for accurate clicks — CLAHE is the
+  local-contrast cue the v1 app identified, and complements the motion-difference view at the apex.
 - Pure `shuttle/label.py::interpolate_anchors` (dense fill, never crosses a boundary, gaps→vis 0) →
   `import-shuttle-labels` → `shuttle_labels` table (migration `0005`).
 - `shuttle/dataset_export.py` — emits the SAME airspace-masked 512×288 crops inference sees (train ≈
