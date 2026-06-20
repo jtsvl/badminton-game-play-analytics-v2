@@ -98,15 +98,38 @@ removes the cross-court scatter:
    ROI). Projection (airborne → off-court) is the secondary cleanup once detection is real.
 
 ## Next slice (directed by the finding): label → fine-tune
-1. **Shuttle labeler** — add a shuttle mode to `worker/worker/verify.py` (click the shuttle px per frame,
-   persist like the box-drag corrections) → the first shuttle answer key.
-2. **Annotate** ~15–30 rallies across clips (white-wall + over-exposure cases prioritised).
-3. **Fine-tune** WASB and/or TrackNetV3 on the labels (cloud NVIDIA for the run, per CLAUDE.md); re-benchmark
-   raw **pixel** detection (precision/recall) on a held-out clip — the fair winner, measured not eyeballed.
-4. **Projection honesty** (after detection works): image-space overlay, or horizon-guard `apply_homography`
-   and only court-project near-ground events. Then mitigations 2–6 + 2D speed.
-4. Then the spec's layered mitigations (motion cues, fine-tuning on white-wall frames, InpaintNet
-   rectification) and speed (2D estimate). Speed/rally/hit remain deferred.
+Plan/runbook: `specs/features/shuttle-finetune-plan.md`. Locked decisions: **fine-tune TrackNetV3 only**
+(WASB stays frozen as the before/after benchmark — its public repo is eval-only); **runs locally on the
+Mac Studio M4 Max (MPS)** (overrides `30-ml-pipeline.md`'s cloud-NVIDIA line; see there); **measure on a
+held-out clip** (whole-clip train/val/test splits, never random frames).
+
+**Slice 2a — answer-key + scoreboard infrastructure: BUILT** (this change).
+- **Shuttle labeler** `verify --shuttle` — native-4K frame + hover-loupe for the few-pixel shuttle; click =
+  anchor, Shift/right-click = visibility 0, `a` = segment boundary; server-rendered live interpolation
+  preview. Persists sparse anchors+boundaries to `shuttle_labels.json`.
+- Pure `shuttle/label.py::interpolate_anchors` (dense fill, never crosses a boundary, gaps→vis 0) →
+  `import-shuttle-labels` → `shuttle_labels` table (migration `0005`).
+- `shuttle/dataset_export.py` — emits the SAME airspace-masked 512×288 crops inference sees (train ≈
+  inference, byte-identity verified), strict TrackNetV3 layout + per-match `median.npz` (concat lever).
+- `eval_shuttle.py::score_against_labels` — precision/recall/F1 + median px error, pinned to 512×288 /
+  tol=4px, via `--labels`.
+- TrackNetV3 CUDA→MPS training patch + runbook under `worker/training/` (the vendored repo hard-codes
+  `.cuda()`; verified: 2-batch CPU step runs without NaNs).
+
+**Slice 2b — the actual run (blocked on data):** annotate ~15–30 rallies (white-wall + over-exposure first)
+across **≥3–4 clips / ≥2 sessions** → fine-tune on MPS (LR 1e-4, mixup α 0.5) → re-benchmark raw **pixel**
+detection on the held-out clip. Only ONE ~30s clip exists today, so 2b waits on more recordings.
+
+### Before/after raw-pixel detection (held-out clip, 512×288, tol=4px) — *filled in 2b*
+| backend | precision | recall | F1 | median px err | n (visible) |
+|---|---|---|---|---|---|
+| WASB (frozen) | — | — | — | — | — |
+| TrackNetV3 baseline | — | — | — | — | — |
+| TrackNetV3 fine-tuned | — | — | — | — | — |
+
+**Projection honesty** (after detection works): image-space overlay, or horizon-guard `apply_homography` and
+only court-project near-ground events. Then the spec's layered mitigations (motion cues, InpaintNet
+rectification) + 2D speed. Speed/rally/hit remain deferred.
 
 ## Config / env
 `SHUTTLE_TRACKER` (wasb|tracknetv3|fake), `SHUTTLE_CONF_THR` (0.5), `SHUTTLE_MAX_STEP` (0.5 court units),

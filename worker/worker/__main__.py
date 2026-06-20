@@ -79,6 +79,18 @@ def main() -> None:
         import_cli(sys.argv[2:])
         return
 
+    if len(sys.argv) > 1 and sys.argv[1] == "import-shuttle-labels":
+        from .import_shuttle_labels import import_cli
+
+        import_cli(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "export-shuttle-dataset":
+        from .shuttle.dataset_export import export_cli
+
+        export_cli(sys.argv[2:])
+        return
+
     once = "--once" in sys.argv[1:]  # drain queued jobs then exit (dev / cron)
     cfg = load_config()
     log.info("worker %s starting (configured=%s, once=%s)", cfg.worker_id, cfg.configured, once)

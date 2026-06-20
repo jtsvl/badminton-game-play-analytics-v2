@@ -29,6 +29,10 @@ always surfaced with uncertainty (the UI already says „Schätzung").
 ## Locked decisions (do not relitigate without the user)
 1. Greenfield rebuild in **v2**; the `handovers/` READMEs reference a v1 repo that does not exist here — treat as intent, not code.
 2. **Supabase self-hosted on Coolify** is authoritative. Schema = versioned SQL migrations in `/supabase/migrations`.
+   For ALL Supabase access (migrations, queries, introspection) use the **`supabase` MCP from `.mcp.json`**
+   (`https://supabasekong-badminton-analytics.apps.bc-rheinbach.de/mcp`) — it is the authoritative instance the
+   worker `.env` also points at. Do **not** use the `Supabase_BC_Rheinbach` MCP (it targets a different/empty
+   project missing the base schema). Apply DDL via that MCP's `apply_migration`.
 3. Full-breadth pipeline is the target, built in phases (P0→P4 in the plan). **Singles first**, doubles in P3+.
 4. Court calibration = **auto-detect with manual correction** (drag the 4 corners; user picks the target court).
 5. **White-shuttle-vs-white-wall** low contrast is a first-class requirement (see ML spec stage 5).
@@ -65,7 +69,7 @@ overlay tracks are `[{t,u,v}]` in court coords u,v∈[0,1]). The DB schema is th
 ## Commands
 - Web: `cd web && npm install && npm run dev` · test `npm test` · lint `npm run lint`.
 - Worker: `cd worker && uv sync` (or `pip install -e '.[dev]'`) · run `python -m worker` · test `pytest`.
-- DB: apply `supabase/migrations/*.sql` to the Coolify Postgres (see `/supabase/README.md`).
+- DB: apply `supabase/migrations/*.sql` via the **`supabase` MCP from `.mcp.json`** (`apply_migration`); see `/supabase/README.md`.
 
 ## Git
 Work on a feature branch (currently `feat/p0-foundations`). Commit/push only when the user asks.

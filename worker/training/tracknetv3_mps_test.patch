@@ -1,0 +1,11 @@
+--- test.py.orig	2026-06-20 09:08:18
++++ test.py	2026-06-20 09:09:18
+@@ -336,7 +336,7 @@
+         data_prob = data_loader
+     
+     for step, (i, x, y, _, _) in enumerate(data_prob):
+-        x, y = x.float().cuda(), y.float().cuda()
++        x, y = x.float().to(param_dict.get('device', 'cpu')), y.float().to(param_dict.get('device', 'cpu'))  # PATCH: .cuda()→DEVICE
+         with torch.no_grad():
+             y_pred = model(x)
+ 

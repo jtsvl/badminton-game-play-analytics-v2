@@ -1,0 +1,110 @@
+--- train.py.orig	2026-06-20 09:08:18
++++ train.py	2026-06-20 09:09:10
+@@ -15,7 +15,24 @@
+ from utils.metric import WBCELoss
+ from utils.visualize import plot_heatmap_pred_sample, plot_traj_pred_sample, write_to_tb
+ 
++# ── LOCAL MPS PATCH (worker/training/tracknetv3_finetune.md) ──────────────────────────────────────
++# Upstream hard-codes .cuda(); on a CUDA-less Mac that hard-fails (PYTORCH_ENABLE_MPS_FALLBACK only
++# redirects unimplemented ops, NOT explicit .cuda()). Route the TrackNet train+eval path through a
++# global DEVICE (mps→cpu), mirroring worker/shuttle/tracknetv3.py:83-100. fp32, scope = TrackNet only.
++DEVICE = "cpu"
+ 
++
++def pick_device(prefer="auto"):
++    if prefer == "cpu":
++        return "cpu"
++    if prefer == "cuda" and torch.cuda.is_available():
++        return "cuda"
++    if prefer in ("auto", "mps") and torch.backends.mps.is_available():
++        return "mps"
++    return "cpu"
++# ──────────────────────────────────────────────────────────────────────────────────────────────────
++
++
+ def mixup(x, y, alpha=0.5):
+     """Returns mixed inputs, pairs of targets.
+     
+@@ -52,7 +69,7 @@
+     """
+ 
+     mask = np.random.binomial(1, mask_ratio, size=mask_size)
+-    mask = torch.from_numpy(mask).float().cuda().unsqueeze(-1)
++    mask = torch.from_numpy(mask).float().to(DEVICE).unsqueeze(-1)  # PATCH: .cuda()→.to(DEVICE)
+ 
+     return mask
+ 
+@@ -83,7 +100,7 @@
+     
+     for step, (_, x, y, c, _) in enumerate(data_prob):
+         optimizer.zero_grad()
+-        x, y = x.float().cuda(), y.float().cuda()
++        x, y = x.float().to(DEVICE), y.float().to(DEVICE)  # PATCH: .cuda()→.to(DEVICE)
+ 
+         # Sample mixup
+         if param_dict['alpha'] > 0:
+@@ -192,6 +209,11 @@
+     parser.add_argument('--mask_ratio', type=float, default=0.3, help='ratio of random mask during training InpaintNet')
+     parser.add_argument('--tolerance', type=float, default=4, help='difference tolerance of center distance between prediction and ground truth in input size')
+     parser.add_argument('--resume_training', action='store_true', default=False, help='resume training from experiment directory')
++    # PATCH: explicit init-checkpoint (load weights + FRESH optimizer; --resume_training instead loads
++    # {model}_cur.pt and its param_dict, which OVERRIDES your LR/epochs — not what a fine-tune wants).
++    parser.add_argument('--init_ckpt', type=str, default='', help='checkpoint to initialise weights from (fresh optimizer)')
++    # PATCH: device override; 'cpu' is the mandatory 2-batch NaN-probe before the real MPS run.
++    parser.add_argument('--device', type=str, default='auto', choices=['auto', 'mps', 'cpu', 'cuda'], help='compute device')
+     parser.add_argument('--seed', type=int, default=13, help='random seed')
+     parser.add_argument('--save_dir', type=str, default='exp', help='directory to save the checkpoints and prediction result')
+     parser.add_argument('--debug', action='store_true', default=False)
+@@ -201,8 +223,9 @@
+ 
+     np.random.seed(args.seed)
+     torch.manual_seed(args.seed)
+-    torch.cuda.manual_seed(args.seed)
+-    torch.backends.cudnn.deterministic = True
++    if torch.cuda.is_available():            # PATCH: guard — no-op (and would error) on a CUDA-less Mac
++        torch.cuda.manual_seed(args.seed)
++        torch.backends.cudnn.deterministic = True
+ 
+     if not os.path.exists(args.save_dir):
+         os.makedirs(args.save_dir)
+@@ -229,11 +252,17 @@
+     data_mode = 'heatmap' if args.model_name == 'TrackNet' else 'coordinate'
+     train_dataset = Shuttlecock_Trajectory_Dataset(split='train', seq_len=args.seq_len, sliding_step=1, data_mode=data_mode, bg_mode=args.bg_mode, frame_alpha=args.frame_alpha, debug=args.debug)
+     val_dataset = Shuttlecock_Trajectory_Dataset(split='val', seq_len=args.seq_len, sliding_step=args.seq_len, data_mode=data_mode, bg_mode=args.bg_mode, debug=args.debug)
+-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True, pin_memory=True)
+-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, drop_last=False, pin_memory=True)
++    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True, pin_memory=False)   # PATCH: pin_memory→False (MPS)
++    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, drop_last=False, pin_memory=False)    # PATCH: pin_memory→False (MPS)
+ 
+     print(f'Create {args.model_name}...')
+-    model = get_model(args.model_name, args.seq_len, args.bg_mode).cuda() if args.model_name == 'TrackNet' else get_model(args.model_name).cuda()
++    DEVICE = pick_device(getattr(args, 'device', 'auto'))   # PATCH: choose mps→cpu and route the model there
++    print(f'Device: {DEVICE}')
++    param_dict['device'] = DEVICE                           # so eval_tracknet (test.py) lands tensors on it too
++    model = get_model(args.model_name, args.seq_len, args.bg_mode).to(DEVICE) if args.model_name == 'TrackNet' else get_model(args.model_name).to(DEVICE)
++    if getattr(args, 'init_ckpt', ''):                      # PATCH: fine-tune init — load weights, keep a fresh optimizer
++        print(f'Init weights from {args.init_ckpt} (fresh optimizer)...')
++        model.load_state_dict(torch.load(args.init_ckpt, map_location=DEVICE)['model'])
+     train_fn = train_tracknet if args.model_name == 'TrackNet' else train_inpaintnet
+     eval_fn = eval_tracknet if args.model_name == 'TrackNet' else eval_inpaintnet
+ 
+@@ -267,6 +296,19 @@
+         start_epoch = 0
+         
+ 
++    # PATCH: one-shot MPS NaN probe → CPU fallback (mirror worker/shuttle/tracknetv3.py:83-100). fp32.
++    if DEVICE == 'mps':
++        try:
++            _probe = next(iter(train_loader))[1].float().to(DEVICE)
++            with torch.no_grad():
++                _out = model(_probe)
++            if bool(torch.isnan(_out).any()):
++                print('NaN on MPS probe — falling back to CPU')
++                DEVICE = 'cpu'; model.to(DEVICE); param_dict['device'] = DEVICE
++        except Exception as e:
++            print(f'MPS probe failed ({e}) — falling back to CPU')
++            DEVICE = 'cpu'; model.to(DEVICE); param_dict['device'] = DEVICE
++
+     print(f'Start training...')
+     train_start_time = time.time()
+     for epoch in range(start_epoch, args.epochs):

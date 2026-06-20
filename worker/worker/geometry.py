@@ -392,6 +392,18 @@ def map_detection_to_frame(
     return (x0 + mx * (x1 - x0) / model_w, y0 + my * (y1 - y0) / model_h)
 
 
+def frame_to_model_xy(
+    px: float, py: float, crop_box: Tuple[int, int, int, int], model_w: int, model_h: int,
+) -> Pt:
+    """Inverse of `map_detection_to_frame`: full-frame pixels (px,py) -> model-input pixels (mx,my).
+
+    Both the dataset exporter (label click -> 512x288 CSV X,Y) and the scoreboard (parquet's full-frame
+    px,py and the normalized labels -> the single 512x288 space the metric is pinned to) need this. It is
+    the exact algebraic inverse so a round-trip through `map_detection_to_frame` is the identity."""
+    x0, y0, x1, y1 = crop_box
+    return ((px - x0) * model_w / (x1 - x0), (py - y0) * model_h / (y1 - y0))
+
+
 def reject_shuttle_outliers(track: List[Sample], max_step: float) -> List[Sample]:
     """Drop isolated court-space spikes: a point that juts > max_step from BOTH neighbours while those
     neighbours stay within max_step of each other (a false positive on another court / a misdetection).
