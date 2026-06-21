@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { MatchList } from './pages/MatchList'
 import { MatchReport } from './pages/MatchReport'
 import { Calibrate } from './pages/Calibrate'
+import { PlayerReview } from './pages/PlayerReview'
 import { Upload } from './pages/Upload'
 
 export function App() {
@@ -11,6 +12,7 @@ export function App() {
         <Route path="/" element={<MatchList />} />
         <Route path="/match/:slug" element={<MatchReport />} />
         <Route path="/match/:slug/calibrate" element={<Calibrate />} />
+        <Route path="/match/:slug/review" element={<PlayerReview />} />
         <Route path="/upload" element={<Upload />} />
       </Routes>
     </BrowserRouter>

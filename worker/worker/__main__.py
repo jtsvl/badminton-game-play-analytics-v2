@@ -3,7 +3,9 @@
 Job `stage` selects the slice to run, honoring the gates (specs/40-worker-contract.md):
   ingest    → [ingest]                                 then match.status='calibrating'
   calibrate → [calibrate,detect,pose,gate_track,aggregate,overlay]  then match.status='review'
-The trainer confirms corners in the web UI between the two jobs.
+  remap     → [remap,aggregate,overlay]                then match.status='done'
+The trainer confirms corners (calibrate) then the track→player mapping (remap, FR-35) in the web UI
+between jobs; remap reuses the cached tracks.parquet, so it recomputes stats/overlays without re-detecting.
 """
 from __future__ import annotations
 
@@ -26,6 +28,9 @@ def _slice_for(job: dict) -> tuple[list[str], str | None]:
         return ["ingest"], "calibrating"
     if stage in ("calibrate", "resume_after_calibration"):
         return RESUME_STAGES, "review"
+    if stage == "remap":
+        # FR-35: trainer corrected the track→player mapping → cheap recompute (no re-detect).
+        return ["remap", "aggregate", "overlay"], "done"
     return [stage], None
 
 

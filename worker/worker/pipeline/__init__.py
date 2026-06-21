@@ -41,7 +41,9 @@ def _lazy(name: str) -> Callable[[StageContext], None]:
 # Real stages. pose is the Phase-3 durable foot fix (RTMPose); shuttle is stage 5 (WASB/TrackNetV3
 # behind shuttle.get_tracker). rally_hit/stroke stay stubbed for P2/P3. A name not listed here runs the
 # no-op _todo stub. shuttle joins RESUME_STAGES (__main__) only once verified on real footage.
-_REAL = ("ingest", "calibrate", "detect", "pose", "gate_track", "shuttle", "aggregate", "overlay")
+# `remap` is the FR-35 identity-recompute prep: it resolves the cached tracks.parquet (no re-detect) so a
+# `remap` job can re-run [aggregate, overlay] after the trainer corrects the track→player mapping.
+_REAL = ("ingest", "calibrate", "detect", "pose", "gate_track", "shuttle", "aggregate", "overlay", "remap")
 STAGES: Dict[str, Callable[[StageContext], None]] = {name: _todo(name) for name in STAGE_ORDER}
 STAGES.update({name: _lazy(name) for name in _REAL})
 

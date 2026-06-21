@@ -77,6 +77,9 @@ implemented + verified. Three IDs are pinned to match the handoff READMEs: **FR-
 - **FR-33** Each player opens their report via a **personal link** (magic-link or signed slug); tabs order so they are „Du".
 - **FR-34** RLS: players read only their own match reports; only admin/service-role writes.
 - **FR-35** **Review/repair UI**: before publish, fix player→identity assignment, drop/merge a rally, relabel a shot.
+  The player→identity mapping slice is built (`/match/:slug/review`, spec `features/player-identity-review.md`):
+  the trainer confirms/corrects each `match_players` (side,slot)→(`player_id`,`track_label`) binding after
+  the worker's role-based estimate, then a `remap` job recomputes stats/overlays. Rally/shot edits stay `todo`.
 - **FR-36** A player can request data deletion (footer copy promises this); requests are tracked in `deletion_log`.
 - **FR-38** Player consent is recorded (`players.consent_date`); processing/sharing respects it (GDPR, minors).
 
