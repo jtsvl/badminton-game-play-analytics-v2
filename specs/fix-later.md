@@ -51,18 +51,23 @@ low-contrast far player (`conf=0.25,imgsz=1280`); re-ID mitigates downstream but
 grounding** (`pose.ground_occluded_feet`) is built + unit-tested but **unverified on real data** — it can't help
 this clip (no detection → no head) and needs a partial-occlusion answer key (mostly doubles, P3) to prove.
 
-## Far-court top-speed inflation (P1 movement tier)
-The two players furthest from the camera show an inflated **top speed** (~30–34 km/h on the
+## Far-court top-speed inflation (P1 movement tier) — FIXED
+The two players furthest from the camera showed an inflated **top speed** (~30–34 km/h on the
 `2026-06-14-doppel` clip); near players are believable (~7–25 km/h). Cause: the far baseline is only
 ~610 px wide → very few pixels per metre, so ankle-point jitter is amplified there, and
 `top_kmh = max(step speeds)` is the most outlier-sensitive statistic possible (a single bad frame-pair
 sets it). It's the inherent monocular far-court noise, not a calibration error.
 
-**Fix:** (1) robust top speed — use a high percentile (e.g. 98th) of the smoothed step-speeds instead of
-`max`; (2) stronger trajectory smoothing (`worker/worker/geometry.smooth_track` window 5 → ~9, ~0.75 s).
-Both TDD-able in `worker/tests/`. Won't flatten genuine bursts.
+**Fix (done):** (1) robust top speed — `insights.avg_top_speed_kmh` now uses the **98th percentile**
+(`insights.percentile`, linear-interp) of the step-speeds instead of `max`, so one jittery far-court
+frame-pair no longer sets the headline; genuine sustained bursts survive (p98 ~= max on ≤2 samples, so
+short tracks are unchanged). (2) **Stronger smoothing** — the `gate_track` call to
+`geometry.smooth_track` now uses window **9** (~0.75 s @ ~12 Hz), env-tunable via `SMOOTH_WINDOW`
+(default 9; `smooth_track`'s own default stays 5 for other callers). Both unit-tested
+(`tests/test_insights.py`, `tests/test_geometry.py`). Still inherent monocular noise on the far court —
+the deeper RC2 fixes (image-space filtering, distance-weighted uncertainty) remain below.
 
-_Raised 2026-06-17 while reviewing the trainer's real calibration._
+_Raised 2026-06-17 while reviewing the trainer's real calibration; fixed 2026-06-20._
 
 ## Automatic court detection (deferred — build-plan P4)
 Today calibration is fully **manual**: the calibrate screen drops a generic starting trapezoid and the
