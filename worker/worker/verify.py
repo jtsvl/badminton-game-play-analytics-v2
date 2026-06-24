@@ -1217,7 +1217,13 @@ svg .gap{fill:#e74c3c;opacity:.85}
 svg .anc{fill:#FA8832;stroke:#1A0500;stroke-width:2;vector-effect:non-scaling-stroke}
 svg .occ{fill:none;stroke:#888;stroke-width:3;vector-effect:non-scaling-stroke}
 svg .cur{stroke:#fff;stroke-width:3;vector-effect:non-scaling-stroke}
-svg polyline.path{fill:none;stroke:rgba(57,217,138,.5);stroke-width:1.5;vector-effect:non-scaling-stroke}
+svg polyline.path{fill:none;stroke:rgba(57,217,138,.35);stroke-width:1;vector-effect:non-scaling-stroke}
+#jsonpanel{margin-top:12px}
+.jsonbar{display:flex;align-items:center;justify-content:space-between;background:#1a1a1c;border:1px solid #333;border-bottom:none;border-radius:8px 8px 0 0;padding:5px 8px}
+.jsonbar .jsonlabel{font-size:11px;color:#888;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.copy{display:inline-flex;align-items:center;justify-content:center;padding:4px 6px;line-height:0;background:transparent;border:1px solid #333;color:#ccc}
+.copy:hover{border-color:#FA8832;color:#FA8832}
+.jsonview{margin:0;max-height:320px;overflow:auto;background:#0d0d0e;border:1px solid #333;border-radius:0 0 8px 8px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.45;color:#cfcfcf;white-space:pre;tab-size:2}
 </style></head><body>
 <header>
   <h1>Shuttle markieren</h1>
@@ -1246,6 +1252,9 @@ svg polyline.path{fill:none;stroke:rgba(57,217,138,.5);stroke-width:1.5;vector-e
           <option value="bewegung">Bewegung (Hintergrund)</option>
         </select>
       </label>
+      <label title="Nach dem Setzen eines Ankers automatisch zum nächsten Frame springen">
+        <input id="autoadv" type="checkbox" onchange="setAutoAdvance(this.checked)"> Auto-Weiter
+      </label>
     </div>
     <div id="stage">
       <img id="frame" src="">
@@ -1257,11 +1266,19 @@ svg polyline.path{fill:none;stroke:rgba(57,217,138,.5);stroke-width:1.5;vector-e
     <h2>Shuttle-Spur</h2>
     <p id="help"><b>Klick</b> = Shuttle-Punkt (Anker) im aktuellen Frame. <b>Shift-/Rechtsklick</b> = Frame
        als <b>verdeckt</b> markieren (visibility 0). Taste <b>A</b> = <b>Schlag-/Segmentgrenze</b> (es wird
-       nie darüber interpoliert). <b>Cmd/Ctrl+Z</b> = Anker im Frame löschen. Die <b>Lupe</b> folgt dem Cursor
+       nie darüber interpoliert). <b>X</b> oder <b>Cmd/Ctrl+Z</b> = Anker im Frame löschen. Die <b>Lupe</b> folgt dem Cursor
        für pixelgenaue Klicks. Setz Anker dort, wo die grüne Linie vom Shuttle abweicht (am Scheitelpunkt dicht).</p>
     <div id="info" style="font-size:12px;color:#aaa"></div>
     <div id="flagbar" class="flagbar"></div>
-    <button onclick="downloadJSON()" style="width:100%;margin-top:12px">JSON herunterladen</button>
+    <div id="jsonpanel">
+      <div class="jsonbar">
+        <span class="jsonlabel">shuttle_labels.json</span>
+        <button class="copy" onclick="copyJSON()" title="JSON kopieren" aria-label="JSON kopieren">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+      </div>
+      <pre id="json" class="jsonview"></pre>
+    </div>
   </div>
 </div>
 <div id="toast"></div>
@@ -1300,6 +1317,10 @@ let view = localStorage.getItem('shuttleView') || 'normal';
 if (!VIEWS.includes(view)) view = 'normal';
 const serverEnh = () => SERVER_ENH[view] || 'none';
 
+// Auto-advance: after placing an anchor, jump to the next frame (fast labeling). Persisted, default on.
+let autoAdvance = localStorage.getItem('shuttleAutoAdvance') !== '0';
+function setAutoAdvance(on) { autoAdvance = !!on; localStorage.setItem('shuttleAutoAdvance', on ? '1' : '0'); }
+
 function frameSrc() { return `/frame?idx=${i}&enh=${serverEnh()}`; }   // browser caches per (idx, view)
 
 function applyView() {
@@ -1328,12 +1349,12 @@ function drawOverlay() {
   const line = path.filter(r => r[3] === 1 && r[1] != null).map(r => `${r[1]*IMG_W},${r[2]*IMG_H}`).join(' ');
   if (line) s += `<polyline class="path" points="${line}"/>`;
   const R = IMG_W * 0.0035;
+  // Per-frame view: the faint polyline above carries the whole arc for context, but only the CURRENT
+  // frame's marker is drawn — dots from other frames are hidden so each frame reads cleanly.
   for (const [f, px, py, vis, interp] of path) {
-    const cur = f === i ? ' cur' : '';
-    if (vis === 1 && px != null) {
-      const cls = interp ? 'fill' : 'anc';
-      s += `<circle class="${cls}${cur}" cx="${px*IMG_W}" cy="${py*IMG_H}" r="${interp ? R : R*1.8}"/>`;
-    }
+    if (f !== i || vis !== 1 || px == null) continue;
+    const cls = interp ? 'fill' : 'anc';
+    s += `<circle class="${cls} cur" cx="${px*IMG_W}" cy="${py*IMG_H}" r="${interp ? R : R*1.8}"/>`;
   }
   // occlusion + current-frame crosshair markers that have no image position: draw on the frame edge isn't
   // useful, so they live in the nav strip instead. Show the current frame's anchor highlight only.
@@ -1360,7 +1381,12 @@ function updateMeta() {
 }
 
 function render() {
-  $('frame').src = frameSrc();
+  const src = frameSrc();
+  $('frame').src = src;
+  // Keep the loupe in sync on frame change: it's otherwise only refreshed on mousemove, so advancing
+  // frames with the cursor parked over the stage would leave it magnifying the previous frame. Position
+  // stays correct (the cursor hasn't moved) — only the source frame needs updating.
+  if ($('loupe').style.display === 'block') $('loupe').style.backgroundImage = `url(${src})`;
   $('sl').value = i; $('num').value = i;
   updateMeta(); drawOverlay(); renderStrip();
 }
@@ -1372,6 +1398,7 @@ function applyState(d) {   // server response carries the fresh anchors/boundari
   anchors = {};
   for (const a of d.anchors || []) anchors[a.frame_idx] = a;
   boundaries = new Set(d.boundaries || []);
+  renderJSON();
 }
 
 async function placeAnchor(nx, ny, visible) {
@@ -1379,7 +1406,10 @@ async function placeAnchor(nx, ny, visible) {
   if (visible) { body.px = round4(nx); body.py = round4(ny); }
   applyState(await (await fetch('/anchor', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})).json());
   toast(visible ? 'Anker gesetzt' : 'als verdeckt markiert');
-  drawOverlay(); renderStrip(); updateMeta();
+  // auto-advance to the next frame for rapid labeling (toggle in the toolbar); step(1)→render() redraws
+  // overlay/strip/meta + loupe. When off, redraw in place so the just-placed anchor still shows.
+  if (autoAdvance) step(1);
+  else { drawOverlay(); renderStrip(); updateMeta(); }
 }
 async function toggleBoundary() {
   applyState(await (await fetch('/boundary', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({frame_idx: i})})).json());
@@ -1415,6 +1445,7 @@ $('stage').addEventListener('mouseleave', () => { loupe.style.display = 'none'; 
 document.addEventListener('keydown', e => {
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
   if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.preventDefault(); undo(); return; }
+  if (e.key === 'x' || e.key === 'X') { e.preventDefault(); undo(); return; }   // delete this frame's anchor
   if (e.key === 'a' || e.key === 'A') { e.preventDefault(); toggleBoundary(); return; }
   if (e.key === 'c' || e.key === 'C') { e.preventDefault(); cycleView(); return; }
   if (e.key === 'ArrowRight') step(1);
@@ -1425,12 +1456,24 @@ function toast(msg) {
   const t = $('toast'); t.textContent = msg; t.classList.add('show');
   clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove('show'), 1500);
 }
-async function downloadJSON() {
-  const text = await (await fetch('/labels')).text();
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
-  a.download = `shuttle_labels_${VIDEO_ID.slice(0, 8)}.json`;
-  a.click();
+function labelsJSON() {
+  // mirror the saved shuttle_labels.json: sparse anchors + segment boundaries (the dense `path` is derived)
+  const arr = Object.values(anchors).sort((a, b) => a.frame_idx - b.frame_idx);
+  const bnd = [...boundaries].sort((a, b) => a - b);
+  return JSON.stringify({video_id: VIDEO_ID, anchors: arr, boundaries: bnd}, null, 2);
+}
+function renderJSON() { const el = $('json'); if (el) el.textContent = labelsJSON(); }
+async function copyJSON() {
+  const text = labelsJSON();
+  try {
+    await navigator.clipboard.writeText(text);   // 127.0.0.1 is a secure context, so this is available
+  } catch (e) {
+    const ta = document.createElement('textarea');   // fallback for older/locked-down browsers
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } finally { ta.remove(); }
+  }
+  toast('JSON kopiert');
 }
 
 function fitStage() {
@@ -1443,6 +1486,7 @@ window.addEventListener('resize', fitStage);
 document.documentElement.style.setProperty('--ar', IMG_W + ' / ' + IMG_H);
 fitStage();
 applyView();   // restore the saved contrast view (filter + selector) before the first frame loads
+$('autoadv').checked = autoAdvance;   // reflect the saved auto-advance preference in the toolbar
 (async () => { applyState(await (await fetch('/labels')).json()); render(); })();
 </script>
 </body></html>"""
@@ -1634,7 +1678,7 @@ def _serve_shuttle(data: ShuttleData, video_id: str, port: int) -> None:
     n_anchor = len(anchors)
     note = f" · {n_anchor} Anker geladen" if n_anchor else ""
     print(f"\n  ▶ Shuttle markieren: {url}\n    {len(data.frames)} Frames · Klick=Anker, Shift/Rechtsklick=verdeckt, "
-          f"A=Grenze, Cmd+Z=löschen{note}\n")
+          f"A=Grenze, X/Cmd+Z=löschen{note}\n")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

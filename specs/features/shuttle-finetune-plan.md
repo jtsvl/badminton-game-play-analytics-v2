@@ -37,8 +37,9 @@ clip — not eyeball it.
 - **Three whole-clip splits (train / val / test), never random frames.** `train.py` *requires* a
   populated `val` split — it builds a val dataset every run and keeps the best checkpoint by val
   accuracy (so "early-stop on val" really means "keep best-val checkpoint"). So we need train **and**
-  val **and** a held-out test, not just train+test. Adjacent 12fps frames are near-duplicates, so every
-  split is a whole clip/rally, never a random-frame split (which would leak). **Data prerequisite (hard
+  val **and** a held-out test, not just train+test. Adjacent frames are near-duplicates (even more so at the
+  shuttle pipeline's 30fps — see §2b), so every split is a whole clip/rally, never a random-frame split
+  (which would leak). **Data prerequisite (hard
   gate, see §2b): this needs ≥3–4 clips across ≥2 sessions/lighting. Only ONE ~30s clip exists today, so
   the fine-tune cannot run until more are recorded + ingested.**
 
@@ -167,14 +168,22 @@ disagreeing (the convention lives there, not in CLAUDE.md).
 
 ## Slice 2b — Hands-on, user-driven on the Mac
 0. **Data gate (do this first or nothing downstream runs).** Record + ingest **≥3–4 clips across ≥2
-   sessions / lighting (incl. over-exposure)** — ≥2 train, 1 val, 1 held-out test, all distinct sessions
-   so the metric measures generalization, not memorization. Only ONE ~30s clip exists today.
-   **Framerate decision:** the 12fps cache can't sample a smash (1–3 frames, blurred) — either re-ingest
-   label clips at higher `analysis_fps` (source ~60fps; `ingest.py` takes the param) or scope the
-   fine-tune+metric to non-smash rallies and mark smashes `visibility=0`. Record this as an honest limit.
+   sessions / lighting (incl. over-exposure)**, all ingested at **`--analysis-fps 30`** — ≥2 train, 1 val,
+   1 held-out test, all distinct sessions so the metric measures generalization, not memorization. Only ONE
+   ~30s clip exists today.
+   **Framerate decision (RESOLVED 2026-06-21 → 30 fps).** The 12fps cache can't sample a smash (1–3 frames,
+   blurred), so shuttle fine-tune/eval clips ingest at **`analysis_fps=30`** (`enqueue --analysis-fps 30`;
+   a clean ÷2 of the ~60fps source, matches the public badminton TrackNet distribution, makes smashes
+   trackable). The player-movement pipeline stays at the default **12 fps** (its `gate_track` smoothing/gap
+   params are 12fps frame-counts — see the guard-rail in `shuttle-tracking.md`). **60 fps stays a
+   re-ingestable comparison option**: the ~60fps source is retained in storage, and 30fps sample times are a
+   subset of 60fps, so 30fps labels remap *exactly* onto a 60fps grid (top-up the smashes, no full re-label)
+   for an `eval_shuttle --compare`. f35d0984 (slug `2026-06-14-doppel`) was re-ingested at 30 fps (890
+   frames) and is being re-labeled from scratch.
 1. Label the rallies with the new tool (white-wall + over-exposure first), then `import-shuttle-labels`
-   to Postgres. **Effort reality:** ~15–30 rallies ≈ 750–1500 labeled frames; airborne arcs need ~1
-   anchor every 2–4 frames. **Recommended: start with a 5–8 rally pilot** to prove labeler → export →
+   to Postgres. **Effort reality:** ~15–30 rallies ≈ 750–1500 labeled frames (a full ~30s clip ≈ 890 frames
+   at 30fps); airborne arcs need ~1 anchor every 2–4 frames (time-based, not fps-locked). **Recommended:
+   start with a 5–8 rally pilot** to prove labeler → export →
    train → scoreboard end-to-end before scaling up.
 2. Export dataset (3 splits + `median.npz`, §4); fine-tune TrackNetV3 on MPS per the runbook (§6).
 3. Re-benchmark **raw pixel** precision/recall (tol=4px, 512×288 space) on the **held-out test clip** via

@@ -59,7 +59,14 @@ Both reuse the upstream repos (cloned to `worker/.cache/_vendor/`, git-ignored) 
 - **Airborne shuttle ≠ ground point.** `apply_homography` maps the **ground** plane; a shuttle in the air
   projects "beyond" its true spot, and a pixel above the court's ground-plane horizon projects toward
   infinity. So court-space (u,v) is a „Schätzung" — and for high shots it is **unusable**, not just noisy.
-- **12 fps cache** undersamples a smash; some dropouts are undersampling, not camouflage.
+- **Frame rate (shuttle = 30 fps; movement = 12 fps).** Shuttle fine-tune/eval clips now ingest at **30 fps**
+  (`enqueue --analysis-fps 30`) so smashes are sampled; the player-movement pipeline stays at the default
+  12 fps. (At 12 fps some dropouts were undersampling, not camouflage.) 60 fps remains a re-ingestable
+  comparison option — see `shuttle-finetune-plan.md` §2b "Framerate decision".
+- **Guard-rail: `gate_track` is fps-coupled.** Its `SMOOTH_WINDOW=9` / `MAX_GAP=8` are 12fps frame-counts
+  (≈0.75 s / ≈0.67 s). The 30fps shuttle path runs only ingest→label→eval (not the movement stages), so this
+  never bites today — but if a 30fps clip is ever pushed through the full movement pipeline, scale them ×2.5
+  via env (`SMOOTH_WINDOW=23`, `GAP_FILL_MAX_FRAMES=20`) or make them duration-based.
 - **DJI ultrawide undistortion is a no-op** → edge positions carry lens error.
 - No shuttle ground truth yet → judged by **eye + auto-stats** (coverage %, gap structure, inter-frame
   step plausibility, % on-court for multi-court leakage), not a measured F1.

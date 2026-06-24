@@ -156,7 +156,8 @@ the two hot fixed-shape models (detector, RTMPose) — export at a single fixed 
 winner; validate INT8 doesn't hurt the tiny shuttle. **No MLX** (slow on Conv2d). Process locally; cloud NVIDIA
 for fine-tuning runs / large backfills — **exception: the stage-5 TrackNetV3 shuttle fine-tune runs locally on
 the Mac Studio M4 Max (MPS)** (small fine-tune; keeps the label→train→benchmark loop on one box against the
-real frame cache/weights). This needs the vendored TrackNetV3 `.cuda()`→MPS patch in `worker/training/`
+real frame cache/weights; shuttle clips ingest at **30 fps** `analysis_fps`, the movement pipeline stays at
+**12 fps**). This needs the vendored TrackNetV3 `.cuda()`→MPS patch in `worker/training/`
 (`PYTORCH_ENABLE_MPS_FALLBACK=1` alone does NOT redirect explicit `.cuda()`). See
 `specs/features/shuttle-finetune-plan.md` §6.
 
