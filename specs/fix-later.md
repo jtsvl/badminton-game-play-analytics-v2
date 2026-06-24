@@ -83,7 +83,16 @@ Three compounding geometry limits the trainer deferred on 2026-06-19 (filmed sta
 f35d0984 so low impact there):
 - **Lens undistortion:** DJI ultrawide barrel distortion is **not** corrected (`ingest.py` records
   `undistorted: False`); it biases edge/far-court pixels where homography error is already amplified.
-  Needs DJI intrinsics (checkerboard or lens profile).
+  Needs DJI intrinsics (checkerboard or lens profile). **Trainer visually confirmed 2026-06-24** on
+  the new game footage (Osmo Action 6, Wide/155° FOV): painted court lines visibly **bow** under the
+  straight calibration overlay, worst toward the frame edges/baselines. **Impact split:** *low* for the
+  raw-pixel shuttle fine-tune (training frames, GT clicks, and inference all live in the same distorted
+  pixel space, so the detector just learns the real appearance — no need to re-shoot the 6 clips);
+  *real* for court-space geometry — a single 4-corner homography can't fit curved lines, so corners sit
+  right but mid-line/edges drift, biasing player positions, heatmaps, court-space shuttle path and
+  speed. **Mitigations:** (a) cheap, no-code — shoot future sessions in the Action 6's **Standard
+  (Dewarp)** FOV (in-camera rectilinear correction → straight lines → clean homography; crops FOV, so
+  mount slightly further back); (b) durable — lens-intrinsics calibration + undistort in ingest stage 0.
 - **Distance-weighted uncertainty + image-space smoothing:** `smooth_track` averages in court space, which
   can't undo a bias and over-smooths fast far movement; filter the foot in image space (One-Euro/Kalman)
   and surface a position uncertainty that grows toward the far baseline (UI already says „Schätzung").

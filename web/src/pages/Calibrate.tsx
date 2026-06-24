@@ -161,7 +161,7 @@ export function Calibrate() {
 
   return (
     <main style={{ minHeight: '100%', background: 'var(--beige, #FEF4EA)', color: 'var(--ink, #0A0A0B)', fontFamily: 'var(--font-body)' }}>
-      <div style={{ maxWidth: 1280, margin: '0 auto', padding: isDesktop ? 24 : 14 }}>
+      <div style={{ margin: '0 auto', padding: isDesktop ? 24 : 14 }}>
         <button
           type="button"
           onClick={() => navigate(`/match/${slug}`)}

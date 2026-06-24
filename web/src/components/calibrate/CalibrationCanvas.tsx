@@ -47,7 +47,10 @@ export function CalibrationCanvas({ imgSrc, size, corners, H, valid, onDrag }: P
       ref={boxRef}
       style={{
         position: 'relative',
-        width: '100%',
+        // Scale with the window: fill the cell width, but never taller than the viewport (minus
+        // page chrome) so the whole 16:9 frame stays visible without scrolling.
+        width: `min(100%, calc((100dvh - 200px) * ${size.w} / ${size.h}))`,
+        margin: '0 auto',
         aspectRatio: `${size.w} / ${size.h}`,
         background: '#0A0A0B',
         borderRadius: 10,
@@ -130,8 +133,8 @@ export function CalibrationCanvas({ imgSrc, size, corners, H, valid, onDrag }: P
           )
         })}
 
-        {/* Magnifier: while dragging, a zoomed loupe (with crosshair + projected grid) in the corner
-            diagonally opposite the handle, so the corner can be placed exactly on a painted line. */}
+        {/* Magnifier: while dragging, a zoomed loupe (with crosshair) in the corner diagonally
+            opposite the handle, so the corner can be placed exactly on a painted line. */}
         {active !== null &&
           (() => {
             const Z = 3.4 // zoom factor
@@ -156,15 +159,6 @@ export function CalibrationCanvas({ imgSrc, size, corners, H, valid, onDrag }: P
                     {imgSrc && (
                       <image href={imgSrc} x={0} y={0} width={size.w} height={size.h} preserveAspectRatio="none" />
                     )}
-                    <g fill="none" stroke={lineColor} strokeOpacity="0.95" strokeLinecap="round">
-                      {COURT_TEMPLATE.map(([a, b], i) => {
-                        const p1 = toImg(a[0], a[1])
-                        const p2 = toImg(b[0], b[1])
-                        return (
-                          <line key={i} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} strokeWidth={(i < 4 ? r * 0.5 : r * 0.34) / Z} />
-                        )
-                      })}
-                    </g>
                   </g>
                   {/* crosshair at the exact handle point */}
                   <line x1={lcx - cross} y1={lcy} x2={lcx + cross} y2={lcy} stroke="#FFFFFF" strokeWidth={stroke * 0.5} strokeOpacity="0.9" />

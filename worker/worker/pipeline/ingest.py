@@ -35,10 +35,15 @@ def run(ctx) -> None:
 
     storage_path = video["storage_path"]
     ext = Path(storage_path).suffix or ".mp4"
-    src = cache_dir / f"source{ext}"
-    if not src.exists() or src.stat().st_size == 0:
-        log.info("downloading %s/%s", cfg.video_bucket, storage_path)
-        src.write_bytes(store.download(cfg.video_bucket, storage_path))
+    local = Path(cfg.local_video_dir).expanduser() / storage_path
+    if local.exists() and local.stat().st_size > 0:
+        src = local  # decode in place — no copy, no extra disk (videos/ is git-ignored)
+        log.info("using local file %s (in place)", src)
+    else:
+        src = cache_dir / f"source{ext}"
+        if not src.exists() or src.stat().st_size == 0:
+            log.info("downloading %s/%s", cfg.video_bucket, storage_path)
+            src.write_bytes(store.download(cfg.video_bucket, storage_path))
     log.info("source = %.1f MB", src.stat().st_size / 1e6)
 
     import av  # lazy (ml extra)

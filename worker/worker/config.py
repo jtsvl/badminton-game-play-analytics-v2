@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 
 @dataclass(frozen=True)
@@ -15,6 +18,7 @@ class Config:
     worker_id: str
     poll_interval_s: float
     frame_cache_dir: str
+    local_video_dir: str
 
     @property
     def configured(self) -> bool:
@@ -44,4 +48,5 @@ def load_config() -> Config:
         worker_id=os.environ.get("WORKER_ID", "worker-1"),
         poll_interval_s=float(os.environ.get("WORKER_POLL_INTERVAL_SECONDS", "5")),
         frame_cache_dir=os.environ.get("WORKER_FRAME_CACHE_DIR", "./worker/.cache"),
+        local_video_dir=os.environ.get("WORKER_LOCAL_VIDEO_DIR", str(_PROJECT_ROOT / "videos")),
     )
