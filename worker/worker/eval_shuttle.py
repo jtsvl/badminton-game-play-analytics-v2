@@ -23,7 +23,29 @@ from .insights import COURT_L_M, COURT_W_M
 TRACKERS = ("wasb", "tracknetv3", "fake")
 
 
-def run_stage(video_id: str, tracker: str | None = None) -> str:
+def parse_frame_range(s: str | None) -> tuple[int, int] | None:
+    """Parse an inclusive frame range "A:B" → (A, B). Returns None when absent.
+
+    Pure; raises ValueError on garbage so the CLI fails loudly before any heavy work. Requires two
+    non-negative ints with A <= B."""
+    if not s:
+        return None
+    parts = s.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"--frames must be 'A:B' (got {s!r})")
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"--frames must be two integers 'A:B' (got {s!r})") from None
+    if a < 0 or b < 0:
+        raise ValueError(f"--frames bounds must be non-negative (got {s!r})")
+    if a > b:
+        raise ValueError(f"--frames start must be <= end (got {s!r})")
+    return a, b
+
+
+def run_stage(video_id: str, tracker: str | None = None,
+              frame_range: tuple[int, int] | None = None) -> str:
     """Run the shuttle stage on the cached clip with the chosen backend; return shuttle.parquet path.
 
     Fetches the calibration itself and passes H + polygon in ctx (no `store` key) so the bench neither
@@ -43,6 +65,7 @@ def run_stage(video_id: str, tracker: str | None = None) -> str:
         "job": {"video_id": video_id},
         "H": cal["homography"],
         "mask_poly_px": cal.get("mask_polygon_px") or cal.get("confirmed_points"),
+        "frame_range": frame_range,
     }
     shuttle_run(ctx)
     return ctx["shuttle_path"]
@@ -226,15 +249,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="match tolerance in the pinned 512x288 space (default 4, the train.py default)")
     ap.add_argument("--render", metavar="DIR",
                     help="draw raw detections in image space (scatter + key frames + overlay.mp4) to DIR")
+    ap.add_argument("--frames", metavar="A:B",
+                    help="render only frames A..B (inclusive indices); only applies with --render")
     args = ap.parse_args(argv)
+
+    frame_range = parse_frame_range(args.frames)
 
     if args.render:
         from .shuttle.render import render_overlay
 
-        s = render_overlay(args.video_id, args.tracker or "tracknetv3", args.render)
+        s = render_overlay(args.video_id, args.tracker or "tracknetv3", args.render,
+                           frame_range=frame_range)
         print(f"rendered {s['detections']}/{s['frames']} detections → {s['out_dir']}")
         print(f"  scatter: {s['scatter']}\n  video:   {s['video']}")
         return 0
+
+    if frame_range:
+        print("note: --frames only applies with --render; the bench runs over the full clip")
 
     from .config import load_config
 

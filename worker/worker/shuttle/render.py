@@ -32,7 +32,8 @@ def _poly_int(poly):
     return np.array([[int(round(x)), int(round(y))] for x, y in poly], dtype="int32")
 
 
-def render_overlay(video_id: str, tracker_name: str, out_dir: str, video_max_w: int = 1920) -> dict:
+def render_overlay(video_id: str, tracker_name: str, out_dir: str, video_max_w: int = 1920,
+                   frame_range: tuple[int, int] | None = None) -> dict:
     import cv2
     import numpy as np
     import polars as pl
@@ -51,9 +52,14 @@ def render_overlay(video_id: str, tracker_name: str, out_dir: str, video_max_w: 
     manifest = json.loads((cache / "frames.json").read_text())
     fw, fh = int(manifest["width"]), int(manifest["height"])
     frames = manifest["frames"]
+    if frame_range:
+        a, b = frame_range
+        frames = [f for f in frames if a <= int(f["frame"]) <= b]
+        if not frames:
+            raise RuntimeError(f"render: no frames in range {a}:{b}")
 
     # Run the chosen tracker → shuttle.parquet, and fetch the court polygon for context.
-    parquet = eval_shuttle.run_stage(video_id, tracker_name)
+    parquet = eval_shuttle.run_stage(video_id, tracker_name, frame_range=frame_range)
     det = {int(r["frame"]): r for r in pl.read_parquet(parquet).sort("frame").iter_rows(named=True)}
     from ..__main__ import _make_store
     cal = _make_store(cfg).get_calibration(video_id)
