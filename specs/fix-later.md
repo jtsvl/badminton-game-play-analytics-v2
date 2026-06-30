@@ -98,3 +98,19 @@ f35d0984 so low impact there):
   and surface a position uncertainty that grows toward the far baseline (UI already says „Schätzung").
 - **Camera motion:** a single static homography assumes a fixed camera; hand-held/standing drift shifts the
   court anchor over the clip. Revisit with per-segment re-calibration or auto-court-detect (P4).
+
+## Foreign-court shuttle intrusion — reduced, not solved (2026-06-30)
+On a single camera the target-court airspace mask + stage-6 rally continuity (`reject_foreign_runs`) cut
+neighbouring-court shuttles a lot, but a foreign shuttle that lingers several in-mask frames with rally-like
+motion still leaks into our track (visible in the wider-box A/B render: dots drift toward the right where the
+next court is playing). **Monocular limit — a mitigation, not a fix.** Durable fixes (deferred): a 2nd camera
+or per-court depth; tighter learned trajectory association once a 2nd-session fine-tune exists; or a
+foreign-shuttle classifier. See `features/shuttle-tracking.md` "Honest limits".
+
+## Wider airspace box needs a re-fine-tune (2026-06-30)
+The box can be widened (`SHUTTLE_AIR_UP/DOWN/OUT`) to keep high clears + just-out landings in frame — the
+geometry is correct — but the **current** fine-tuned TrackNet was trained on tight-box 512×288 crops, so a
+wider crop regresses it (game1 A/B: F1 0.953→0.854, recall −13pp; train/inference crop mismatch). Defaults stay
+at the legacy box. **To ship the wider box:** re-export the dataset crops at the wider geometry + re-fine-tune
+— gated on 2nd-session data anyway. Needed for the landing/in-out feature (`features/shuttle-landing-inout.md`),
+since out-landings fall outside the tight box.

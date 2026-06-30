@@ -1159,10 +1159,10 @@ def load_shuttle_data(video_id: str, cfg) -> ShuttleData:
         poly = (cal or {}).get("mask_polygon_px") or (cal or {}).get("confirmed_points")
         if poly:
             from .geometry import court_airspace_polygon, court_crop_box
-            from .pipeline.shuttle import AIR_SIDE, AIR_UP, BBOX_MARGIN
+            from .pipeline.shuttle import AIR_DOWN, AIR_OUT, AIR_SIDE, AIR_UP, BBOX_MARGIN
 
             pts = [(float(x), float(y)) for x, y in poly]
-            air = court_airspace_polygon(pts, w, h, up=AIR_UP, side=AIR_SIDE)
+            air = court_airspace_polygon(pts, w, h, up=AIR_UP, side=AIR_SIDE, down=AIR_DOWN, out=AIR_OUT)
             cb = court_crop_box(air, w, h, up=0.0, side=BBOX_MARGIN, down=0.0)
             guide = [[round(px / w, 5), round(py / h, 5)] for px, py in air]
             crop = [round(cb[0] / w, 5), round(cb[1] / h, 5), round(cb[2] / w, 5), round(cb[3] / h, 5)]

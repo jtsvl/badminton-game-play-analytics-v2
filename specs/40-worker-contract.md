@@ -33,10 +33,15 @@ Stages mirror `30-ml-pipeline.md`. Each stage reads the frame cache + prior arti
 | pose | frames, detections | pose.parquet `(frame,track,kp[],kp_score[],foot_x,foot_y,foot_conf,foot_source)` |
 | gate_track | detections, pose, homography | tracks.parquet `(t,track_id,u,v,role,source)` (in-court only) |
 | shuttle | frames, calibration (H + `mask_polygon_px`) | shuttle.parquet `(t,u,v,visibility[,frame,px,py,conf,tracker])` |
-| rally_hit | shuttle, tracks | `rallies`, `events`(type=hit) |
+| rally_hit | shuttle, tracks | `rallies` + `events`(serve/hit/rally_end); debug `rallies.parquet`/`events.parquet` |
 | stroke | pose, shuttle, court xy | `events`(hit shot_type), `player_shot_stats` |
-| aggregate | tracks, shots, rallies | `player_match_stats`, `pair_match_stats`, `match_rally_stats` inputs |
+| aggregate | tracks, **rallies** (in-rally gating), shots | `player_match_stats`, `pair_match_stats`, `match_rally_stats` inputs |
 | overlay | tracks, shuttle, hits | `track_keyframes` (~10 Hz), hit markers |
+| landing *(SPEC — `features/shuttle-landing-inout.md`)* | shuttle, rally-end (u,v) | `events`(type=landing) → `player_shot_stats.errors` |
+
+`rally_hit` runs all trajectory/serve logic in **normalized image space** (the ground homography can't place an
+airborne shuttle); it writes the debug parquets so `aggregate` can gate player movement to in-rally spans
+(whole-clip fallback when no rallies). `landing` is a **future sub-step** of stage 6, not a wired stage.
 
 **Intermediate artifacts = Parquet** in `analysis-artifacts` storage (or local cache), keyed by `video_id`.
 Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web's only read surface).
@@ -54,6 +59,9 @@ Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web'
 - After detection+tracking, set `matches.status='awaiting_mapping'` until the trainer confirms `match_players.track_label`
   (identity mapping), then continue to stroke/aggregate.
 - Estimates (`fastest`, speeds) carry their estimate nature (the UI labels them; don't present as measured).
+- Stage-6 rally fields (`winner_side`, `end_shot_type`, `shot_count`) and the landing in/out call
+  (`events.type='landing'`, SPEC) are **estimates decoupled from the human-entered `matches.score`** — surfaced
+  as „Schätzung" with a confidence/uncertainty band, never as an umpire call or the scoreboard.
 - Phase-4 recovery is self-labelling: `tracks.parquet.source` ∈ `detected`/`reid`/`interp` and
   `pose.parquet.foot_source` ∈ `ankle`/`head`/`none` mark re-ID'd, interpolated or head-grounded positions so the
   overlay surfaces them as „Schätzung" — never as a plain detection. The `eval_corrections` scorecard reports

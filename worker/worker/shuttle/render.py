@@ -39,7 +39,7 @@ def render_overlay(video_id: str, tracker_name: str, out_dir: str, video_max_w: 
     import polars as pl
 
     from ..geometry import court_airspace_polygon
-    from ..pipeline.shuttle import AIR_SIDE, AIR_UP
+    from ..pipeline.shuttle import AIR_DOWN, AIR_OUT, AIR_SIDE, AIR_UP
     from .. import eval_shuttle  # reuse run_stage + the calibration fetch
 
     out = Path(out_dir)
@@ -64,7 +64,7 @@ def render_overlay(video_id: str, tracker_name: str, out_dir: str, video_max_w: 
     from ..__main__ import _make_store
     cal = _make_store(cfg).get_calibration(video_id)
     poly = cal.get("mask_polygon_px") or cal.get("confirmed_points")
-    air = court_airspace_polygon(poly, fw, fh, up=AIR_UP, side=AIR_SIDE)
+    air = court_airspace_polygon(poly, fw, fh, up=AIR_UP, side=AIR_SIDE, down=AIR_DOWN, out=AIR_OUT)
 
     n = len(frames)
     rad = max(6, fw // 240)

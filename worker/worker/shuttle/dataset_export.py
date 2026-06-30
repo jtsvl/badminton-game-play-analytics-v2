@@ -24,7 +24,7 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 
 from ..geometry import court_airspace_polygon, court_crop_box, frame_to_model_xy
 # Reuse the pipeline's crop-geometry knobs verbatim so train == inference (no drift).
-from ..pipeline.shuttle import AIR_SIDE, AIR_UP, BBOX_MARGIN, MASK
+from ..pipeline.shuttle import AIR_DOWN, AIR_OUT, AIR_SIDE, AIR_UP, BBOX_MARGIN, MASK
 from .label import interpolate_anchors
 
 log = logging.getLogger("worker.shuttle.dataset_export")
@@ -72,8 +72,9 @@ def rally_rows(
 
 
 def crop_geometry(poly_px: Sequence, frame_w: int, frame_h: int):
-    """Airspace polygon + crop box, identical to pipeline/shuttle.py:71-72 (so the masked crop matches)."""
-    air = court_airspace_polygon(poly_px, frame_w, frame_h, up=AIR_UP, side=AIR_SIDE)
+    """Airspace polygon + crop box, identical to the pipeline (shuttle.run) so the masked crop matches —
+    same AIR_UP/SIDE/DOWN/OUT knobs, so the scoring metric reflects the geometry under test."""
+    air = court_airspace_polygon(poly_px, frame_w, frame_h, up=AIR_UP, side=AIR_SIDE, down=AIR_DOWN, out=AIR_OUT)
     crop_box = court_crop_box(air, frame_w, frame_h, up=0.0, side=BBOX_MARGIN, down=0.0)
     return air, crop_box
 

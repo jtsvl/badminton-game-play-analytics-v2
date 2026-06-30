@@ -143,10 +143,28 @@ rectification) + 2D speed. Speed/rally/hit remain deferred.
 
 ## Config / env
 `SHUTTLE_TRACKER` (wasb|tracknetv3|fake), `SHUTTLE_CONF_THR` (0.5), `SHUTTLE_MAX_STEP` (0.5 court units),
-`SHUTTLE_MASK` (1), `SHUTTLE_AIR_UP` (0.7), `SHUTTLE_AIR_SIDE` (0.08), `SHUTTLE_BBOX_MARGIN` (0.02),
-`SHUTTLE_OVERLAY_GAP_S` (0.3), `WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL`.
+`SHUTTLE_MASK` (1), `SHUTTLE_AIR_UP` (0.7), `SHUTTLE_AIR_SIDE` (0.08), **`SHUTTLE_AIR_DOWN` (0.0)**,
+**`SHUTTLE_AIR_OUT` (0.0)**, `SHUTTLE_BBOX_MARGIN` (0.02), `SHUTTLE_OVERLAY_GAP_S` (0.3),
+`WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL`.
+
+### Wider-box knobs (off by default — `AIR_DOWN`/`AIR_OUT`, raise-`AIR_UP`)
+`court_airspace_polygon` gained near-edge margins (`down` lowers the near baseline, `out` spreads the near
+corners) so high clears + just-out landings stay in the mask. **Defaults are 0.0 (= the legacy box) on
+purpose.** A/B on game1 with the **fine-tuned** model (`SHUTTLE_AIR_UP=1.0 DOWN=0.10 OUT=0.06`) **regressed**
+it: F1 0.953→0.854, recall 0.981→0.849. Cause = **train/inference crop mismatch** — the fine-tune was trained
+on 512×288 crops from the *tight* box; a wider crop downscales the shuttle ~23% smaller than the model learned
+(misses more) and re-admits more neighbouring-court noise. The box maths is correct (the wider yellow boundary
+visibly reaches the high clears / out-landings); the model isn't. **Don't flip the defaults until a re-export +
+re-fine-tune on the wider crop** — blocked on 2nd-session data anyway. The knobs ship reachable for that day.
+
+## Honest limits (cont.)
+- **Foreign-court intrusion is reduced, not solved.** Stage 6 rally continuity (`reject_foreign_runs`) drops
+  short discontinuous neighbour runs, and the airspace mask isolates the target court — but a foreign shuttle
+  that lingers several in-mask frames with rally-like motion still leaks. Monocular, single-camera: this is a
+  *mitigation*, not a fix (a second camera or per-court depth would be the real fix). Also logged in `fix-later.md`.
 
 ## Wiring note
-`shuttle` is in `_REAL` (runs when invoked) but **not yet in `RESUME_STAGES`** (`__main__.py`) — it joins
-the post-calibration resume only once it produces a usable court-space track, so a normal job doesn't
-depend on weights / emit garbage coords. Until then run it standalone via `eval_shuttle`.
+`shuttle` **and** `rally_hit` are now in `_REAL` **and** `RESUME_STAGES` (`__main__.py`) — shuttle is verified
+on real footage (full-clip F1 0.958, fine-tuned) and rally_hit segments its output into rallies. `stroke`
+(stage 7) stays stubbed. Run shuttle standalone via `eval_shuttle`; run `rally_hit` standalone with a
+`stage="rally_hit"` job (shuttle/tracks cached).

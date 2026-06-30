@@ -7,13 +7,43 @@ estimated *shuttle* speed (needs the P2 shuttle stage) — left null, never fabr
 from __future__ import annotations
 
 import logging
-from typing import Dict, List
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 from .. import insights as ins
 from ..geometry import net_depth
 from ..insights import Sample
 
 log = logging.getLogger("worker.pipeline.aggregate")
+
+
+def filter_to_spans(df, spans: List[Tuple[float, float]]):
+    """Keep only track rows whose seconds timestamp `t` falls inside any `[t0, t1]` span (inclusive).
+
+    Used to gate player movement to in-rally time: tracks.parquet `t` and rallies' `t_start_s/t_end_s`
+    share the frames.json seconds timebase, so no conversion is needed."""
+    import polars as pl
+
+    mask = pl.lit(False)
+    for t0, t1 in spans:
+        mask = mask | ((pl.col("t") >= t0) & (pl.col("t") <= t1))
+    return df.filter(mask)
+
+
+def _rally_spans(ctx, cache: Path) -> Optional[List[Tuple[float, float]]]:
+    """Rally [t_start_s, t_end_s] spans written by the rally_hit stage (ctx path or cache fallback).
+
+    Returns None when no rallies are available (file missing or empty) so the caller falls back to the
+    whole clip — the report never zeroes out if segmentation produced nothing."""
+    import polars as pl
+
+    path = ctx.get("rallies_path") or str(cache / "rallies.parquet")
+    if not Path(path).exists():
+        return None
+    rdf = pl.read_parquet(path)
+    if rdf.is_empty():
+        return None
+    return [(float(r["t_start_s"]), float(r["t_end_s"])) for r in rdf.iter_rows(named=True)]
 
 
 def compute_player_stats(track: List[Sample], role: str, duration_min: float) -> dict:
@@ -36,6 +66,7 @@ def compute_player_stats(track: List[Sample], role: str, duration_min: float) ->
 
 def run(ctx) -> None:
     store = ctx["store"]
+    cfg = ctx["cfg"]
     job = ctx["job"]
     match_id = job["match_id"]
     video_id = job["video_id"]
@@ -51,8 +82,24 @@ def run(ctx) -> None:
         log.warning("aggregate: tracks.parquet empty — nothing to write")
         return
 
+    # `duration_min` from the FULL clip (the timeline axis spans the whole match), computed before gating.
     video = store.get_video(video_id) or {}
     duration_min = (float(video.get("duration_s") or 0.0)) / 60 or _span_min(df)
+
+    # Gate movement to in-rally time (so distance/speed/zones reflect live points, not standing around).
+    # Whole-clip fallback when there are no rallies, so the report never zeroes out.
+    cache = Path(cfg.frame_cache_dir).expanduser() / str(video_id)
+    spans = _rally_spans(ctx, cache)
+    if spans:
+        gated = filter_to_spans(df, spans)
+        if gated.is_empty():
+            log.warning("aggregate: no track rows in %d rally spans — whole-clip fallback", len(spans))
+        else:
+            log.info("aggregate: gated tracks to %d rally spans (%d → %d rows)",
+                     len(spans), df.height, gated.height)
+            df = gated
+    else:
+        log.info("aggregate: no rallies — movement computed over the whole clip")
 
     players = store.get_match_players(match_id)
     by_label: Dict[int, dict] = {
