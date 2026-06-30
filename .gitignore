@@ -44,6 +44,10 @@ worker/.cache/
 *.parquet
 frames_cache/
 worker/renders/
+
+# --- Shuttle fine-tune artifacts (derived; rebuild from worker/training/*.md + the export code) ---
+worker/data/
+worker/training/ft_smoke/
 *.MOV
 *.mov
 *.mp4
