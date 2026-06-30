@@ -29,6 +29,11 @@ _ROOT = Path(__file__).resolve().parents[3]
 REPO = os.environ.get("TRACKNETV3_REPO", str(_ROOT / "worker/.cache/_vendor/TrackNetV3"))
 MODEL = os.environ.get("TRACKNETV3_MODEL", str(_ROOT / "models/weights/shuttle/ckpts/TrackNet_best.pt"))
 BATCH = int(os.environ.get("TRACKNETV3_BATCH", "4"))
+# Background median is computed from a SUBSAMPLE of frames (not the whole stack). The vendored dataset
+# otherwise runs np.median over every frame at once — a transient that ~doubles peak memory on a full clip
+# and SIGKILLs the process. For a static tripod the subsample median ≈ the full median. ≤MEDIAN_SAMPLES
+# frames → stride 1 → byte-identical to the old path.
+MEDIAN_SAMPLES = int(os.environ.get("TRACKNETV3_MEDIAN_SAMPLES", "700"))
 
 
 def _predict_location(heatmap) -> tuple:
@@ -112,9 +117,17 @@ class TrackNetV3Tracker:
         # Pre-resize each crop to model size (keeps the median-background cheap) and go BGR→RGB.
         rgb = np.stack([cv2.resize(img, (mw, mh))[:, :, ::-1] for _, img in crops]).astype("uint8")
 
+        # Precompute the background median from a subsample and hand it to the dataset (which only computes
+        # np.median itself when median=None). Channels-last float64, same layout a computed median would
+        # have — the dataset re-processes it identically. Caps the full-stack median memory spike (the crash).
+        median = None
+        if self.bg_mode:  # 'concat' for our weights; '' / None bg_modes never use a median
+            stride = max(1, len(rgb) // MEDIAN_SAMPLES)
+            median = np.median(rgb[::stride], axis=0)
+
         ds = Shuttlecock_Trajectory_Dataset(
             seq_len=self.seq_len, sliding_step=self.seq_len, data_mode="heatmap",
-            bg_mode=self.bg_mode, frame_arr=rgb, padding=True,
+            bg_mode=self.bg_mode, frame_arr=rgb, padding=True, median=median,
         )
         loader = DataLoader(ds, batch_size=BATCH, shuffle=False, num_workers=0, drop_last=False)
 

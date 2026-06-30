@@ -65,6 +65,12 @@ def run(ctx) -> None:
     manifest = json.loads((cache / "frames.json").read_text())
     frame_w, frame_h = int(manifest["width"]), int(manifest["height"])
     frames = manifest["frames"]
+    fr = ctx.get("frame_range")  # optional (bench/render only); production never sets it → full clip
+    if fr:
+        a, b = fr
+        frames = [f for f in frames if a <= int(f["frame"]) <= b]
+        if not frames:
+            raise RuntimeError(f"shuttle: no frames in range {a}:{b}")
     t_by_frame = {int(f["frame"]): float(f["t"]) for f in frames}
 
     H, poly = _calibration(ctx, video_id)

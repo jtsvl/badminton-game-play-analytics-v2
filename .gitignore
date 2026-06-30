@@ -43,6 +43,7 @@ worker/.cache/
 **/.cache/
 *.parquet
 frames_cache/
+worker/renders/
 *.MOV
 *.mov
 *.mp4
