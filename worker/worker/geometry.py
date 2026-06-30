@@ -358,14 +358,20 @@ def court_crop_box(
 
 def court_airspace_polygon(
     poly_px: Sequence[Pt], frame_w: int, frame_h: int, up: float = 0.7, side: float = 0.08,
+    down: float = 0.0, out: float = 0.0,
 ) -> List[Pt]:
     """Target-court AIRSPACE polygon for the stage-5 isolation mask — the ground quad with its far (top)
     edge raised by `up`*court-height (image up = smaller y) and widened by `side`*court-width, so it
     covers where the shuttle actually flies while its sidelines still exclude the neighbouring courts.
 
+    `down` and `out` extend the NEAR (bottom) edge by `down`*court-height downward and `out`*court-width
+    outward on each near corner. They keep just-out landings and low near-court shots inside the mask
+    (a strict ground quad clips them); they default to 0.0 so the legacy near edge is unchanged. Trade-off:
+    a larger near band re-admits more cross-court intrusion near the bottom of the frame.
+
     A strict ground-quad mask would black out the airborne shuttle (it sits well above the floor); this
     keeps the column of space above the target court. Robust to corner input order (far = the two with
-    smaller y). Returns [far_left_up, far_right_up, near_right, near_left], clamped to the frame."""
+    smaller y). Returns [far_left_up, far_right_up, near_right_out, near_left_out], clamped to the frame."""
     pts = sorted(poly_px, key=lambda p: p[1])
     far = sorted(pts[:2], key=lambda p: p[0])    # smaller y = far baseline (higher in image)
     near = sorted(pts[2:], key=lambda p: p[0])
@@ -378,7 +384,9 @@ def court_airspace_polygon(
 
     fl_up = clamp(fl[0] - side * width, fl[1] - up * height)
     fr_up = clamp(fr[0] + side * width, fr[1] - up * height)
-    return [fl_up, fr_up, (nr[0], nr[1]), (nl[0], nl[1])]
+    nr_out = clamp(nr[0] + out * width, nr[1] + down * height)
+    nl_out = clamp(nl[0] - out * width, nl[1] + down * height)
+    return [fl_up, fr_up, nr_out, nl_out]
 
 
 def map_detection_to_frame(

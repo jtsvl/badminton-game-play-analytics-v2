@@ -45,16 +45,25 @@ heatmap_uri? · placement_uri? · fastest?  (ESTIMATE)` — unique (match_id, pl
 
 ### player_shot_stats
 `id · match_id · player_id · shot_type (canonical) · count · share_pct? · winners? · errors? · placements jsonb?` — unique (match_id, player_id, shot_type)
+> `errors` is sourced from rally-ending **out**-landings per shot_type (`features/shuttle-landing-inout.md`,
+> SPEC); the web sums them into „Aus-Schläge". An **estimate** — partial coverage (occlusion/sampling), a lower bound.
 
 ### pair_match_stats  (doubles)
 `id · match_id · side∈{A,B} · label · fb · ss · rot` — unique (match_id, side)
 
 ### rallies
 `id · match_id · idx · t_start_s · t_end_s · shot_count · winner_side? · end_shot_type? · confidence?` — unique (match_id, idx)
+> Written by stage 6 (`rally_hit`, image-space segmentation). `winner_side`/`end_shot_type` are **estimates**
+> (stage 6 / landing), **decoupled from `matches.score`** — never reconciled against the human-entered score.
+> `shot_count` is a provisional reversal count (serve + contacts); `confidence` = in-rally detection density.
 
 ### events  (generic typed stream — raw hits/serves/bounces/rally markers)
-`id · match_id · rally_id? · t_s · type · payload jsonb · confidence?`
-e.g. hit payload `{player_id, shot_type, speed_kmh, from:[u,v], to:[u,v]}`.
+`id · match_id · rally_id? · t_s · type ∈ {serve,hit,rally_end,landing,bounce,…} · payload jsonb · confidence?`
+- `hit` payload `{player_id, shot_type, speed_kmh, from:[u,v], to:[u,v]}`.
+- Stage 6 (`rally_hit`) emits `serve` `{settled:bool}`, provisional `hit` `{provisional:true}`, and
+  `rally_end` `{x,y,u,v}` (image + court floor-contact candidate); stage 7 refines `hit.shot_type`.
+- `landing` (SPEC — `features/shuttle-landing-inout.md`) `{located,call:in|out|uncertain,line,u?,v?,px?,py?,margin_cm?,band_cm,confidence}`
+  — the rally-ending floor contact as an **estimate** („Schätzung"), never the match score (`'bounce'` reserved for raw mid-rally touches).
 
 ### track_keyframes  (overlay, ~10 Hz)
 `id · video_id · subject ('player:<id>'|'shuttle') · data jsonb [{t,u,v}]` — unique (video_id, subject)
@@ -73,7 +82,9 @@ params jsonb? · error? · claimed_by? · claimed_at? · started_at? · finished
 ## Views
 ### match_rally_stats  (`security_invoker`)
 Per match → `{count, avg_shots, avg_sec, long_shots, long_sec}` (duration derived from `t_end_s - t_start_s`).
-`endLine` (ending-shot % summary) is computed in the app from `rallies.end_shot_type`.
+`endLine` (ending-shot % summary) is computed in the app from `rallies.end_shot_type`. `outLine`
+(out-landing % summary, „Aus-Schläge") is likewise **app-derived** from `events.type='landing'` (SPEC) —
+neither is a stored column.
 
 ## RLS
 - `service_role` (worker) bypasses RLS.

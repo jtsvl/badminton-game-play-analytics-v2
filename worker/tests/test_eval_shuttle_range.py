@@ -5,7 +5,28 @@ the CLI fails loudly before any heavy render work; absent input is None (full cl
 """
 import unittest
 
-from worker.eval_shuttle import parse_frame_range
+from worker.eval_shuttle import clip_to_range, parse_frame_range
+
+
+class TestClipToRange(unittest.TestCase):
+    """--frames must scope the bench/--labels run, not just --render: clip rows (detections or labels)
+    to the inclusive [a,b] span so a label outside the scoped tracker run is not counted as a miss the
+    tracker never had a chance to find."""
+
+    ROWS = [{"frame": 5}, {"frame": 10}, {"frame": 15}, {"frame": 20}]
+
+    def test_clips_inclusive(self):
+        self.assertEqual(clip_to_range(self.ROWS, (10, 15)), [{"frame": 10}, {"frame": 15}])
+
+    def test_none_range_passes_through(self):
+        self.assertEqual(clip_to_range(self.ROWS, None), self.ROWS)
+
+    def test_empty_when_disjoint(self):
+        self.assertEqual(clip_to_range(self.ROWS, (100, 200)), [])
+
+    def test_handles_string_frame_keys(self):
+        rows = [{"frame": "5"}, {"frame": "10"}]
+        self.assertEqual(clip_to_range(rows, (8, 12)), [{"frame": "10"}])
 
 
 class TestParseFrameRange(unittest.TestCase):

@@ -381,6 +381,26 @@ class TestCourtAirspacePolygon(unittest.TestCase):
         self.assertEqual(poly[0][1], 0.0)   # raised far above the frame -> clamped to 0
         self.assertEqual(poly[1][1], 0.0)
 
+    def test_near_edge_margins_lower_and_widen_near_corners(self):
+        # down=0.1, out=0.05 on height 200 / width 240 -> near corners drop 20px and spread 12px each
+        # (NR right + down, NL left + down); the far edge is untouched by down/out.
+        poly = g.court_airspace_polygon(self.QUAD, 1000, 1000, up=0.5, side=0.1, down=0.1, out=0.05)
+        self.assertEqual(poly, [(76.0, 100.0), (324.0, 100.0), (332.0, 420.0), (68.0, 420.0)])
+
+    def test_down_out_zero_matches_legacy_output(self):
+        # Backward-compat lock: the new params default to 0.0 and reproduce the old near corners verbatim.
+        legacy = g.court_airspace_polygon(self.QUAD, 1000, 1000, up=0.5, side=0.1)
+        explicit = g.court_airspace_polygon(self.QUAD, 1000, 1000, up=0.5, side=0.1, down=0.0, out=0.0)
+        self.assertEqual(explicit, legacy)
+        self.assertEqual(explicit[2:], [(320.0, 400.0), (80.0, 400.0)])  # near corners unchanged
+
+    def test_near_margins_clamp_to_frame(self):
+        # Frame 400x410: out 0.5*240=120 pushes NR to x=440 (clamp 400) and NL to x=-40 (clamp 0);
+        # down 0.1*200=20 pushes both near corners to y=420 (clamp 410).
+        poly = g.court_airspace_polygon(self.QUAD, 400, 410, up=0.0, side=0.0, down=0.1, out=0.5)
+        self.assertEqual(poly[2], (400.0, 410.0))   # near-right clamped to bottom-right corner
+        self.assertEqual(poly[3], (0.0, 410.0))     # near-left clamped to bottom-left corner
+
 
 class TestSplitOnGaps(unittest.TestCase):
     """Overlay must not draw a straight line across a real shuttle dropout (white-wall camouflage):

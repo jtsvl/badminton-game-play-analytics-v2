@@ -44,6 +44,18 @@ def parse_frame_range(s: str | None) -> tuple[int, int] | None:
     return a, b
 
 
+def clip_to_range(rows, frame_range):
+    """Keep only rows whose `frame` is within the inclusive [a,b] range; all rows if range is None.
+
+    Pure. Lets `--frames` scope the bench/`--labels` run (not just `--render`): the tracker runs on the
+    range, and the labels it is scored against are clipped to the same range so a label outside the run
+    is not counted as a false negative the tracker never had a chance to find."""
+    if not frame_range:
+        return list(rows)
+    a, b = frame_range
+    return [r for r in rows if a <= int(r["frame"]) <= b]
+
+
 def run_stage(video_id: str, tracker: str | None = None,
               frame_range: tuple[int, int] | None = None) -> str:
     """Run the shuttle stage on the cached clip with the chosen backend; return shuttle.parquet path.
@@ -193,7 +205,7 @@ def format_stats(s: dict) -> str:
     )
 
 
-def _score_backend(video_id: str, cfg, manifest: dict, parquet_path: str, tol_px: float):
+def _score_backend(video_id: str, cfg, manifest: dict, parquet_path: str, tol_px: float, frame_range=None):
     """Map a backend's parquet peaks + the clip's shuttle_labels into the pinned 512x288 space and score.
 
     Returns a score dict, or None if the clip has no shuttle_labels.json yet. The parquet's px,py are
@@ -233,7 +245,9 @@ def _score_backend(video_id: str, cfg, manifest: dict, parquet_path: str, tol_px
         X, Y = frame_to_model_xy(float(r["px"]), float(r["py"]), crop_box, MODEL_W, MODEL_H)
         dets.append({"frame": int(r["frame"]), "x": X, "y": Y})
 
-    return score_against_labels(dets, labels, tol_px=tol_px)
+    # Scope labels + dets to the run range so --frames gives a metric-identical, faster A/B.
+    return score_against_labels(clip_to_range(dets, frame_range),
+                                clip_to_range(labels, frame_range), tol_px=tol_px)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -264,14 +278,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  scatter: {s['scatter']}\n  video:   {s['video']}")
         return 0
 
-    if frame_range:
-        print("note: --frames only applies with --render; the bench runs over the full clip")
-
     from .config import load_config
 
     cfg = load_config()
     cache = Path(cfg.frame_cache_dir).expanduser() / args.video_id
     manifest = json.loads((cache / "frames.json").read_text())
+
+    # --frames scopes the bench too (faster, metric-identical A/B): run the tracker only on the range and
+    # judge coverage against that scoped span. The scoreboard is unchanged because out-of-span peaks/labels
+    # are clipped away (score_against_labels already ignores out-of-span detections).
+    stats_manifest = manifest
+    if frame_range:
+        a, b = frame_range
+        scoped = [f for f in manifest["frames"] if a <= int(f["frame"]) <= b]
+        stats_manifest = {**manifest, "frames": scoped}
+        print(f"note: --frames {a}:{b} → bench scoped to {len(scoped)} frames")
 
     backends = list(TRACKERS) if args.compare else [args.tracker or os.environ.get("SHUTTLE_TRACKER", "wasb")]
     results: Dict[str, dict] = {}
@@ -279,12 +300,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"shuttle bench — video={args.video_id}  frames={len(manifest['frames'])}")
     for name in backends:
         try:
-            path = run_stage(args.video_id, tracker=name)
-            s = stats(path, manifest)
+            path = run_stage(args.video_id, tracker=name, frame_range=frame_range)
+            s = stats(path, stats_manifest)
             results[name] = s
             print(format_stats(s))
             if args.labels:
-                sc = _score_backend(args.video_id, cfg, manifest, path, args.tol_px)
+                sc = _score_backend(args.video_id, cfg, manifest, path, args.tol_px, frame_range=frame_range)
                 if sc is None:
                     print(f"[{name:>10}] no shuttle_labels.json — label a rally first (verify --shuttle)")
                 else:

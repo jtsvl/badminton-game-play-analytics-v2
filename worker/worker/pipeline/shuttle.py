@@ -27,10 +27,16 @@ log = logging.getLogger("worker.pipeline.shuttle")
 CONF_THR = float(os.environ.get("SHUTTLE_CONF_THR", "0.5"))   # peak below this = a real dropout
 MAX_STEP = float(os.environ.get("SHUTTLE_MAX_STEP", "0.5"))   # court-unit isolated-spike guard
 # Isolate the target court's AIRSPACE (ground quad raised up) so the side courts are masked out before
-# the tracker sees the frame. up/side shape the airspace; the bbox margin pads the crop around it.
+# the tracker sees the frame. up/side shape the far edge; down/out extend the near edge to keep high
+# clears and just-out landings inside the mask; the bbox margin pads the crop around it.
+# NOTE: defaults are deliberately conservative (down/out=0.0, up=0.7 = the legacy box) so production is
+# unchanged. The wider box is exercised via env (SHUTTLE_AIR_UP/DOWN/OUT) for the A/B; flip the defaults
+# only once the A/B with the fine-tuned model confirms precision holds (the model trained on the old crop).
 MASK = os.environ.get("SHUTTLE_MASK", "1").lower() not in ("0", "", "false", "no")
 AIR_UP = float(os.environ.get("SHUTTLE_AIR_UP", "0.7"))       # raise far edge by up*court-height
-AIR_SIDE = float(os.environ.get("SHUTTLE_AIR_SIDE", "0.08"))  # widen by side*court-width
+AIR_SIDE = float(os.environ.get("SHUTTLE_AIR_SIDE", "0.08"))  # widen far edge by side*court-width
+AIR_DOWN = float(os.environ.get("SHUTTLE_AIR_DOWN", "0.0"))   # lower near edge by down*court-height
+AIR_OUT = float(os.environ.get("SHUTTLE_AIR_OUT", "0.0"))     # spread near corners by out*court-width
 BBOX_MARGIN = float(os.environ.get("SHUTTLE_BBOX_MARGIN", "0.02"))
 
 SCHEMA = {
@@ -74,7 +80,7 @@ def run(ctx) -> None:
     t_by_frame = {int(f["frame"]): float(f["t"]) for f in frames}
 
     H, poly = _calibration(ctx, video_id)
-    air = court_airspace_polygon(poly, frame_w, frame_h, up=AIR_UP, side=AIR_SIDE)
+    air = court_airspace_polygon(poly, frame_w, frame_h, up=AIR_UP, side=AIR_SIDE, down=AIR_DOWN, out=AIR_OUT)
     crop_box = court_crop_box(air, frame_w, frame_h, up=0.0, side=BBOX_MARGIN, down=0.0)
     x0, y0, x1, y1 = crop_box
     if x1 - x0 < 8 or y1 - y0 < 8:

@@ -22,6 +22,21 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _rally_insert_rows(match_id: str, rallies: List[dict]) -> List[dict]:
+    """Map build_rallies() rally dicts → `rallies` table rows (scoped to the match)."""
+    return [{"match_id": match_id, "idx": r["idx"], "t_start_s": r["t_start_s"],
+             "t_end_s": r["t_end_s"], "shot_count": r["shot_count"],
+             "winner_side": r["winner_side"], "end_shot_type": r["end_shot_type"],
+             "confidence": r["confidence"]} for r in rallies]
+
+
+def _event_insert_rows(match_id: str, events: List[dict], id_by_idx: Dict[int, str]) -> List[dict]:
+    """Map build_rallies() event dicts → `events` table rows, resolving rally_idx → the inserted rally_id."""
+    return [{"match_id": match_id, "rally_id": id_by_idx.get(e["rally_idx"]),
+             "t_s": e["t_s"], "type": e["type"], "payload": e["payload"],
+             "confidence": e["confidence"]} for e in events]
+
+
 class Store:
     def __init__(self, supabase_url: str, service_role_key: str) -> None:
         from supabase import create_client  # lazy: only when running against Supabase
@@ -187,6 +202,26 @@ class Store:
         self._sb.table("shuttle_labels").upsert(
             rows, on_conflict="video_id,source_id"
         ).execute()
+
+    def replace_rallies(self, match_id: str, rallies: List[dict], events: List[dict]) -> int:
+        """Idempotently replace a match's rallies + events (stage 6 output). Returns the rally count.
+
+        The ONLY delete-then-insert in this module: `events` has no natural upsert key (unlike `rallies`'
+        unique(match_id,idx)), so a re-run must clear the match's rows first or events would pile up.
+        PostgREST refuses an unfiltered delete, so the `.eq("match_id", …)` filter is load-bearing — never
+        drop it. Events are deleted before rallies (events.rally_id FKs rallies)."""
+        self._sb.table("events").delete().eq("match_id", match_id).execute()
+        self._sb.table("rallies").delete().eq("match_id", match_id).execute()
+        if not rallies:
+            return 0
+        inserted = (
+            self._sb.table("rallies").insert(_rally_insert_rows(match_id, rallies)).execute().data or []
+        )
+        id_by_idx = {row["idx"]: row["id"] for row in inserted}
+        event_rows = _event_insert_rows(match_id, events, id_by_idx)
+        if event_rows:
+            self._sb.table("events").insert(event_rows).execute()
+        return len(rallies)
 
     def log_job_run(
         self, job: str, match_id: Optional[str], is_ok: bool, detail: str = ""

@@ -19,7 +19,7 @@ from .pipeline import StageContext, run_pipeline
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("worker")
 
-RESUME_STAGES = ["calibrate", "detect", "pose", "gate_track", "aggregate", "overlay"]
+RESUME_STAGES = ["calibrate", "detect", "pose", "gate_track", "shuttle", "rally_hit", "aggregate", "overlay"]
 
 
 def _slice_for(job: dict) -> tuple[list[str], str | None]:

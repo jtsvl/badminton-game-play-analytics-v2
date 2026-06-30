@@ -124,12 +124,29 @@ is blocked on recording ≥3–4 clips. Locked: **TrackNetV3 only** (WASB frozen
 (see Apple Silicon note), held-out-clip metric. Then image-space / horizon-guarded projection + mitigations
 2–6 + speed. See `specs/features/shuttle-tracking.md` + `specs/features/shuttle-finetune-plan.md`.
 
-## Stage 6 — Rally segmentation + hit detection (FR-18/19/20)
+## Stage 6 — Rally segmentation + hit detection (FR-18/19/20) — BUILT (`rally_hit`)
 Rallies from shuttle continuity + player motion energy + serve detector (shuttle low, players settled).
 **Do not reuse broadcast rally/replay classifiers** (continuous stream, no replays). Hit frames = shuttle
 direction reversal/speed spike near a player **fused with a swing detector** (Sensors-2024 "Shot Refinement"
-pattern, ~90 % F1 on clean footage).
-*Accept:* rally boundary tolerance and hit-frame F1 under target on labeled rallies.
+pattern, ~90 % F1 on clean footage — the swing-detector fusion is stage 7's job).
+
+**Built (`worker/rally/segment.py` pure + `pipeline/rally_hit.py` glue, TDD):** all trajectory/serve logic runs
+in **normalized image space** (`px/W, py/H`), never court (u,v) — the ground homography can't place an airborne
+shuttle. `group_trajectories` (keeps collinear smashes, breaks on gaps / non-collinear teleports) →
+`reject_foreign_runs` (drops short neighbour-court runs that don't connect to a sustained run — *reduces* but
+can't eliminate cross-court intrusion) → `merge_runs_into_rallies` (bridges white-wall dropouts, splits on long
+gaps, discards sub-second) → per-rally `find_serve_frame` (players-settled cue, the reliable half of "shuttle
+low + players settled" in 2D; falls back to first detection), `find_rally_end` (exposes the floor-contact
+(x,y,u,v) candidate for the landing feature), provisional `count_hits` (vertical reversals — refined by stage 7).
+Writes `rallies` + `events`(serve/hit/rally_end) and debug parquet; `aggregate` reads the spans to gate movement
+to in-rally time. **Verified on game1** (labeled span): 6 rallies = the 6 labeled, dead time excluded (~11%
+in-play), DB round-trip idempotent. Thresholds (`RALLY_*` env) are fit to one game — a 2nd session + a rally
+labeler are needed before a quantitative boundary/hit-F1 claim.
+*Accept (deferred):* rally boundary tolerance and hit-frame F1 under target on labeled rallies (needs the labeler).
+
+**Landing + in/out (SPEC — `features/shuttle-landing-inout.md`):** the floor contact is the one moment the ground
+homography is valid (the shuttle is on the floor), so in/out reduces to "which pixel is the landing pixel, how
+sure". Estimate-grade „Aus-Schläge"; the match score stays human-entered.
 
 ## Stage 7 — Stroke classification (FR-21/22/23)
 **BST (MIT, public weights)** — consumes player skeleton + shuttle xy + court xy (tiny transformer; hours to train
