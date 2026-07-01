@@ -4,7 +4,11 @@ import { dateParts } from '../lib/format'
 import { matchResult } from '../lib/score'
 import { shotDE } from '../lib/labels'
 import { resolveVideoSrc } from '../lib/storage'
-import type { MatchReport, ReportPlayer, ShotPair, Side } from '../types'
+import type {
+  CourtCalibrationPointsRow, MatchPlayerJoinRow, MatchRallyStatsRow, MatchReport, MatchRow,
+  MatchVideoRow, PairMatchStatRow, PlayerMatchStatsRow, PlayerShotStatRow, RallyEndRow,
+  ReportPlayer, ShotPair, Side, TrackKeyframeRow,
+} from '../types'
 
 interface ReportState { loading: boolean; error: string | null; report: MatchReport | null }
 
@@ -24,8 +28,8 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
         const { data: match, error: matchErr } = await supabase
           .from('matches').select('*').eq('slug', slug).single()
         if (matchErr || !match) throw matchErr ?? new Error('Spiel nicht gefunden')
-        const m = match as any
-        const mid = m.id as string
+        const m = match as MatchRow
+        const mid = m.id
 
         const [mpRes, pmsRes, pssRes, pairRes, rallyRes, vidRes, endRes] = await Promise.all([
           supabase.from('match_players').select('side, slot, player_id, players(name, first_name)').eq('match_id', mid),
@@ -37,10 +41,11 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
           supabase.from('rallies').select('end_shot_type').eq('match_id', mid),
         ])
 
-        const mps = (mpRes.data ?? []) as any[]
-        const statsByPlayer = new Map<string, any>(((pmsRes.data ?? []) as any[]).map((s) => [s.player_id, s]))
+        const mps = (mpRes.data ?? []) as MatchPlayerJoinRow[]
+        const statsByPlayer = new Map<string, PlayerMatchStatsRow>(
+          ((pmsRes.data ?? []) as PlayerMatchStatsRow[]).map((s) => [s.player_id, s]))
         const shotsByPlayer = new Map<string, ShotPair[]>()
-        for (const r of (pssRes.data ?? []) as any[]) {
+        for (const r of (pssRes.data ?? []) as PlayerShotStatRow[]) {
           const list = shotsByPlayer.get(r.player_id) ?? []
           list.push([r.shot_type, r.count])
           shotsByPlayer.set(r.player_id, list)
@@ -48,8 +53,8 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
 
         const games: number[][] = Array.isArray(m.games) ? m.games : []
         const viewerSide: Side =
-          (mps.find((p) => p.player_id === viewerPlayerId)?.side as Side) ??
-          (mps.find((p) => p.side === 'A')?.side as Side) ?? 'A'
+          mps.find((p) => p.player_id === viewerPlayerId)?.side ??
+          mps.find((p) => p.side === 'A')?.side ?? 'A'
         const { result, line: resultLine } = matchResult(games, m.result_side_a ?? null, viewerSide)
 
         const players: ReportPlayer[] = mps.map((mp) => {
@@ -61,7 +66,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
             name: player?.name ?? 'Unbekannt',
             first: player?.first_name ?? '',
             isViewer: mp.player_id === viewerPlayerId,
-            side: mp.side as Side,
+            side: mp.side,
             stats: {
               distance_m: st?.distance_m ?? 0,
               avg_kmh: st?.avg_kmh ?? 0,
@@ -80,7 +85,9 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
         players.sort((a, b) => Number(b.isViewer) - Number(a.isViewer))
 
         // endLine from ending-shot distribution
-        const endings = ((endRes.data ?? []) as any[]).map((r) => r.end_shot_type).filter(Boolean)
+        const endings = ((endRes.data ?? []) as RallyEndRow[])
+          .map((r) => r.end_shot_type)
+          .filter((t): t is string => Boolean(t))
         let endLine = ''
         if (endings.length) {
           const counts = new Map<string, number>()
@@ -89,9 +96,9 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
           endLine = `Der ${shotDE(topShot)} beendete ${Math.round((topCount / endings.length) * 100)} % aller Ballwechsel.`
         }
 
-        const rally = rallyRes.data as any
+        const rally = rallyRes.data as MatchRallyStatsRow | null
         const dp = dateParts(m.played_on)
-        const vid = ((vidRes.data ?? []) as any[])[0]
+        const vid = ((vidRes.data ?? []) as MatchVideoRow[])[0]
 
         // Calibration + tracks key on vid.id (known only after the first batch) — one dependent fetch.
         let calib: MatchReport['calib'] = null
@@ -110,11 +117,12 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
             supabase.from('track_keyframes').select('subject, data').eq('video_id', vid.id),
           ])
           videoSrc = srcUrl
-          const cc = calibRes.data as any
+          const cc = calibRes.data as CourtCalibrationPointsRow | null
           calib = cc
             ? { confirmedPoints: cc.confirmed_points ?? null, imageSize: cc.image_size ?? null }
             : null
-          tracks = ((trackRes.data ?? []) as any[]).map((t) => ({ subject: t.subject, data: t.data }))
+          tracks = ((trackRes.data ?? []) as TrackKeyframeRow[])
+            .map((t) => ({ subject: t.subject, data: t.data }))
         }
 
         const report: MatchReport = {
@@ -134,14 +142,18 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
                 longShots: rally.long_shots ?? 0, longSec: rally.long_sec ?? 0, endLine,
               }
             : null,
-          pairs: ((pairRes.data ?? []) as any[]).map((p) => ({
+          pairs: ((pairRes.data ?? []) as PairMatchStatRow[]).map((p) => ({
             side: p.side, label: p.label, fb: p.fb, ss: p.ss, rot: p.rot,
           })),
           players,
         }
         if (!cancelled) setState({ loading: false, error: null, report })
-      } catch (e: any) {
-        if (!cancelled) setState({ loading: false, error: e?.message ?? 'Fehler beim Laden', report: null })
+      } catch (e) {
+        // Supabase errors are plain objects with .message, not Error instances — narrow both.
+        const message = e instanceof Error
+          ? e.message
+          : (e as { message?: string } | null | undefined)?.message
+        if (!cancelled) setState({ loading: false, error: message ?? 'Fehler beim Laden', report: null })
       }
     })()
     return () => { cancelled = true }
