@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { supabase, isConfigured } from '../lib/supabase'
 import { dateParts } from '../lib/format'
-import { gamesWon } from '../lib/score'
+import { matchResult } from '../lib/score'
 import { shotDE } from '../lib/labels'
 import { resolveVideoSrc } from '../lib/storage'
-import type { MatchReport, ReportPlayer, ShotPair, Side, MatchResultCode } from '../types'
+import type { MatchReport, ReportPlayer, ShotPair, Side } from '../types'
 
 interface ReportState { loading: boolean; error: string | null; report: MatchReport | null }
 
@@ -50,10 +50,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
         const viewerSide: Side =
           (mps.find((p) => p.player_id === viewerPlayerId)?.side as Side) ??
           (mps.find((p) => p.side === 'A')?.side as Side) ?? 'A'
-        const [aWon, bWon] = gamesWon(games)
-        const [vWon, vLost] = viewerSide === 'A' ? [aWon, bWon] : [bWon, aWon]
-        const result: MatchResultCode = vWon >= vLost ? 'win' : 'loss'
-        const resultLine = `${vWon >= vLost ? 'Sieg' : 'Niederlage'} ${vWon}:${vLost}`
+        const { result, line: resultLine } = matchResult(games, m.result_side_a ?? null, viewerSide)
 
         const players: ReportPlayer[] = mps.map((mp) => {
           const st = statsByPlayer.get(mp.player_id)
