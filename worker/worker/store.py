@@ -11,10 +11,12 @@ JobStore interface (claim_job/set_stage/finish) so __main__ can use either path.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("worker.store")
+
+DEFAULT_STALE_JOB_TIMEOUT_S = 3600.0
 
 
 def _now() -> str:
@@ -38,11 +40,17 @@ def _event_insert_rows(match_id: str, events: List[dict], id_by_idx: Dict[int, s
 
 
 class Store:
-    def __init__(self, supabase_url: str, service_role_key: str) -> None:
+    def __init__(
+        self,
+        supabase_url: str,
+        service_role_key: str,
+        stale_job_timeout_s: float = DEFAULT_STALE_JOB_TIMEOUT_S,
+    ) -> None:
         from supabase import create_client  # lazy: only when running against Supabase
 
         self._sb = create_client(supabase_url, service_role_key)
         self._worker_id = "worker-1"
+        self._stale_job_timeout_s = stale_job_timeout_s
 
     def with_worker(self, worker_id: str) -> "Store":
         self._worker_id = worker_id
@@ -50,16 +58,31 @@ class Store:
 
     # ── job queue ──────────────────────────────────────────────────────────
     def claim_job(self) -> Optional[dict]:
-        """Claim the oldest queued job. Conditional update => safe against a concurrent claim."""
+        """Claim the oldest queued job; with the queue empty, reclaim a stale running one (a job whose
+        worker died leaves status='running' forever — specs/40). `claimed_at` is the liveness signal:
+        set_stage refreshes it, so "stale" means no stage finished within the timeout."""
+        job = self._claim_where(status="queued")
+        if job is not None:
+            return job
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=self._stale_job_timeout_s)
+        ).isoformat()
+        job = self._claim_where(status="running", claimed_before=cutoff)
+        if job is not None:
+            log.warning("reclaimed stale job %s (no heartbeat since %s)", job["id"], cutoff)
+        return job
+
+    def _claim_where(self, status: str, claimed_before: Optional[str] = None) -> Optional[dict]:
+        """Select-then-conditional-update claim. The update re-applies the selection filters, so a
+        concurrent claim makes it a no-op (empty data) instead of a double-claim."""
         q = (
             self._sb.table("processing_jobs")
             .select("id, match_id, video_id, stage, params")
-            .eq("status", "queued")
-            .order("created_at")
-            .limit(1)
-            .execute()
+            .eq("status", status)
         )
-        rows = q.data or []
+        if claimed_before is not None:
+            q = q.lt("claimed_at", claimed_before)
+        rows = (q.order("created_at").limit(1).execute()).data or []
         if not rows:
             return None
         job = rows[0]
@@ -74,16 +97,18 @@ class Store:
                 }
             )
             .eq("id", job["id"])
-            .eq("status", "queued")  # optimistic guard
-            .execute()
+            .eq("status", status)  # optimistic guard
         )
-        if not (upd.data or []):
+        if claimed_before is not None:
+            upd = upd.lt("claimed_at", claimed_before)
+        if not (upd.execute().data or []):
             return None  # lost the race; caller retries on next poll
         return job
 
     def set_stage(self, job_id: str, stage: str, progress: float) -> None:
+        # claimed_at doubles as the heartbeat (see claim_job) — refresh it on every stage.
         self._sb.table("processing_jobs").update(
-            {"stage": stage, "progress": progress}
+            {"stage": stage, "progress": progress, "claimed_at": _now()}
         ).eq("id", job_id).execute()
 
     def finish(self, job_id: str, ok: bool, error: Optional[str] = None) -> None:

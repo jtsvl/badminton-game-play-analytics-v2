@@ -61,13 +61,15 @@ def _make_store(cfg):
     if cfg.db_url:
         from .db import JobStore  # direct Postgres path (not used on Coolify API-only)
 
-        store = JobStore(cfg.db_url, cfg.worker_id)
+        store = JobStore(cfg.db_url, cfg.worker_id, stale_job_timeout_s=cfg.stale_job_timeout_s)
         store.connect()
         return store
     from .store import Store
 
     log.info("using Supabase API store (no direct SUPABASE_DB_URL)")
-    return Store(cfg.supabase_url, cfg.service_role_key).with_worker(cfg.worker_id)
+    return Store(
+        cfg.supabase_url, cfg.service_role_key, stale_job_timeout_s=cfg.stale_job_timeout_s
+    ).with_worker(cfg.worker_id)
 
 
 def main() -> None:

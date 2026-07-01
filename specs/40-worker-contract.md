@@ -14,7 +14,12 @@ Studio; it owns no HTTP surface — it **polls** `processing_jobs`, does work, a
    returning *;
    ```
 3. Worker advances `stage` and `progress` (0..1) as it runs; on success sets `status='succeeded'`, on error
-   `status='failed'` + `error`. A crashed claim (running + stale `claimed_at`) is reclaimable after a timeout.
+   `status='failed'` + `error`. A crashed claim (running + stale `claimed_at`) is reclaimable after a timeout:
+   every `set_stage` refreshes `claimed_at` (a per-stage **heartbeat**), and `claim_job` — when the queue is
+   empty — reclaims a running job whose heartbeat is older than `WORKER_STALE_JOB_TIMEOUT_S` (default 3600 s),
+   using the same conditional-update/`SKIP LOCKED` guard as a normal claim. Honest limits: the heartbeat
+   granularity is one stage, so the timeout must outlast the longest single stage; and a poison job that kills
+   its worker will be re-claimed once per timeout (no attempt counter — acceptable for one local worker).
 4. Calibration is a **gate**: after `ingest`, set `match.status='calibrating'` and pause until the trainer confirms
    `match_videos.calibration` (FR-6); then enqueue the heavy stages. After aggregation, `match.status='review'`
    (or `done` if review skipped).
@@ -69,7 +74,8 @@ Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web'
 
 ## Config / env
 `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL`, buckets, `WORKER_ID`,
-`WORKER_POLL_INTERVAL_SECONDS`, `WORKER_FRAME_CACHE_DIR`, `PYTORCH_ENABLE_MPS_FALLBACK=1`. See `.env.example`.
+`WORKER_POLL_INTERVAL_SECONDS`, `WORKER_STALE_JOB_TIMEOUT_S` (3600 — stale-claim reclaim, see lifecycle
+step 3), `WORKER_FRAME_CACHE_DIR`, `PYTORCH_ENABLE_MPS_FALLBACK=1`. See `.env.example`.
 Foot/recovery tuning (all default off / conservative): `FOOT_BIAS_K` (bbox-nudge, 0), `USE_POSE_FOOT` (0),
 `POSE_CONF_THR` (0.3), `GAP_FILL_MAX_FRAMES` (longest short hole the re-ID interp will fill, 8).
 Shuttle (stage 5): `SHUTTLE_TRACKER` (wasb|tracknetv3|fake, default wasb), `SHUTTLE_CONF_THR` (0.5 — peak

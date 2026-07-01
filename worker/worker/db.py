@@ -12,9 +12,10 @@ log = logging.getLogger("worker.db")
 
 
 class JobStore:
-    def __init__(self, db_url: str, worker_id: str) -> None:
+    def __init__(self, db_url: str, worker_id: str, stale_job_timeout_s: float = 3600.0) -> None:
         self._db_url = db_url
         self._worker_id = worker_id
+        self._stale_job_timeout_s = stale_job_timeout_s
         self._conn: Any = None
 
     def connect(self) -> None:
@@ -24,7 +25,8 @@ class JobStore:
         log.info("connected to database")
 
     def claim_job(self) -> Optional[dict]:
-        """Atomically claim the oldest queued job. Returns the row dict or None."""
+        """Atomically claim the oldest queued job; with the queue empty, reclaim a stale running one
+        (dead worker — specs/40). `claimed_at` is the heartbeat set_stage refreshes."""
         sql = (
             "update processing_jobs j set status='running', claimed_by=%s, "
             "claimed_at=now(), started_at=now() "
@@ -32,8 +34,26 @@ class JobStore:
             "order by created_at for update skip locked limit 1) "
             "returning j.id, j.match_id, j.video_id, j.stage, j.params"
         )
+        job = self._claim(sql, (self._worker_id,))
+        if job is not None:
+            return job
+        stale_sql = (
+            "update processing_jobs j set status='running', claimed_by=%s, "
+            "claimed_at=now(), started_at=now() "
+            "where j.id = (select id from processing_jobs where status='running' "
+            "and claimed_at < now() - make_interval(secs => %s) "
+            "order by claimed_at for update skip locked limit 1) "
+            "returning j.id, j.match_id, j.video_id, j.stage, j.params"
+        )
+        job = self._claim(stale_sql, (self._worker_id, self._stale_job_timeout_s))
+        if job is not None:
+            log.warning("reclaimed stale job %s (no heartbeat for %.0fs)",
+                        job["id"], self._stale_job_timeout_s)
+        return job
+
+    def _claim(self, sql: str, params: tuple) -> Optional[dict]:
         with self._conn.cursor() as cur:
-            cur.execute(sql, (self._worker_id,))
+            cur.execute(sql, params)
             row = cur.fetchone()
             if row is None:
                 return None
@@ -41,9 +61,10 @@ class JobStore:
             return dict(zip(cols, row))
 
     def set_stage(self, job_id: str, stage: str, progress: float) -> None:
+        # claimed_at doubles as the heartbeat (see claim_job) — refresh it on every stage.
         with self._conn.cursor() as cur:
             cur.execute(
-                "update processing_jobs set stage=%s, progress=%s where id=%s",
+                "update processing_jobs set stage=%s, progress=%s, claimed_at=now() where id=%s",
                 (stage, progress, job_id),
             )
 
