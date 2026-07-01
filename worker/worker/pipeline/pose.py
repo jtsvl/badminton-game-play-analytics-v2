@@ -138,10 +138,13 @@ def run(ctx) -> None:
     model = _load_model(frames_dir, frame0, [d0["x"], d0["y"], d0["x"] + d0["w"], d0["y"] + d0["h"]])
 
     rows = []
+    skipped = 0
     for frame_idx in sorted(by_frame):
         dets = by_frame[frame_idx]
         img = cv2.imread(str(frames_dir / f"{frame_idx:06d}.jpg"))
         if img is None:
+            log.warning("pose: unreadable cached frame %06d.jpg — skipped", frame_idx)
+            skipped += 1
             continue
         bboxes = [[r["x"], r["y"], r["x"] + r["w"], r["y"] + r["h"]] for r in dets]
         keypoints, scores = model(img, bboxes)  # (N, K, 2), (N, K)
@@ -165,5 +168,6 @@ def run(ctx) -> None:
                      "application/octet-stream")
     n_conf = sum(1 for r in rows if r["foot_source"] == "ankle")
     n_head = sum(1 for r in rows if r["foot_source"] == "head")
-    log.info("pose: %d keypoint sets, %d ankle-foot / %d head-grounded / %d bbox-fallback (conf>=%.2f)",
-             len(rows), n_conf, n_head, len(rows) - n_conf - n_head, POSE_CONF_THR)
+    log.info("pose: %d keypoint sets, %d ankle-foot / %d head-grounded / %d bbox-fallback (conf>=%.2f)%s",
+             len(rows), n_conf, n_head, len(rows) - n_conf - n_head, POSE_CONF_THR,
+             f", {skipped} unreadable frames skipped" if skipped else "")
