@@ -54,3 +54,18 @@ class JobStore:
                 "progress=case when %s then 1 else progress end where id=%s",
                 ("succeeded" if ok else "failed", error, ok, job_id),
             )
+
+    def log_job_run(
+        self, job: str, match_id: Optional[str], is_ok: bool, detail: str = ""
+    ) -> None:
+        """Audit row per run (specs/40). started_at defaults to insert time ≈ finished_at —
+        good enough for an audit trail. Must never break a job, hence the swallow."""
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "insert into job_runs (job, match_id, is_ok, detail, finished_at) "
+                    "values (%s, %s, %s, %s, now())",
+                    (job, match_id, is_ok, detail),
+                )
+        except Exception as e:  # noqa: BLE001 — audit log must never break a job
+            log.warning("job_runs insert failed: %s", e)
