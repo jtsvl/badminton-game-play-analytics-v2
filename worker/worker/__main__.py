@@ -2,7 +2,7 @@
 
 Job `stage` selects the slice to run, honoring the gates (specs/40-worker-contract.md):
   ingest    → [ingest]                                 then match.status='calibrating'
-  calibrate → [calibrate,detect,pose,gate_track,aggregate,overlay]  then match.status='review'
+  calibrate → RESUME_STAGES (calibrate…overlay, incl. shuttle+rally_hit)  then match.status='review'
   remap     → [remap,aggregate,overlay]                then match.status='done'
 The trainer confirms corners (calibrate) then the track→player mapping (remap, FR-35) in the web UI
 between jobs; remap reuses the cached tracks.parquet, so it recomputes stats/overlays without re-detecting.
@@ -36,7 +36,8 @@ def _slice_for(job: dict) -> tuple[list[str], str | None]:
 
 def process_job(store, cfg, job: dict) -> None:
     job_id = job["id"]
-    log.info("claimed job %s (match=%s stage=%s)", job_id, job.get("match_id"), job.get("stage"))
+    stage = job.get("stage") or "ingest"
+    log.info("claimed job %s (match=%s stage=%s)", job_id, job.get("match_id"), stage)
     stages, end_status = _slice_for(job)
     ctx = StageContext(job=job, cfg=cfg, store=store)
     try:
@@ -44,25 +45,31 @@ def process_job(store, cfg, job: dict) -> None:
         store.finish(job_id, ok=True)
         if end_status and hasattr(store, "update_match_status"):
             store.update_match_status(job["match_id"], end_status)
+        store.log_job_run(stage, job.get("match_id"), is_ok=True,
+                          detail=f"job={job_id} stages={stages} -> {end_status or 'n/a'}")
         log.info("job %s succeeded (match->%s)", job_id, end_status)
     except Exception as e:  # noqa: BLE001 — record failure, keep the worker alive
         log.exception("job %s failed", job_id)
         store.finish(job_id, ok=False, error=str(e))
         if hasattr(store, "update_match_status"):
             store.update_match_status(job["match_id"], "failed", error=str(e))
+        store.log_job_run(stage, job.get("match_id"), is_ok=False,
+                          detail=f"job={job_id} stages={stages}: {e}")
 
 
 def _make_store(cfg):
     if cfg.db_url:
         from .db import JobStore  # direct Postgres path (not used on Coolify API-only)
 
-        store = JobStore(cfg.db_url, cfg.worker_id)
+        store = JobStore(cfg.db_url, cfg.worker_id, stale_job_timeout_s=cfg.stale_job_timeout_s)
         store.connect()
         return store
     from .store import Store
 
     log.info("using Supabase API store (no direct SUPABASE_DB_URL)")
-    return Store(cfg.supabase_url, cfg.service_role_key).with_worker(cfg.worker_id)
+    return Store(
+        cfg.supabase_url, cfg.service_role_key, stale_job_timeout_s=cfg.stale_job_timeout_s
+    ).with_worker(cfg.worker_id)
 
 
 def main() -> None:

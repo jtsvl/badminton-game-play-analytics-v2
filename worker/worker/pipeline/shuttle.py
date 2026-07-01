@@ -20,12 +20,19 @@ from pathlib import Path
 
 from ..geometry import court_airspace_polygon, court_crop_box
 from ..shuttle import get_tracker
+from ..shuttle.base import chunk_spans
 from ..shuttle.track import build_shuttle_track
 
 log = logging.getLogger("worker.pipeline.shuttle")
 
 CONF_THR = float(os.environ.get("SHUTTLE_CONF_THR", "0.5"))   # peak below this = a real dropout
 MAX_STEP = float(os.environ.get("SHUTTLE_MAX_STEP", "0.5"))   # court-unit isolated-spike guard
+# Bounded-memory prediction: process the clip in chunks of this many crops instead of holding every
+# full-res crop in RAM (a full match would OOM). Boundaries are aligned to the backend's temporal
+# window (chunk_spans), and TrackNetV3's median background is computed per-clip (begin_clip), so
+# chunked output is identical to the single-pass path. 240 is a multiple of both window sizes (8, 3)
+# ≈ 2-3 GB peak crop RAM on a 4K court crop. 0 disables chunking (the legacy single-pass path).
+CHUNK_FRAMES = int(os.environ.get("SHUTTLE_CHUNK_FRAMES", "240"))
 # Isolate the target court's AIRSPACE (ground quad raised up) so the side courts are masked out before
 # the tracker sees the frame. up/side shape the far edge; down/out extend the near edge to keep high
 # clears and just-out landings inside the mask; the bbox margin pads the crop around it.
@@ -43,6 +50,43 @@ SCHEMA = {
     "t": "Float64", "u": "Float64", "v": "Float64", "visibility": "Float64",
     "frame": "Int64", "px": "Float64", "py": "Float64", "conf": "Float64", "tracker": "Utf8",
 }
+
+
+class CropLoader:
+    """Lazy (frame_idx, masked_crop) access over the cached JPEGs — only the chunk being predicted
+    (plus the median subsample) is ever in memory. Unreadable frames are skipped with a warning
+    (counted in `skipped`); note a skip shifts window grouping within its chunk, so bit-identity with
+    the single-pass path is guaranteed for a complete frame cache (the normal case — ingest writes
+    the cache atomically)."""
+
+    def __init__(self, frames, frames_dir: Path, crop_box, mask) -> None:
+        self.frame_ids = [int(f["frame"]) for f in frames]
+        self._dir = frames_dir
+        self._box = crop_box
+        self._mask = mask
+        self.skipped = 0
+
+    def __len__(self) -> int:
+        return len(self.frame_ids)
+
+    def __getitem__(self, i: int):
+        """(frame_idx, crop) — crop is None when the cached JPEG is unreadable."""
+        import cv2  # lazy (ml extra)
+
+        idx = self.frame_ids[i]
+        img = cv2.imread(str(self._dir / f"{idx:06d}.jpg"))
+        if img is None:
+            log.warning("shuttle: unreadable cached frame %06d.jpg — skipped", idx)
+            self.skipped += 1
+            return idx, None
+        x0, y0, x1, y1 = self._box
+        c = img[y0:y1, x0:x1]
+        if self._mask is not None:
+            c = cv2.bitwise_and(c, c, mask=self._mask)
+        return idx, c
+
+    def load_span(self, a: int, b: int) -> list:
+        return [(idx, img) for idx, img in (self[i] for i in range(a, b)) if img is not None]
 
 
 def _calibration(ctx, video_id):
@@ -96,21 +140,22 @@ def run(ctx) -> None:
         local = np.array([[int(round(px - x0)), int(round(py - y0))] for px, py in air], dtype="int32")
         cv2.fillPoly(mask, [local], 255)
 
-    crops = []
-    for f in frames:
-        idx = int(f["frame"])
-        img = cv2.imread(str(frames_dir / f"{idx:06d}.jpg"))
-        if img is None:
-            continue
-        c = img[y0:y1, x0:x1]
-        if mask is not None:
-            c = cv2.bitwise_and(c, c, mask=mask)
-        crops.append((idx, c))
-    if not crops:
-        raise RuntimeError("shuttle: no frames in cache — ingest must run first")
+    loader = CropLoader(frames, frames_dir, crop_box, mask)
 
     tracker = get_tracker()
-    dets = tracker.predict(crops)
+    begin_clip = getattr(tracker, "begin_clip", None)
+    if callable(begin_clip):
+        begin_clip(loader)  # per-clip state (TrackNetV3 median, Fake phase) shared across chunks
+    align = int(getattr(tracker, "window", 1) or 1)
+    dets, n_crops = [], 0
+    for a, b in chunk_spans(len(loader), CHUNK_FRAMES, align):
+        span = loader.load_span(a, b)  # only this chunk's crops are in memory
+        n_crops += len(span)
+        if span:
+            dets.extend(tracker.predict(span))
+    if not n_crops:
+        raise RuntimeError("shuttle: no frames in cache — ingest must run first")
+
     raw = [(d.frame, d.x, d.y, d.visibility) for d in dets]
     mw, mh = tracker.model_size
     rows = build_shuttle_track(raw, H, crop_box, mw, mh, t_by_frame,
@@ -130,6 +175,8 @@ def run(ctx) -> None:
                      "application/octet-stream")
 
     n_seen = sum(1 for d in dets if d.visibility >= CONF_THR)
-    rate = 100.0 * len(rows) / max(len(crops), 1)
+    rate = 100.0 * len(rows) / max(n_crops, 1)
     log.info("shuttle: %s on %d frames → %d kept rows (%.0f%% coverage; %d raw peaks ≥thr, "
-             "crop=%s mask=%s)", tracker.name, len(crops), len(rows), rate, n_seen, crop_box, MASK)
+             "crop=%s mask=%s chunk=%d)%s", tracker.name, n_crops, len(rows), rate, n_seen,
+             crop_box, MASK, CHUNK_FRAMES,
+             f", {loader.skipped} unreadable frames skipped" if loader.skipped else "")

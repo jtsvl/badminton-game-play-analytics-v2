@@ -14,7 +14,12 @@ Studio; it owns no HTTP surface — it **polls** `processing_jobs`, does work, a
    returning *;
    ```
 3. Worker advances `stage` and `progress` (0..1) as it runs; on success sets `status='succeeded'`, on error
-   `status='failed'` + `error`. A crashed claim (running + stale `claimed_at`) is reclaimable after a timeout.
+   `status='failed'` + `error`. A crashed claim (running + stale `claimed_at`) is reclaimable after a timeout:
+   every `set_stage` refreshes `claimed_at` (a per-stage **heartbeat**), and `claim_job` — when the queue is
+   empty — reclaims a running job whose heartbeat is older than `WORKER_STALE_JOB_TIMEOUT_S` (default 3600 s),
+   using the same conditional-update/`SKIP LOCKED` guard as a normal claim. Honest limits: the heartbeat
+   granularity is one stage, so the timeout must outlast the longest single stage; and a poison job that kills
+   its worker will be re-claimed once per timeout (no attempt counter — acceptable for one local worker).
 4. Calibration is a **gate**: after `ingest`, set `match.status='calibrating'` and pause until the trainer confirms
    `match_videos.calibration` (FR-6); then enqueue the heavy stages. After aggregation, `match.status='review'`
    (or `done` if review skipped).
@@ -56,8 +61,12 @@ Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web'
 - `player_match_stats.zones` ints sum ≈100; `timeline` length = ceil(durationMin/5); `heat` = `[{x,y,w,s}]`.
 - All worker writes use service-role; never expose that key to the web.
 - Each worker run logs to **`job_runs`** (job, started/finished, is_ok, detail) for audit/observability.
-- After detection+tracking, set `matches.status='awaiting_mapping'` until the trainer confirms `match_players.track_label`
-  (identity mapping), then continue to stroke/aggregate.
+  (`started_at` defaults to the insert time ≈ `finished_at` — good enough for an audit row.)
+- Identity mapping is reviewed **after** aggregation, not mid-pipeline: the resume slice auto-maps
+  `match_players.track_label` by role and ends at `matches.status='review'`; the trainer confirms/corrects
+  the mapping in `/match/:slug/review` (FR-35, see specs/features/player-identity-review.md) and a `remap`
+  job recomputes stats/overlays, ending at `'done'`. The `awaiting_mapping` status stays in the enum as a
+  **reserved, currently unset** value (kept to avoid a pointless migration).
 - Estimates (`fastest`, speeds) carry their estimate nature (the UI labels them; don't present as measured).
 - Stage-6 rally fields (`winner_side`, `end_shot_type`, `shot_count`) and the landing in/out call
   (`events.type='landing'`, SPEC) are **estimates decoupled from the human-entered `matches.score`** — surfaced
@@ -69,19 +78,27 @@ Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web'
 
 ## Config / env
 `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL`, buckets, `WORKER_ID`,
-`WORKER_POLL_INTERVAL_SECONDS`, `WORKER_FRAME_CACHE_DIR`, `PYTORCH_ENABLE_MPS_FALLBACK=1`. See `.env.example`.
+`WORKER_POLL_INTERVAL_SECONDS`, `WORKER_STALE_JOB_TIMEOUT_S` (3600 — stale-claim reclaim, see lifecycle
+step 3), `WORKER_FRAME_CACHE_DIR`, `PYTORCH_ENABLE_MPS_FALLBACK=1`. See `.env.example`.
 Foot/recovery tuning (all default off / conservative): `FOOT_BIAS_K` (bbox-nudge, 0), `USE_POSE_FOOT` (0),
 `POSE_CONF_THR` (0.3), `GAP_FILL_MAX_FRAMES` (longest short hole the re-ID interp will fill, 8).
 Shuttle (stage 5): `SHUTTLE_TRACKER` (wasb|tracknetv3|fake, default wasb), `SHUTTLE_CONF_THR` (0.5 — peak
 below = a real dropout, not a fabricated point), `SHUTTLE_MAX_STEP` (0.5 court units, isolated-spike guard),
 `SHUTTLE_MASK` (1 — black out outside the target-court airspace), `SHUTTLE_AIR_UP`/`SHUTTLE_AIR_SIDE`
 (airspace shape), `SHUTTLE_BBOX_MARGIN`, `SHUTTLE_OVERLAY_GAP_S` (0.3, overlay gap cap),
-`WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL` (vendored repo + weights, git-ignored).
+`SHUTTLE_CHUNK_FRAMES` (240 — bounded-memory chunked prediction, see features/shuttle-tracking.md;
+0 = legacy single pass), `WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL` (vendored
+repo + weights, git-ignored).
 `visibility` = tracker heatmap peak confidence in [0,1]; sub-threshold frames are absent (an honest gap).
-`shuttle` is in `_REAL` but **not yet in `RESUME_STAGES`** — it joins the resume only once it yields a
-usable court track (see specs/features/shuttle-tracking.md); until then run standalone via `eval_shuttle`.
+`shuttle` **and** `rally_hit` are in `_REAL` **and** `RESUME_STAGES` (`worker/__main__.py`) — shuttle is
+verified on real footage (see specs/features/shuttle-tracking.md "Wiring note"); `eval_shuttle` remains the
+standalone bench/A-B harness.
 
 ## Testing
 Per-stage unit/integration tests on a short labeled clip assert the contracted artifacts/rows and numeric
-sanity. Aggregation math is pure and TDD'd. An end-to-end test runs ingest→aggregate on a fixture and checks
-the assembled report object matches expected shapes.
+sanity. Aggregation math is pure and TDD'd. What exists today: a `run_pipeline` orchestration test (fake
+stages: order + progress + job_runs/finish wiring) and a stage-level chunked-shuttle test (synthetic
+frames + FakeTracker: chunked ≡ single-pass parquet). A *real* ingest→aggregate e2e needs video decode +
+model weights — heavier than the rest of the suite (pure/fake-backed, runs without the ml extra), so it
+stays an aspiration for the Mac Studio, not CI. Judged & skipped 2026-07-01: caching `get_match_players`
+across aggregate/overlay (one ~100 ms REST call per job vs minutes of GPU — not worth the ctx coupling).

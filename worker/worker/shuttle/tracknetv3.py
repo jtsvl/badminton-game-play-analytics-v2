@@ -76,6 +76,8 @@ class TrackNetV3Tracker:
         ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
         self.seq_len = int(ckpt["param_dict"]["seq_len"])
         self.bg_mode = ckpt["param_dict"]["bg_mode"]
+        self.window = self.seq_len  # chunk boundaries must align to the 8-frame windows
+        self._median = None
         in_dim, out_dim = _in_dims(self.seq_len, self.bg_mode)
         model = TrackNet(in_dim, out_dim)
         model.load_state_dict(ckpt["model"])
@@ -104,6 +106,28 @@ class TrackNetV3Tracker:
         model.to("cpu")
         return "cpu"
 
+    def begin_clip(self, loader) -> None:
+        """Compute the per-clip median background ONCE from a stride subsample of the whole clip, so
+        chunked predict() calls share it. Same frames, same resize/BGR→RGB, same dtype as the legacy
+        in-predict computation → byte-identical median, and each chunk sees the clip-wide background
+        (a per-chunk median would differ and change detections)."""
+        import cv2
+        import numpy as np
+
+        self._median = None
+        if not self.bg_mode:
+            return
+        n = len(loader)
+        if n == 0:
+            return
+        mw, mh = self.model_size
+        stride = max(1, n // MEDIAN_SAMPLES)
+        sample = [loader[i] for i in range(0, n, stride)]
+        rgb = np.stack(
+            [cv2.resize(img, (mw, mh))[:, :, ::-1] for _, img in sample if img is not None]
+        ).astype("uint8")
+        self._median = np.median(rgb, axis=0)
+
     def predict(self, crops: Sequence[Crop]) -> List[ShuttleDetection]:
         import cv2
         import numpy as np
@@ -117,11 +141,12 @@ class TrackNetV3Tracker:
         # Pre-resize each crop to model size (keeps the median-background cheap) and go BGR→RGB.
         rgb = np.stack([cv2.resize(img, (mw, mh))[:, :, ::-1] for _, img in crops]).astype("uint8")
 
-        # Precompute the background median from a subsample and hand it to the dataset (which only computes
-        # np.median itself when median=None). Channels-last float64, same layout a computed median would
-        # have — the dataset re-processes it identically. Caps the full-stack median memory spike (the crash).
-        median = None
-        if self.bg_mode:  # 'concat' for our weights; '' / None bg_modes never use a median
+        # Per-clip median from begin_clip when the stage runs chunked; else (direct predict() callers,
+        # e.g. shuttle/render.py) compute it from THESE crops exactly as before. Handing the median to
+        # the dataset (which only computes np.median itself when median=None) caps the full-stack
+        # memory spike (the crash). Channels-last float64, same layout a computed median would have.
+        median = self._median
+        if median is None and self.bg_mode:  # '' / None bg_modes never use a median
             stride = max(1, len(rgb) // MEDIAN_SAMPLES)
             median = np.median(rgb[::stride], axis=0)
 

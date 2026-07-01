@@ -17,6 +17,7 @@ class Config:
     artifact_bucket: str
     worker_id: str
     poll_interval_s: float
+    stale_job_timeout_s: float
     frame_cache_dir: str
     local_video_dir: str
     calib_frame_count: int
@@ -48,6 +49,9 @@ def load_config() -> Config:
         artifact_bucket=os.environ.get("SUPABASE_ARTIFACT_BUCKET", "analysis-artifacts"),
         worker_id=os.environ.get("WORKER_ID", "worker-1"),
         poll_interval_s=float(os.environ.get("WORKER_POLL_INTERVAL_SECONDS", "5")),
+        # A running job whose claimed_at heartbeat is older than this is reclaimable (dead worker).
+        # Must outlast the longest single stage — set_stage refreshes the heartbeat once per stage.
+        stale_job_timeout_s=float(os.environ.get("WORKER_STALE_JOB_TIMEOUT_S", "3600")),
         frame_cache_dir=os.environ.get("WORKER_FRAME_CACHE_DIR", "./worker/.cache"),
         local_video_dir=os.environ.get("WORKER_LOCAL_VIDEO_DIR", str(_PROJECT_ROOT / "videos")),
         calib_frame_count=int(os.environ.get("CALIB_FRAME_COUNT", "12")),

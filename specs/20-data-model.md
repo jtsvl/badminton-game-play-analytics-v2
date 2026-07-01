@@ -25,6 +25,9 @@ sync). Incorporates lessons adopted from the prior v1 schema (see "v1 lessons" a
 games jsonb [[a,b]…] · duration_min · rest_min · result_side_a∈{win,loss} ·
 status∈{uploaded,calibrating,processing,awaiting_mapping,review,done,failed} ·
 processed_at? · error? · notified_at?  (report link sent) · is_test · created_at`
+(`awaiting_mapping` is **reserved, currently unset** — the implemented flow goes `processing→review` and
+the trainer confirms the track→player mapping there; see specs/40 "Contracts". Kept in the enum to avoid
+a pointless migration.)
 
 ### match_videos
 `id · match_id → matches · storage_path · label · angle∈{overhead,side} · duration_s · fps · width · height · created_at`

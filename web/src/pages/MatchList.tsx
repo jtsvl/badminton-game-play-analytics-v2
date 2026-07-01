@@ -3,9 +3,9 @@ import { Link } from 'react-router-dom'
 import { supabase, isConfigured } from '../lib/supabase'
 import { dateParts } from '../lib/format'
 import { disciplineDE, resultDE } from '../lib/labels'
-import type { MatchListItem, MatchResultCode, Side } from '../types'
+import type { MatchListItem, MatchListPlayerRef, MatchListQueryRow, Side } from '../types'
 
-function namesForSide(players: any[], side: Side): string {
+function namesForSide(players: MatchListPlayerRef[], side: Side): string {
   return players
     .filter((p) => p.side === side)
     .sort((a, b) => a.slot - b.slot)
@@ -13,14 +13,14 @@ function namesForSide(players: any[], side: Side): string {
     .join(' / ')
 }
 
-function buildItems(rows: any[]): MatchListItem[] {
+function buildItems(rows: MatchListQueryRow[]): MatchListItem[] {
   return rows.map((m, i) => {
     const dp = dateParts(m.played_on)
     const mps = m.match_players ?? []
     return {
       id: m.id, slug: m.slug, dd: dp.dd, day: dp.day, month: dp.month, dateLabel: dp.dateLabel,
       discipline: m.discipline, a: namesForSide(mps, 'A'), b: namesForSide(mps, 'B'),
-      score: m.score, result: (m.result_side_a as MatchResultCode) ?? null, isNew: i === 0,
+      score: m.score, result: m.result_side_a ?? null, isNew: i === 0,
       needsCalibration: m.status === 'calibrating' || m.status === 'uploaded',
     }
   })
@@ -38,7 +38,7 @@ export function MatchList() {
         .select('id, slug, played_on, discipline, score, result_side_a, status, match_players(side, slot, players(name))')
         .order('played_on', { ascending: false })
       if (error) { setError(error.message); return }
-      setItems(buildItems((data ?? []) as any[]))
+      setItems(buildItems((data ?? []) as MatchListQueryRow[]))
     })()
   }, [])
 

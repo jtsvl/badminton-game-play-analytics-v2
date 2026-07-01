@@ -33,3 +33,22 @@ export function resultLine(games: number[][], viewerSide: Side): string {
   const [won, lost] = viewerSide === 'A' ? [a, b] : [b, a]
   return `${won >= lost ? 'Sieg' : 'Niederlage'} ${won}:${lost}`
 }
+
+/** Viewer-perspective result + line for the report header. The canonical `matches.result_side_a`
+ * is authoritative when set (counting `games` alone yields "Sieg 0:0" on missing games and can
+ * disagree with the match list, which reads the column); the game count only fills in the numbers.
+ * Falls back to counting games when no canonical result is stored; null when neither exists. */
+export function matchResult(
+  games: number[][],
+  resultSideA: MatchResultCode | null,
+  viewerSide: Side,
+): { result: MatchResultCode | null; line: string } {
+  const [a, b] = gamesWon(games)
+  const [won, lost] = viewerSide === 'A' ? [a, b] : [b, a]
+  const result: MatchResultCode | null = resultSideA
+    ? viewerSide === 'A' ? resultSideA : resultSideA === 'win' ? 'loss' : 'win'
+    : games.length ? (won >= lost ? 'win' : 'loss') : null
+  if (!result) return { result: null, line: '' }
+  const counts = games.length ? ` ${won}:${lost}` : ''
+  return { result, line: `${result === 'win' ? 'Sieg' : 'Niederlage'}${counts}` }
+}

@@ -42,6 +42,27 @@ export interface MatchRallyStatsRow {
   long_shots: number | null; long_sec: number | null
 }
 
+// ── Supabase query-row shapes (what each .select() actually returns) ──
+// Kept narrow (only the selected columns) so schema drift fails the typecheck, not the runtime.
+export type PlayerNameRef = Pick<PlayerRow, 'name' | 'first_name'>
+// supabase-js returns an embedded resource as object OR array depending on FK metadata — handle both.
+export type Embedded<T> = T | T[] | null
+export interface MatchPlayerJoinRow {
+  side: Side; slot: number; player_id: string; players: Embedded<PlayerNameRef>
+}
+export interface RallyEndRow { end_shot_type: string | null }
+export interface CourtCalibrationPointsRow {
+  confirmed_points: Pt[] | null
+  image_size: { w: number; h: number } | null
+}
+export interface TrackKeyframeRow { subject: string; data: TrackKey[] }
+export interface MatchListPlayerRef { side: Side; slot: number; players: Embedded<{ name: string }> }
+export interface MatchListQueryRow {
+  id: string; slug: string; played_on: string; discipline: Discipline
+  score: string | null; result_side_a: MatchResultCode | null; status: string
+  match_players: MatchListPlayerRef[] | null
+}
+
 // ── assembled report (frontend shape) ──
 export type ShotPair = [string, number]
 export interface RallySummary { count: number; avgShots: number; avgSec: number; longShots: number; longSec: number; endLine: string }

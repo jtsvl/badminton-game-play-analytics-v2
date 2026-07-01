@@ -51,6 +51,7 @@ class WASBTracker:
 
         cfg = OmegaConf.load(str(Path(src) / "configs/model/wasb.yaml"))
         self.frames_in = int(cfg["frames_in"])
+        self.window = self.frames_in  # chunk boundaries must align to the 3-frame windows
         model = HRNet(cfg)
         ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
         missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
