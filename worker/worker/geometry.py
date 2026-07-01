@@ -65,8 +65,17 @@ def homography_from_corners(corners_px: Sequence[Pt]) -> List[float]:
 
 
 def apply_homography(H: Sequence[float], x: float, y: float) -> Pt:
-    """Project (x,y) through H. Returns (u,v) = the dst-space coordinates."""
+    """Project (x,y) through H. Returns (u,v) = the dst-space coordinates.
+
+    Assumes the point is off H's horizon line (denominator != 0). That holds for anything on the
+    court under a trainer-confirmed calibration; a horizon hit means the calibration is degenerate,
+    so we fail the job loudly rather than let a bare ZeroDivisionError hide the cause."""
     denom = H[6] * x + H[7] * y + H[8]
+    if abs(denom) < 1e-9:
+        raise ValueError(
+            f"apply_homography: point ({x:.1f}, {y:.1f}) lies on the camera horizon of this "
+            "homography (denominator ~0) — the calibration is degenerate; re-check the corners"
+        )
     return (
         (H[0] * x + H[1] * y + H[2]) / denom,
         (H[3] * x + H[4] * y + H[5]) / denom,

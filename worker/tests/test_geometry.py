@@ -39,6 +39,17 @@ class TestHomography(unittest.TestCase):
         with self.assertRaises(Exception):
             g.homography_from_corners([(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)])
 
+    def test_horizon_point_raises_value_error(self):
+        # denom = 0*x + 1*y - 100 -> zero along y=100 (the camera horizon of this H).
+        # A raw ZeroDivisionError here would be cryptic; the guard names the problem.
+        H = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, -100.0]
+        with self.assertRaises(ValueError):
+            g.apply_homography(H, 50.0, 100.0)
+        # ...and stays a working projection off the horizon
+        u, v = g.apply_homography(H, 50.0, 200.0)
+        self.assertAlmostEqual(u, 0.5, places=9)
+        self.assertAlmostEqual(v, 2.0, places=9)
+
 
 class TestReprojectError(unittest.TestCase):
     def test_exact_corners_zero_error(self):
