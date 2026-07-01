@@ -7,13 +7,19 @@ import type { Pt } from '../lib/homography'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { CalibrationCanvas } from '../components/calibrate/CalibrationCanvas'
 import { CalibrationControls } from '../components/calibrate/CalibrationControls'
+import { FrameSwitcher } from '../components/calibrate/FrameSwitcher'
+
+interface Frame {
+  url: string
+  s: number
+}
 
 interface Ctx {
   matchId: string
   videoId: string
   calibId: string
   size: { w: number; h: number }
-  frameUrl: string | null
+  frames: Frame[]
   status: string | null
   proposed: Pt[]
 }
@@ -44,6 +50,7 @@ export function Calibrate() {
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [ctx, setCtx] = useState<Ctx | null>(null)
+  const [frameIdx, setFrameIdx] = useState(0)
   const [corners, setCorners] = useState<Pt[] | null>(null)
   const [lastH, setLastH] = useState<number[] | null>(null)
   const [saving, setSaving] = useState(false)
@@ -70,7 +77,7 @@ export function Calibrate() {
         if (!video) throw new Error('Kein Video für dieses Spiel')
         const { data: calib } = await supabase
           .from('court_calibrations')
-          .select('id, status, frame_uri, image_size, proposed_points, confirmed_points')
+          .select('id, status, frame_uri, frame_uris, frame_s, image_size, proposed_points, confirmed_points')
           .eq('video_id', video.id)
           .order('updated_at', { ascending: false })
           .limit(1)
@@ -81,10 +88,25 @@ export function Calibrate() {
           w: video.width ?? 1920,
           h: video.height ?? 1080,
         }
-        const frameUrl =
-          (calib.frame_uri ? await signedUrl('analysis-artifacts', calib.frame_uri) : '') ||
-          (await signedUrl('match-videos', video.storage_path)) ||
-          null
+        // The N calibration snapshots (0007) to step between; fall back to the single legacy still.
+        const uris = (calib.frame_uris as { uri: string; s: number }[] | null) ?? []
+        const signed = await Promise.all(uris.map((f) => signedUrl('analysis-artifacts', f.uri)))
+        let frames: Frame[] = uris
+          .map((f, i) => ({ url: signed[i], s: f.s }))
+          .filter((f) => f.url)
+        if (!frames.length) {
+          const url =
+            (calib.frame_uri ? await signedUrl('analysis-artifacts', calib.frame_uri) : '') ||
+            (await signedUrl('match-videos', video.storage_path)) ||
+            ''
+          frames = [{ url, s: (calib.frame_s as number | null) ?? 0 }]
+        }
+        // Start on the snapshot nearest the legacy ~5 s still so the default view is unchanged.
+        const targetS = (calib.frame_s as number | null) ?? 0
+        let defaultFrameIdx = 0
+        frames.forEach((f, i) => {
+          if (Math.abs(f.s - targetS) < Math.abs(frames[defaultFrameIdx].s - targetS)) defaultFrameIdx = i
+        })
         const proposed = (calib.proposed_points as Pt[] | null) ?? defaultCorners(size)
         const start = (calib.confirmed_points as Pt[] | null) ?? proposed
 
@@ -94,10 +116,11 @@ export function Calibrate() {
           videoId: video.id,
           calibId: calib.id,
           size,
-          frameUrl,
+          frames,
           status: calib.status ?? null,
           proposed,
         })
+        setFrameIdx(defaultFrameIdx)
         setCorners(start)
         setPhase('ready')
       } catch (e: unknown) {
@@ -172,7 +195,10 @@ export function Calibrate() {
         <h1 style={{ fontFamily: 'var(--font-head)', fontSize: isDesktop ? 28 : 22, margin: '0 0 16px' }}>Feld kalibrieren</h1>
 
         <div style={{ display: isDesktop ? 'grid' : 'block', gridTemplateColumns: isDesktop ? 'minmax(0, 1fr) 300px' : undefined, gap: 20, alignItems: 'start' }}>
-          <CalibrationCanvas imgSrc={ctx.frameUrl} size={ctx.size} corners={corners} H={H} valid={valid} onDrag={onDrag} />
+          <div>
+            <FrameSwitcher count={ctx.frames.length} index={frameIdx} seconds={ctx.frames[frameIdx]?.s ?? 0} onIndex={setFrameIdx} />
+            <CalibrationCanvas imgSrc={ctx.frames[frameIdx]?.url ?? null} size={ctx.size} corners={corners} H={H} valid={valid} onDrag={onDrag} />
+          </div>
           <div style={{ marginTop: isDesktop ? 0 : 16 }}>{controls}</div>
         </div>
       </div>

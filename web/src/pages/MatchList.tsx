@@ -21,6 +21,7 @@ function buildItems(rows: any[]): MatchListItem[] {
       id: m.id, slug: m.slug, dd: dp.dd, day: dp.day, month: dp.month, dateLabel: dp.dateLabel,
       discipline: m.discipline, a: namesForSide(mps, 'A'), b: namesForSide(mps, 'B'),
       score: m.score, result: (m.result_side_a as MatchResultCode) ?? null, isNew: i === 0,
+      needsCalibration: m.status === 'calibrating' || m.status === 'uploaded',
     }
   })
 }
@@ -34,7 +35,7 @@ export function MatchList() {
     ;(async () => {
       const { data, error } = await supabase
         .from('matches')
-        .select('id, slug, played_on, discipline, score, result_side_a, match_players(side, slot, players(name))')
+        .select('id, slug, played_on, discipline, score, result_side_a, status, match_players(side, slot, players(name))')
         .order('played_on', { ascending: false })
       if (error) { setError(error.message); return }
       setItems(buildItems((data ?? []) as any[]))
@@ -58,8 +59,8 @@ export function MatchList() {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {items?.map((it) => (
+          <div key={it.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <Link
-            key={it.id}
             to={`/match/${it.slug}`}
             style={{
               display: 'grid', gridTemplateColumns: '46px 1fr 18px', gap: 12, alignItems: 'center',
@@ -89,6 +90,19 @@ export function MatchList() {
             </div>
             <span style={{ color: 'var(--orange)', fontSize: 17 }}>›</span>
           </Link>
+          {it.needsCalibration && (
+            <Link
+              to={`/match/${it.slug}/calibrate`}
+              style={{
+                display: 'block', textAlign: 'center', background: 'var(--orange)', color: 'var(--on-orange)',
+                fontSize: 12.5, fontWeight: 700, borderRadius: 10, padding: '9px 14px',
+                boxShadow: '0 2px 0 var(--orange-shade)',
+              }}
+            >
+              Feld kalibrieren →
+            </Link>
+          )}
+          </div>
         ))}
       </div>
     </main>

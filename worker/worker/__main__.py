@@ -96,6 +96,12 @@ def main() -> None:
         export_cli(sys.argv[2:])
         return
 
+    if len(sys.argv) > 1 and sys.argv[1] == "backfill-calib-frames":
+        from .backfill_calib_frames import backfill_cli
+
+        backfill_cli(sys.argv[2:])
+        return
+
     once = "--once" in sys.argv[1:]  # drain queued jobs then exit (dev / cron)
     cfg = load_config()
     log.info("worker %s starting (configured=%s, once=%s)", cfg.worker_id, cfg.configured, once)

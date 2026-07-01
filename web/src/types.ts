@@ -81,5 +81,5 @@ export interface MatchReport {
 export interface MatchListItem {
   id: string; slug: string; dd: string; day: string; month: string; dateLabel: string
   discipline: Discipline; a: string; b: string; score: string | null
-  result: MatchResultCode | null; isNew: boolean
+  result: MatchResultCode | null; isNew: boolean; needsCalibration: boolean
 }

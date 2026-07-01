@@ -12,6 +12,8 @@ import json
 import logging
 from pathlib import Path
 
+from ..calib_frames import select_calib_frames, upload_calib_frames
+
 log = logging.getLogger("worker.pipeline.ingest")
 
 DEFAULT_ANALYSIS_FPS = 12.0
@@ -108,10 +110,18 @@ def run(ctx) -> None:
 
     still_path = f"{video_id}/calib_frame.jpg"
     store.upload(cfg.artifact_bucket, still_path, still_bytes, "image/jpeg")
+
+    # N evenly-spaced snapshots so the calibration screen can switch frames when a player blocks a
+    # corner in one of them. Reuse the already-cached JPEGs on disk (no re-encode); the court is
+    # static so the corner handles are frame-independent. See 0007_calibration_frames.sql.
+    picks = select_calib_frames(manifest, cfg.calib_frame_count)
+    frame_uris = upload_calib_frames(store, cfg.artifact_bucket, video_id, frames_dir, picks)
+
     still_fields = {
         "frame_uri": still_path,
         "frame_s": round(still_t or 0.0, 3),
         "image_size": {"w": width, "h": height},
+        "frame_uris": frame_uris,
     }
     existing = store.get_calibration(video_id)
     if existing:
@@ -130,11 +140,12 @@ def run(ctx) -> None:
     ctx["width"] = width
     ctx["height"] = height
     log.info(
-        "ingest done: %d frames @ %.1f fps cached, %dx%d, %.1fs, still@%.1fs",
+        "ingest done: %d frames @ %.1f fps cached, %dx%d, %.1fs, still@%.1fs, %d calib snapshots",
         kept,
         analysis_fps,
         width,
         height,
         duration_s,
         still_t or 0.0,
+        len(frame_uris),
     )

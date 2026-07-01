@@ -19,6 +19,7 @@ class Config:
     poll_interval_s: float
     frame_cache_dir: str
     local_video_dir: str
+    calib_frame_count: int
 
     @property
     def configured(self) -> bool:
@@ -49,4 +50,5 @@ def load_config() -> Config:
         poll_interval_s=float(os.environ.get("WORKER_POLL_INTERVAL_SECONDS", "5")),
         frame_cache_dir=os.environ.get("WORKER_FRAME_CACHE_DIR", "./worker/.cache"),
         local_video_dir=os.environ.get("WORKER_LOCAL_VIDEO_DIR", str(_PROJECT_ROOT / "videos")),
+        calib_frame_count=int(os.environ.get("CALIB_FRAME_COUNT", "12")),
     )
