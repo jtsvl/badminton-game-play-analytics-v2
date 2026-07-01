@@ -35,6 +35,27 @@ class ShuttleTracker(Protocol):
     def predict(self, crops: Sequence[Crop]) -> List[ShuttleDetection]:
         ...
 
+    # Backends may additionally expose (the stage discovers both via getattr, so they stay optional):
+    #   window: int             — temporal window size; chunk boundaries must be multiples of it
+    #   begin_clip(loader)      — compute per-clip state once (e.g. TrackNetV3's median background)
+    #                             so chunked predict() calls share it
+
+
+def chunk_spans(n_frames: int, chunk_size: int, align: int) -> List[Tuple[int, int]]:
+    """Contiguous (start, end) spans covering 0..n_frames for bounded-memory prediction.
+
+    Every span boundary is a multiple of `align` (the backend's temporal window), so the backend's
+    non-overlapping windowing groups frames exactly as it would over the whole clip — chunked
+    predictions are identical to full-clip ones, just without holding every crop in RAM.
+    chunk_size <= 0 or >= n_frames means a single span (the legacy full-clip path)."""
+    if n_frames <= 0:
+        return []
+    align = max(int(align), 1)
+    if chunk_size <= 0 or chunk_size >= n_frames:
+        return [(0, n_frames)]
+    eff = max(align, chunk_size - chunk_size % align)
+    return [(a, min(a + eff, n_frames)) for a in range(0, n_frames, eff)]
+
 
 def heatmap_peak(heatmap) -> Tuple[float, float, float]:
     """Argmax of a 2D confidence heatmap → (x, y, conf). conf is the peak value clamped to [0,1]
@@ -74,12 +95,25 @@ class FakeTracker:
 
     name = "fake"
     model_size = (512, 288)
+    window = 1  # no temporal windowing — any chunk boundary is fine
+
+    def __init__(self) -> None:
+        self._clip_len: int | None = None
+        self._pos: dict | None = None
+
+    def begin_clip(self, loader) -> None:
+        """Pin the arc's phase to the WHOLE clip so chunked predict() calls trace the same parabola
+        a single full-clip call would (phase is clip position, not position within the call)."""
+        ids = list(loader.frame_ids)
+        self._clip_len = max(len(ids), 1)
+        self._pos = {fid: i for i, fid in enumerate(ids)}
 
     def predict(self, crops: Sequence[Crop]) -> List[ShuttleDetection]:
         out: List[ShuttleDetection] = []
         mw, mh = self.model_size
-        n = max(len(crops), 1)
-        for i, (frame_idx, _img) in enumerate(crops):
+        n = self._clip_len or max(len(crops), 1)
+        for local_i, (frame_idx, _img) in enumerate(crops):
+            i = self._pos.get(frame_idx, local_i) if self._pos is not None else local_i
             phase = i / n
             # a left→right sweep with a parabolic arc in y; two short camouflage dropouts.
             x = mw * (0.1 + 0.8 * phase)

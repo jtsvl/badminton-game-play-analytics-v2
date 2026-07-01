@@ -82,7 +82,9 @@ Shuttle (stage 5): `SHUTTLE_TRACKER` (wasb|tracknetv3|fake, default wasb), `SHUT
 below = a real dropout, not a fabricated point), `SHUTTLE_MAX_STEP` (0.5 court units, isolated-spike guard),
 `SHUTTLE_MASK` (1 — black out outside the target-court airspace), `SHUTTLE_AIR_UP`/`SHUTTLE_AIR_SIDE`
 (airspace shape), `SHUTTLE_BBOX_MARGIN`, `SHUTTLE_OVERLAY_GAP_S` (0.3, overlay gap cap),
-`WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL` (vendored repo + weights, git-ignored).
+`SHUTTLE_CHUNK_FRAMES` (240 — bounded-memory chunked prediction, see features/shuttle-tracking.md;
+0 = legacy single pass), `WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL` (vendored
+repo + weights, git-ignored).
 `visibility` = tracker heatmap peak confidence in [0,1]; sub-threshold frames are absent (an honest gap).
 `shuttle` is in `_REAL` but **not yet in `RESUME_STAGES`** — it joins the resume only once it yields a
 usable court track (see specs/features/shuttle-tracking.md); until then run standalone via `eval_shuttle`.

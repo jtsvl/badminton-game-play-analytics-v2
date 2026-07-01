@@ -145,7 +145,21 @@ rectification) + 2D speed. Speed/rally/hit remain deferred.
 `SHUTTLE_TRACKER` (wasb|tracknetv3|fake), `SHUTTLE_CONF_THR` (0.5), `SHUTTLE_MAX_STEP` (0.5 court units),
 `SHUTTLE_MASK` (1), `SHUTTLE_AIR_UP` (0.7), `SHUTTLE_AIR_SIDE` (0.08), **`SHUTTLE_AIR_DOWN` (0.0)**,
 **`SHUTTLE_AIR_OUT` (0.0)**, `SHUTTLE_BBOX_MARGIN` (0.02), `SHUTTLE_OVERLAY_GAP_S` (0.3),
-`WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL`.
+`SHUTTLE_CHUNK_FRAMES` (240, see below), `WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL`.
+
+### Bounded-memory chunked prediction (`SHUTTLE_CHUNK_FRAMES`, default 240)
+The stage used to materialize **every** full-res court crop before calling the tracker (~130 GB for a
+20-min match — fine on the 30 s eval clips, OOM on a real one). Now a lazy `CropLoader` reads crops
+per chunk and the clip is predicted in spans of `SHUTTLE_CHUNK_FRAMES` crops (0 = legacy single pass).
+**Identity guarantee:** both backends window their input *without overlap* (TrackNetV3
+`sliding_step=seq_len=8`, WASB `frames_in=3`), so `chunk_spans` aligns every chunk boundary to a
+multiple of the backend's `window` and the window grouping — hence the predictions — is exactly the
+full-clip grouping. The only per-clip state, TrackNetV3's median background, is computed once per clip
+(`begin_clip`, same stride subsample as before → byte-identical) instead of per predict() call.
+240 is a multiple of both window sizes ≈ 2–3 GB peak crop RAM on a 4K court crop. Identity holds for a
+complete frame cache (an unreadable JPEG shifts windows only within its chunk — warned and counted).
+Verified: stage-level test (chunked vs single-pass parquet equality, FakeTracker); re-verify with real
+weights on the Mac Studio via `eval_shuttle --compare` before trusting new benchmark numbers.
 
 ### Wider-box knobs (off by default — `AIR_DOWN`/`AIR_OUT`, raise-`AIR_UP`)
 `court_airspace_polygon` gained near-edge margins (`down` lowers the near baseline, `out` spreads the near
