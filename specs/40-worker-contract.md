@@ -27,8 +27,16 @@ Studio; it owns no HTTP surface — it **polls** `processing_jobs`, does work, a
 
 ## Stage order & I/O
 Stages mirror `30-ml-pipeline.md`. Each stage reads the frame cache + prior artifacts and writes the next.
-`stage` string ∈ `ingest · calibrate · detect · pose · gate_track · shuttle · rally_hit · stroke · aggregate · overlay`.
+`stage` string ∈ `ingest · calibrate · detect · pose · gate_track · shuttle · rally_hit · stroke · aggregate · overlay · remap`.
 (pose runs **before** gate_track: it supplies the ankle foot that gate_track projects instead of the bbox bottom.)
+
+A job's `stage` selects the **slice** the worker runs (`__main__.py`):
+
+| Job stage | Runs | Match status after |
+|---|---|---|
+| `ingest` | `[ingest]` | `calibrating` |
+| `calibrate` | `RESUME_STAGES` = `[calibrate, detect, pose, gate_track, shuttle, rally_hit, aggregate, overlay]` | `review` |
+| `remap` | `[remap, aggregate, overlay]` (FR-35 — reuses cached `tracks.parquet`, no re-detect) | `done` |
 
 | Stage | Reads | Writes |
 |---|---|---|
@@ -79,20 +87,43 @@ Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web'
 ## Config / env
 `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL`, buckets, `WORKER_ID`,
 `WORKER_POLL_INTERVAL_SECONDS`, `WORKER_STALE_JOB_TIMEOUT_S` (3600 — stale-claim reclaim, see lifecycle
-step 3), `WORKER_FRAME_CACHE_DIR`, `PYTORCH_ENABLE_MPS_FALLBACK=1`. See `.env.example`.
+step 3), `WORKER_FRAME_CACHE_DIR`, `WORKER_LOCAL_VIDEO_DIR` (decode a local copy in place instead of
+downloading), `CALIB_FRAME_COUNT` (12 calibration snapshots, 0007), `PYTORCH_ENABLE_MPS_FALLBACK=1`.
+See `.env.example`.
 Foot/recovery tuning (all default off / conservative): `FOOT_BIAS_K` (bbox-nudge, 0), `USE_POSE_FOOT` (0),
 `POSE_CONF_THR` (0.3), `GAP_FILL_MAX_FRAMES` (longest short hole the re-ID interp will fill, 8).
-Shuttle (stage 5): `SHUTTLE_TRACKER` (wasb|tracknetv3|fake, default wasb), `SHUTTLE_CONF_THR` (0.5 — peak
+Shuttle (stage 5): `SHUTTLE_TRACKER` (tracknetv3|wasb|fake, **default `tracknetv3`** — the fine-tuned
+own-footage winner; wasb is the frozen pre-fine-tune baseline), `SHUTTLE_CONF_THR` (0.5 — peak
 below = a real dropout, not a fabricated point), `SHUTTLE_MAX_STEP` (0.5 court units, isolated-spike guard),
-`SHUTTLE_MASK` (1 — black out outside the target-court airspace), `SHUTTLE_AIR_UP`/`SHUTTLE_AIR_SIDE`
-(airspace shape), `SHUTTLE_BBOX_MARGIN`, `SHUTTLE_OVERLAY_GAP_S` (0.3, overlay gap cap),
-`SHUTTLE_CHUNK_FRAMES` (240 — bounded-memory chunked prediction, see features/shuttle-tracking.md;
-0 = legacy single pass), `WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL` (vendored
-repo + weights, git-ignored).
+`SHUTTLE_MASK` (1 — black out outside the target-court airspace), `SHUTTLE_AIR_UP`/`SHUTTLE_AIR_SIDE`/
+`SHUTTLE_AIR_DOWN`/`SHUTTLE_AIR_OUT` (airspace shape; down/out default 0 = legacy box — the fine-tune
+was trained on that crop, see `specs/fix-later.md`), `SHUTTLE_BBOX_MARGIN`, `SHUTTLE_OVERLAY_GAP_S`
+(0.3, overlay gap cap), `SHUTTLE_CHUNK_FRAMES` (240 — bounded-memory chunked prediction, see
+features/shuttle-tracking.md; 0 = legacy single pass), `WASB_REPO`/`WASB_MODEL`,
+`TRACKNETV3_REPO`/`TRACKNETV3_MODEL` (vendored repo + weights, git-ignored).
+**Promoted-weights convention:** `models/weights/shuttle/ckpts/TrackNet_best.pt` is
+the production checkpoint the code loads by default; the upstream baseline stays byte-identical as
+`TrackNet_baseline.pt`, and each promoted fine-tune also keeps a named copy (e.g. `TrackNet_ft_session1.pt`)
+so promotions are reversible and auditable.
 `visibility` = tracker heatmap peak confidence in [0,1]; sub-threshold frames are absent (an honest gap).
 `shuttle` **and** `rally_hit` are in `_REAL` **and** `RESUME_STAGES` (`worker/__main__.py`) — shuttle is
 verified on real footage (see specs/features/shuttle-tracking.md "Wiring note"); `eval_shuttle` remains the
 standalone bench/A-B harness.
+
+## Operations (current reality — unbuilt pieces flagged as such)
+- **Frame cache:** `<WORKER_FRAME_CACHE_DIR>/<video_id>/` holds the decoded JPEGs (`frames/NNNNNN.jpg`),
+  the `frames.json` manifest, and the stage parquets (detections/pose/tracks/shuttle/rallies/events).
+  **No automatic eviction exists.** Disk budget: ~0.8 MB per 4K JPEG → a ~7-min game at 12 fps analysis
+  ≈ 4 GB (measured); at 30 fps ≈ 10 GB. It is safe to delete a video's cache dir once the match is
+  `done`: final aggregates live in Postgres, parquet artifacts persist in the `analysis-artifacts`
+  bucket, and `remap` re-downloads `tracks.parquet` on demand (`remap.py`). Re-labeling/re-benching a
+  deleted clip needs a re-decode first.
+- **Stale-job recovery:** the `claimed_at` heartbeat reclaim (lifecycle step 3) picks a stranded
+  `running` job back up after `WORKER_STALE_JOB_TIMEOUT_S` (default 1 h). To recover one *immediately*
+  (e.g. after a hard `kill` mid-job, observed 2026-07-01): `update processing_jobs set status='failed',
+  error='...' where status='running' and claimed_by='<worker>'`, then re-enqueue.
+- **Retries: none.** A `failed` job stays failed; re-enqueue manually. The worker survives job failures
+  (records the error, keeps polling).
 
 ## Testing
 Per-stage unit/integration tests on a short labeled clip assert the contracted artifacts/rows and numeric

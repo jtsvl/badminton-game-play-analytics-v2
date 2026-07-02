@@ -107,10 +107,20 @@ next court is playing). **Monocular limit — a mitigation, not a fix.** Durable
 or per-court depth; tighter learned trajectory association once a 2nd-session fine-tune exists; or a
 foreign-shuttle classifier. See `features/shuttle-tracking.md` "Honest limits".
 
-## Wider airspace box needs a re-fine-tune (2026-06-30)
+## Wider airspace box needs a re-fine-tune (2026-06-30) — READY, gate is labeling effort
 The box can be widened (`SHUTTLE_AIR_UP/DOWN/OUT`) to keep high clears + just-out landings in frame — the
 geometry is correct — but the **current** fine-tuned TrackNet was trained on tight-box 512×288 crops, so a
 wider crop regresses it (game1 A/B: F1 0.953→0.854, recall −13pp; train/inference crop mismatch). Defaults stay
-at the legacy box. **To ship the wider box:** re-export the dataset crops at the wider geometry + re-fine-tune
-— gated on 2nd-session data anyway. Needed for the landing/in-out feature (`features/shuttle-landing-inout.md`),
-since out-landings fall outside the tight box.
+at the legacy box. **To ship the wider box:** re-export the dataset crops at the wider geometry + re-fine-tune.
+*Update 2026-07-02: no longer data-blocked — Session 2 (5 games) is recorded, ingested and processed. The
+remaining gate is the labeling pass on Session-2 rallies (`verify --shuttle`), then re-export + re-fine-tune.*
+Needed for the landing/in-out feature (`features/shuttle-landing-inout.md`), since out-landings fall outside
+the tight box.
+
+## Cross-session shuttle validation — READY, gate is labeling effort (2026-07-02)
+The fine-tuned TrackNetV3 (promoted to production default) is only *scored* on session-1 game1 (F1 0.958).
+The 5 Session-2 games processed at a tight 21–27% coverage band — an encouraging generalisation signal but
+coverage-only, not precision/recall. **To close it:** label ≥1 Session-2 clip (`verify --shuttle`, white-wall
++ over-exposure rallies first) → `eval_shuttle --labels` out-of-session — the held-out metric
+`shuttle-finetune-plan.md` always wanted. Target: cross-session F1 ≥ 0.80 before trusting new sessions
+unlabeled (see `30-ml-pipeline.md` stage-5 targets).

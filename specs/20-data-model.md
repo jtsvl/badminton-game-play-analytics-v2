@@ -34,7 +34,9 @@ a pointless migration.)
 
 ### court_calibrations  (first-class state machine — decision #4, FR-5/6/10)
 `id · video_id? · match_id? · court int? · status∈{proposed,needs_review,accepted,finalized,rejected} ·
-source · frame_uri · frame_s · image_size jsonb · proposed_points jsonb · confirmed_points jsonb ·
+source · frame_uri · frame_s · image_size jsonb · frame_uris jsonb?  (0007 — N evenly-spaced calibration
+snapshots `[{uri, s}]` for the frame switcher; null → single-`frame_uri` fallback) ·
+proposed_points jsonb · confirmed_points jsonb ·
 mask_polygon_px jsonb  (in-court gating polygon) · homography jsonb · reprojection_error_m · confidence jsonb ·
 auto_accepted bool · created_at · updated_at`
 
@@ -93,7 +95,8 @@ neither is a stored column.
 - `service_role` (worker) bypasses RLS.
 - `public.is_admin()` = `auth.uid() ∈ admin_users`. Policy `admin_all` grants authenticated **admins** full read/write on all tables.
 - Anonymous read: **not** in `0001`. `0002_dev_anon_read.sql` (DEV ONLY) grants anon SELECT on report tables so the
-  seeded demo renders before the auth UI exists; replaced by token-scoped player-link RLS in P4 (`features/sharing.md`).
+  seeded demo renders before the auth UI exists; replaced by token-scoped player-link RLS in P4
+  (`features/sharing.md` — P4, spec not yet written).
 - Privileges: anon SELECT, authenticated/service_role full (RLS still gates rows).
 
 ## Frontend mapping (report object the web assembles — `useMatchReport`)

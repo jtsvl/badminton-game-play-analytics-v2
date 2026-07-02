@@ -22,7 +22,9 @@ Human confirms/drags corners + picks the court → the only approach robust to a
 **Default Ultralytics YOLO11** (AGPL; best tooling + CoreML, integrated detect/pose/track). **Benchmark vs RF-DETR**
 (Apache; best occlusion/domain-shift per research) on own footage; keep the winner. RTMDet (Apache) = OpenMMLab-stack option.
 *Fine-tune:* yes, high ROI — ~500–1.5k own-footage bboxes (overhead+side, small adjacent-court players, blur, edges).
-*Accept:* person AP ≥ target on held-out frames incl. small/edge players; ≥99 % recall on the 2/4 in-court players.
+*Accept:* ≥99 % recall on the 2/4 in-court players; `eval_corrections` full-mode misses ≈ 0 after re-ID on
+labeled clips (measured: 69 → 0 with k=0.16 / → 4 with k=0 on f35d0984) *(initial targets — revise as
+answer-key clips accumulate)*.
 
 ## Stage 3 — Court gating + tracking (FR-10)
 **Gate:** project each detection's ankle midpoint through H; keep only those inside the court polygon (+margin,
@@ -31,7 +33,9 @@ temporal smoothing). Decisive for clutter. **Track** the filtered set with **BoT
 assign persistent roles by court half (near/far, left/right); re-anchor on ends change. **Offline re-entry**:
 global tracklet association (**gta-link**, MIT). *Avoid Deep-EIoU (no license).* Do **not** rely on appearance
 ReID alone (same-club kit) — spatial+motion continuity is primary.
-*Accept:* IDF1/ID-switches under target on labeled clips; correct side/role assignment after manual confirm.
+*Accept:* correct side/role assignment after manual confirm; detected median court error ≤ 0.5 m near /
+≤ 1.0 m far half on the `eval_corrections` scorecard (measured 0.4/0.5 m un-fitted pose, 0.2/0.3 m clip-fitted
+nudge on f35d0984) *(initial targets — revise as answer-key clips accumulate)*.
 
 **Built (P1, Phase 4 — far-player robustness, RC3):** when BoT-SORT drops a small/low-contrast player and
 re-acquires them under a fresh id, `enforce_n_tracks` discards that short fragment, leaving a hole. Two layers
@@ -100,7 +104,9 @@ incremental — keep WASB/TrackNetV3 for now. Layered mitigations:
 5. **Targeted fine-tuning** on labeled white-wall frames + over-exposure/brightness + mixup augmentation — biggest lever.
 6. Optional mild **CLAHE on L** front-end (train+infer on the same enhanced frames; verify it helps).
 Speed = homography + fps, **labeled estimate** with uncertainty (~5–8 km/h MAE best case). **2D only.**
-*Accept:* shuttle F1/recall on own white-wall test clips ≥ target; gaps over a wall bridged within an arc.
+*Accept:* held-out **same-session** F1 ≥ 0.90 @ tol=4px in the pinned 512×288 space (measured 0.958 on game1);
+**cross-session** gate F1 ≥ 0.80 on a newly-labeled clip before trusting a new session unlabeled; gaps over a
+wall bridged within an arc *(initial targets — revise as answer-key clips accumulate)*.
 
 **Built (P1 slice 1 — thin baseline, run-both):** swappable backends behind `shuttle.ShuttleTracker`
 (WASB HRNet + TrackNetV3 conv-UNet, both MIT, vendored + weights git-ignored; FakeTracker for weightless
@@ -117,12 +123,17 @@ the wide DJI frame, so a bbox crop doesn't isolate it from the side courts (dete
 raised up, `geometry.court_airspace_polygon`, `SHUTTLE_MASK=1`) before the tracker removed the cross-court
 scatter and ~tripled on-court (TrackNetV3 7→26%, WASB 8→20%), but coverage *dropped* (46%/33%) and the
 survivors cluster on the far net/players — so **isolation is solved, out-of-domain detection is the
-residual**. **Label → fine-tune** is the #1 ML ROI: the answer-key + scoreboard infrastructure is **built**
-(Slice 2a — `verify --shuttle` labeler, `shuttle_labels` table `0005`, `shuttle/dataset_export.py`,
-`eval_shuttle --labels` precision/recall, TrackNetV3 MPS training patch); the fine-tune **run** (Slice 2b)
-is blocked on recording ≥3–4 clips. Locked: **TrackNetV3 only** (WASB frozen as the benchmark), **local MPS**
-(see Apple Silicon note), held-out-clip metric. Then image-space / horizon-guarded projection + mitigations
-2–6 + speed. See `specs/features/shuttle-tracking.md` + `specs/features/shuttle-finetune-plan.md`.
+residual**. **Label → fine-tune** was the #1 ML ROI and **has run** (Slice 2b, 2026-06-29/30, local MPS per the locked
+plan: TrackNetV3 only, WASB frozen as the benchmark): fine-tuning on the trainer's own labeled footage took
+F1 **0.483 → 0.958** on the labeled game1 clip — largely **in-sample** (rally-split within the one labeled
+clip); see the measured table + honesty note in `features/shuttle-tracking.md`.
+The fine-tuned checkpoint is **promoted to the production default** (`ckpts/TrackNet_best.pt`,
+`SHUTTLE_TRACKER` defaults to `tracknetv3` — see `40-worker-contract.md` for the weights convention).
+All 5 Session-2 games were processed with it on 2026-07-01 at 21–27% frame coverage (tight cross-session
+band — an encouraging generalisation signal, but coverage-only). **Still open:** cross-session *scoring* —
+label ≥1 Session-2 clip and run `eval_shuttle --labels` out-of-session (see `fix-later.md`). Then
+image-space / horizon-guarded projection + mitigations 2–6 + speed.
+See `specs/features/shuttle-tracking.md` + `specs/features/shuttle-finetune-plan.md`.
 
 ## Stage 6 — Rally segmentation + hit detection (FR-18/19/20) — BUILT (`rally_hit`)
 Rallies from shuttle continuity + player motion energy + serve detector (shuttle low, players settled).
@@ -142,7 +153,8 @@ Writes `rallies` + `events`(serve/hit/rally_end) and debug parquet; `aggregate` 
 to in-rally time. **Verified on game1** (labeled span): 6 rallies = the 6 labeled, dead time excluded (~11%
 in-play), DB round-trip idempotent. Thresholds (`RALLY_*` env) are fit to one game — a 2nd session + a rally
 labeler are needed before a quantitative boundary/hit-F1 claim.
-*Accept (deferred):* rally boundary tolerance and hit-frame F1 under target on labeled rallies (needs the labeler).
+*Accept:* rally boundaries within **±0.5 s** of hand-labeled boundaries *(provisional until the rally labeler
+exists — today's only evidence is the game1 6/6 spot-check above; initial target, revise with labels)*.
 
 **Landing + in/out (SPEC — `features/shuttle-landing-inout.md`):** the floor contact is the one moment the ground
 homography is valid (the shuttle is on the floor), so in/out reduces to "which pixel is the landing pixel, how
@@ -152,7 +164,9 @@ sure". Estimate-grade „Aus-Schläge"; the match score stays human-entered.
 **BST (MIT, public weights)** — consumes player skeleton + shuttle xy + court xy (tiny transformer; hours to train
 on MPS). Adopt **ShuttleSet 18-class BWF taxonomy collapsed to 6–8 coarse classes** first. Low-confidence → `unknown`.
 *Fine-tune:* yes — ~300–1k own labeled strokes; iterate hard pairs (drop/net, clear/lift).
-*Accept:* coarse-class accuracy ≥ target on held-out strokes; realistic ceiling 77–85 % on clean data, lower until tuned.
+*Accept:* coarse-class accuracy **≥ 70 %** on held-out own-footage strokes to ship, `unknown`-rate surfaced not
+hidden (lit ceiling 77–85 % on clean data) *(initial target — revise once own labels exist; see
+`features/stroke-classification.md`)*.
 
 ## Stage 8 — Insight aggregation (FR-11/12/13/14/26/27)
 Pure functions from tracks/events (TDD these): distance (court-space displacement), avg/top speed, sprints

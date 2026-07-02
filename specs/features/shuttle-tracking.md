@@ -36,7 +36,8 @@ calibration H + mask ──┤→ court crop (geometry.court_crop_box) → Shutt
 - `worker/worker/shuttle/base.py`: `ShuttleTracker` protocol, `ShuttleDetection`, `heatmap_peak`,
   `FakeTracker` (weightless synthetic backend — runs/verifies the whole stage with no weights).
 - `worker/worker/shuttle/{wasb,tracknetv3}.py`: the two real backends (below). `__init__.get_tracker`
-  selects via `SHUTTLE_TRACKER` (default `wasb`), lazy-imported so the pure path stays torch-free.
+  selects via `SHUTTLE_TRACKER` (default `tracknetv3` since the fine-tune won — wasb is the frozen
+  baseline), lazy-imported so the pure path stays torch-free.
 - `worker/worker/pipeline/shuttle.py`: the stage (`run(ctx)`), registered in `_REAL`. Masks each frame to
   the target-court airspace polygon (`SHUTTLE_MASK`, default on) before the tracker sees it.
 - `worker/worker/eval_shuttle.py`: dev runner + auto-stats bench (`--video-id [--tracker] [--compare]`),
@@ -126,23 +127,38 @@ held-out clip** (whole-clip train/val/test splits, never random frames).
 - TrackNetV3 CUDA→MPS training patch + runbook under `worker/training/` (the vendored repo hard-codes
   `.cuda()`; verified: 2-batch CPU step runs without NaNs).
 
-**Slice 2b — the actual run (blocked on data):** annotate ~15–30 rallies (white-wall + over-exposure first)
-across **≥3–4 clips / ≥2 sessions** → fine-tune on MPS (LR 1e-4, mixup α 0.5) → re-benchmark raw **pixel**
-detection on the held-out clip. Only ONE ~30s clip exists today, so 2b waits on more recordings.
+**Slice 2b — the actual run: DONE (2026-06-29/30, local MPS).** The trainer labeled game1
+(`2026-06-24-game1`, 30 fps ingest, ~4k-frame span, 424 visible label frames) via `verify --shuttle`;
+fine-tuning TrackNetV3 on those crops took full-clip F1 **0.483 → 0.958** (largely in-sample — see the
+honesty note under the table below). The winning checkpoint is
+**promoted to production**: `models/weights/shuttle/ckpts/TrackNet_best.pt` (named copy
+`TrackNet_ft_session1.pt`, upstream preserved as `TrackNet_baseline.pt`) and `SHUTTLE_TRACKER` defaults
+to `tracknetv3` — no env vars needed. All 5 Session-2 games processed with it (2026-07-01) at 21–27%
+coverage; cross-session *scoring* still needs a Session-2 label pass (`fix-later.md`).
 
-### Before/after raw-pixel detection (held-out clip, 512×288, tol=4px) — *filled in 2b*
+### Before/after raw-pixel detection (game1 labeled span, 512×288, tol=4px) — *measured 2026-07-02*
+Run: `eval_shuttle --compare --labels --frames 173:4091` on `2026-06-24-game1` (7be72b61, 30 fps ingest,
+3919-frame span, 424 visible label frames; cache rebuilt from the source video + DB labels).
+
 | backend | precision | recall | F1 | median px err | n (visible) |
 |---|---|---|---|---|---|
-| WASB (frozen) | — | — | — | — | — |
-| TrackNetV3 baseline | — | — | — | — | — |
-| TrackNetV3 fine-tuned | — | — | — | — | — |
+| WASB (frozen) | 0.526 | 0.601 | 0.561 | 1.26 | 424 |
+| TrackNetV3 baseline | 0.352 | 0.734 | 0.476 | 0.69 | 424 |
+| TrackNetV3 fine-tuned | **0.926** | **0.981** | **0.953** | **0.49** | 424 |
+
+**Honesty note:** the ft_smoke run split *rallies within game1* (train/val/test all from this one clip —
+only one labeled clip existed), so this span includes the fine-tune's own training rallies and the score is
+largely **in-sample**. It proves the fine-tune learned our footage (and which checkpoint is the winner);
+the genuinely held-out number is the pending **cross-session** score on a labeled Session-2 clip
+(`fix-later.md`; target F1 ≥ 0.80). The 21–27% Session-2 coverage band is the current (weaker,
+coverage-only) generalisation evidence.
 
 **Projection honesty** (after detection works): image-space overlay, or horizon-guard `apply_homography` and
 only court-project near-ground events. Then the spec's layered mitigations (motion cues, InpaintNet
 rectification) + 2D speed. Speed/rally/hit remain deferred.
 
 ## Config / env
-`SHUTTLE_TRACKER` (wasb|tracknetv3|fake), `SHUTTLE_CONF_THR` (0.5), `SHUTTLE_MAX_STEP` (0.5 court units),
+`SHUTTLE_TRACKER` (tracknetv3|wasb|fake, default `tracknetv3`), `SHUTTLE_CONF_THR` (0.5), `SHUTTLE_MAX_STEP` (0.5 court units),
 `SHUTTLE_MASK` (1), `SHUTTLE_AIR_UP` (0.7), `SHUTTLE_AIR_SIDE` (0.08), **`SHUTTLE_AIR_DOWN` (0.0)**,
 **`SHUTTLE_AIR_OUT` (0.0)**, `SHUTTLE_BBOX_MARGIN` (0.02), `SHUTTLE_OVERLAY_GAP_S` (0.3),
 `SHUTTLE_CHUNK_FRAMES` (240, see below), `WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL`.
@@ -181,4 +197,8 @@ re-fine-tune on the wider crop** — blocked on 2nd-session data anyway. The kno
 `shuttle` **and** `rally_hit` are now in `_REAL` **and** `RESUME_STAGES` (`__main__.py`) — shuttle is verified
 on real footage (full-clip F1 0.958, fine-tuned) and rally_hit segments its output into rallies. `stroke`
 (stage 7) stays stubbed. Run shuttle standalone via `eval_shuttle`; run `rally_hit` standalone with a
-`stage="rally_hit"` job (shuttle/tracks cached).
+`stage="rally_hit"` job (shuttle/tracks cached). **Weights promotion (2026-07-02):** production loads the
+fine-tuned checkpoint by default — `get_tracker()` resolves `tracknetv3` and `tracknetv3.py` loads
+`ckpts/TrackNet_best.pt`, which IS the fine-tune (locked by a unit test on the no-env default). Before this,
+a worker started without `SHUTTLE_TRACKER`/`TRACKNETV3_MODEL` env vars silently fell back to un-fine-tuned
+WASB — the gap that cost game4 a throwaway run on 2026-07-01.
