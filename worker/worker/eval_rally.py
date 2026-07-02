@@ -348,23 +348,33 @@ def predict_from_cache(video_id: str, cfg) -> List[Span]:
 
     dets = rally_hit.load_dets(str(cache / "shuttle.parquet"), frame_w, frame_h)
 
-    player_energy = None
-    tracks_path = cache / "tracks.parquet"
-    if tracks_path.exists():
-        import polars as pl  # lazy
-
-        tdf = pl.read_parquet(tracks_path)
-        if not tdf.is_empty():
-            player_energy = rally_hit._player_energy(tdf)
-
-    out = seg.build_rallies(dets, player_energy)
+    out = seg.build_rallies(dets, load_player_energy(video_id, cfg))
     return [(float(r["t_start_s"]), float(r["t_end_s"])) for r in out["rallies"]]
+
+
+def load_player_energy(video_id: str, cfg) -> Optional[list]:
+    """Player motion series ``[(t_s, kmh)]`` via ``rally_hit._player_energy`` from the cached
+    tracks.parquet — the exact series the pipeline's serve cue sees (single definition; the
+    diagnostics path re-reads the small parquet rather than threading dataframes around).
+    None when the parquet is absent or empty."""
+    from pathlib import Path
+
+    from .pipeline import rally_hit
+
+    tracks_path = Path(cfg.frame_cache_dir).expanduser() / str(video_id) / "tracks.parquet"
+    if not tracks_path.exists():
+        return None
+    import polars as pl  # lazy
+
+    tdf = pl.read_parquet(tracks_path)
+    return rally_hit._player_energy(tdf) if not tdf.is_empty() else None
 
 
 def load_swing_samples(video_id: str, cfg) -> Tuple[List[dict], Dict[int, str]]:
     """Per-sample swing strengths (emission floor 0, no coalescing — the raw distribution the
     thresholds are picked from) + track→court-half map. Pose rows join to tracks.parquet kept
-    track ids; frame→t via frames.json; `source=\"interp\"` rows have no pose — harmless."""
+    track ids; frame→t via frames.json; `source=\"interp\"` rows have no pose — harmless.
+    Without tracks/pose parquets there is no swing signal at all — empty report, not a crash."""
     import json
     from pathlib import Path
 
@@ -373,6 +383,8 @@ def load_swing_samples(video_id: str, cfg) -> Tuple[List[dict], Dict[int, str]]:
     from .rally.swing import swing_events
 
     cache = Path(cfg.frame_cache_dir).expanduser() / str(video_id)
+    if not (cache / "tracks.parquet").exists() or not (cache / "pose.parquet").exists():
+        return [], {}
     manifest = json.loads((cache / "frames.json").read_text())
     frame_t = {int(f["frame"]): float(f["t"]) for f in manifest["frames"]}
 
@@ -391,7 +403,9 @@ def load_swing_samples(video_id: str, cfg) -> Tuple[List[dict], Dict[int, str]]:
     return samples, half_by_track
 
 
-SWEEP_THRESHOLDS = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0]
+# Low-end resolution matters: the naive missed==0 pin point is low, and the fused rule's whole
+# point is raising thr past it — the decision happens between 0.25 and 2.5 tl/s.
+SWEEP_THRESHOLDS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0]
 
 
 def _fmt_pct(st: dict) -> str:
@@ -399,6 +413,28 @@ def _fmt_pct(st: dict) -> str:
         return "n=0"
     return (f"n={st['n']:>6}  p10={st['p10']:5.2f}  p25={st['p25']:5.2f}  p50={st['p50']:5.2f}"
             f"  p75={st['p75']:5.2f}  p90={st['p90']:5.2f}")
+
+
+def _max_key(r: dict) -> tuple:
+    """Sort key for per-rally records: NO-SWING (unsavable) first, then ascending strength."""
+    return (r["max_strength"] is not None, r["max_strength"] or 0.0)
+
+
+def _fmt_rec(r: dict) -> str:
+    """One per-rally record line (serve-window records carry no span_s — omitted)."""
+    span = f"span={r['span_s']:5.2f}s  " if r.get("span_s") is not None else ""
+    ms = "NO-SWING " if r["max_strength"] is None else f"max={r['max_strength']:5.2f}"
+    half = f"  {r['best_half'] or '?':4}" if r["max_strength"] is not None else ""
+    rel = f"  t_rel={r['best_t_rel']:+5.2f}s" if r["best_t_rel"] is not None else ""
+    return f"t_start={r['t_start']:8.2f}s  {span}{ms}{half}{rel}"
+
+
+def _rally_max_summary(records: List[dict]) -> dict:
+    """Percentiles of the non-None per-rally maxima + the NO-SWING count + raw records."""
+    vals = [r["max_strength"] for r in records if r["max_strength"] is not None]
+    return {"pctiles": _pctiles(vals),
+            "n_no_swing": sum(1 for r in records if r["max_strength"] is None),
+            "records": records}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -415,7 +451,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--tol", type=float, default=0.5, help="boundary match tolerance ±s")
     ap.add_argument("--json", action="store_true", help="machine-readable report")
     ap.add_argument("--swing-hist", action="store_true",
-                    help="swing-strength tuning report (in/between rally + near/far + veto sweep)")
+                    help="swing-strength tuning report (in/between + serve-window near/far + "
+                         "per-rally max gt/phantom + settled counts + swing/fused veto sweep)")
     args = ap.parse_args(argv)
 
     cfg = load_config()
@@ -428,10 +465,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.swing_hist:
         samples, half_by_track = load_swing_samples(video["id"], cfg)
+        player_energy = load_player_energy(video["id"], cfg)
+        phantoms = phantom_spans(pred, gt)
         split = swing_strength_split(samples, gt, half_by_track)
-        sweep = veto_operating_points(samples, pred, gt, SWEEP_THRESHOLDS)
+        serve = serve_window_report(samples, gt, half_by_track)
+        gt_max = rally_max_strengths(samples, gt, half_by_track=half_by_track)
+        ph_max = rally_max_strengths(samples, phantoms, half_by_track=half_by_track)
+        settled = ([settled_counts(pred, gt, player_energy, settle_kmh=k)
+                    for k in (3.0, 4.0, 6.0)] if player_energy else None)
+        sweep = veto_operating_points(samples, pred, gt, SWEEP_THRESHOLDS,
+                                      player_energy=player_energy)
         if args.json:
-            print(json.dumps({"slug": args.slug, "split": split,
+            print(json.dumps({"slug": args.slug, "split": split, "serve_window": serve,
+                              "rally_max": {"gt": _rally_max_summary(gt_max),
+                                            "phantom": _rally_max_summary(ph_max)},
+                              "settled": settled,
                               "sweep": {str(k): v for k, v in sweep.items()}}, indent=2))
             return 0
         print(f"[{args.slug}] swing-strength tuning report (tl/s, per-sample, floor 0)")
@@ -440,11 +488,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             if key in split:
                 print(f"{key:14}: {_fmt_pct(split[key])}")
         print("-" * 68)
-        print("veto sweep (swing >= thr within ±0.5 s saves a rally / kills a phantom):")
+        print(f"serve windows (t_start -{serve['pre_s']:.1f}/+{serve['post_s']:.1f} s, "
+              "per-rally max, attribution = strongest swing; server UNLABELED — skew is the "
+              "back-to-camera signal):")
+        att = serve["attribution"]
+        print(f"  attribution: near={att['near']}  far={att['far']}  none={att['none']}   "
+              f"rallies with NO serve-window sample: {serve['no_sample_rallies']}")
+        for h in ("near", "far"):
+            print(f"  {h + '-attributed maxima':22}: {_fmt_pct(serve['max_by_half'][h])}")
+        print("  weakest serve windows:")
+        for r in sorted(serve["per_rally"], key=_max_key)[:5]:
+            print(f"    {_fmt_rec(r)}")
+        print("-" * 68)
+        print("per-rally max strength over span ±0.5 s (THE veto quantity):")
+        for name, recs in (("gt", gt_max), ("phantom", ph_max)):
+            s = _rally_max_summary(recs)
+            print(f"  {name:7}: NO-SWING={s['n_no_swing']:2}  {_fmt_pct(s['pctiles'])}")
+        print("  weakest gt rallies (pin the veto threshold; NO-SWING = unsavable by swing "
+              "alone):")
+        for r in sorted(gt_max, key=_max_key)[:8]:
+            print(f"    {_fmt_rec(r)}")
+        print("-" * 68)
+        if settled:
+            print(f"settled-before-start (players_settled_before, window {SETTLE_WINDOW_S} s):")
+            for s in settled:
+                print(f"  kmh={s['settle_kmh']:3.1f}  gt {s['gt_settled']:3}/{s['gt_total']:<3}"
+                      f"  phantoms {s['phantom_settled']:3}/{s['phantom_total']}")
+            print(f"veto sweep (swing >= thr within ±0.5 s; fused = swing OR "
+                  f"settled@{SETTLE_KMH:.1f} km/h):")
+        else:
+            print("settled-before-start: no tracks.parquet — settled/fused columns unavailable")
+            print("veto sweep (swing >= thr within ±0.5 s saves a rally / kills a phantom):")
         for thr, pt in sweep.items():
             gate = "OK  " if pt["rallies_covered"] == pt["gt_total"] else "MISS"
-            print(f"  thr={thr:4.1f}  rallies {pt['rallies_covered']:3}/{pt['gt_total']:<3} {gate}"
-                  f"  phantoms killed {pt['phantoms_killed']:3}/{pt['phantom_total']}")
+            line = (f"  thr={thr:4.2f}  swing {pt['rallies_covered']:3}/{pt['gt_total']:<3} "
+                    f"{gate} kills {pt['phantoms_killed']:3}/{pt['phantom_total']}")
+            if "fused_rallies_covered" in pt:
+                fgate = "OK  " if pt["fused_rallies_covered"] == pt["gt_total"] else "MISS"
+                line += (f"  |  fused {pt['fused_rallies_covered']:3}/{pt['gt_total']:<3} "
+                         f"{fgate} kills {pt['fused_phantoms_killed']:3}/{pt['phantom_total']}")
+            print(line)
         return 0
 
     rep = evaluate(pred, gt, tol_s=args.tol)
