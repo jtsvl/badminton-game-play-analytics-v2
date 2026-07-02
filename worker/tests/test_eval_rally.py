@@ -9,7 +9,8 @@ bridged), which are hard flip gates.
 import unittest
 
 from worker.eval_rally import (boundary_prf, confusion, evaluate, format_report, gt_from_db,
-                               span_stats, split_gaps, swing_strength_split, veto_operating_points)
+                               serve_window_report, span_stats, split_gaps, swing_strength_split,
+                               veto_operating_points)
 
 
 class TestBoundaryPRF(unittest.TestCase):
@@ -206,6 +207,74 @@ class TestSwingTuning(unittest.TestCase):
         swings = [{"t": 9.7, "track": 1, "strength": 5.0}]
         pts = veto_operating_points(swings, [(10.0, 11.0)], gt, thresholds=[4.0], margin_s=0.5)
         self.assertEqual(pts[4.0]["rallies_covered"], 1)
+
+
+class TestServeWindow(unittest.TestCase):
+    def test_serve_window_reports_per_rally_max_and_attribution(self):
+        gt = [(10.0, 15.0), (30.0, 34.0)]
+        half = {1: "near", 2: "far"}
+        swings = [
+            {"t": 10.2, "track": 1, "strength": 4.0},   # rally 1: near serve swing wins
+            {"t": 10.3, "track": 2, "strength": 2.0},
+            {"t": 29.8, "track": 2, "strength": 5.0},   # rally 2: far swing just before t_start
+            {"t": 30.1, "track": 1, "strength": 1.0},
+            {"t": 12.5, "track": 2, "strength": 9.0},   # mid-rally clear — outside both windows
+        ]
+        rep = serve_window_report(swings, gt, half)
+        r1, r2 = rep["per_rally"]
+        self.assertEqual(r1["n_samples"], 2)
+        self.assertEqual(r1["max_strength"], 4.0)
+        self.assertEqual(r1["best_half"], "near")
+        self.assertAlmostEqual(r1["best_t_rel"], 0.2)
+        self.assertEqual(r2["max_strength"], 5.0)
+        self.assertEqual(r2["best_half"], "far")
+        self.assertAlmostEqual(r2["best_t_rel"], -0.2)
+        self.assertEqual(rep["attribution"], {"near": 1, "far": 1, "none": 0})
+        self.assertEqual(rep["no_sample_rallies"], 0)
+        self.assertEqual(rep["max_by_half"]["near"]["p50"], 4.0)
+        self.assertEqual(rep["max_by_half"]["far"]["p50"], 5.0)
+
+    def test_serve_window_counts_rally_with_no_sample(self):
+        gt = [(10.0, 15.0)]
+        swings = [{"t": 13.0, "track": 1, "strength": 6.0}]  # mid-rally only, serve instant empty
+        rep = serve_window_report(swings, gt, {1: "near"})
+        r = rep["per_rally"][0]
+        self.assertEqual(r["n_samples"], 0)
+        self.assertIsNone(r["max_strength"])
+        self.assertIsNone(r["best_half"])
+        self.assertIsNone(r["best_t_rel"])
+        self.assertEqual(rep["no_sample_rallies"], 1)
+        self.assertEqual(rep["attribution"], {"near": 0, "far": 0, "none": 1})
+
+    def test_serve_window_boundaries_inclusive(self):
+        # Closed window bounds, matching the veto sweep's span±margin test.
+        gt = [(10.0, 15.0)]
+        swings = [
+            {"t": 9.5, "track": 1, "strength": 1.0},    # exactly t_start - pre_s → in
+            {"t": 10.5, "track": 1, "strength": 2.0},   # exactly t_start + post_s → in
+            {"t": 10.51, "track": 1, "strength": 9.0},  # just past → out
+        ]
+        rep = serve_window_report(swings, gt, {1: "near"})
+        self.assertEqual(rep["per_rally"][0]["n_samples"], 2)
+        self.assertEqual(rep["per_rally"][0]["max_strength"], 2.0)
+
+    def test_serve_window_tie_attributes_earliest(self):
+        gt = [(10.0, 15.0)]
+        swings = [
+            {"t": 9.9, "track": 1, "strength": 3.0},
+            {"t": 10.1, "track": 2, "strength": 3.0},
+        ]
+        rep = serve_window_report(swings, gt, {1: "near", 2: "far"})
+        self.assertEqual(rep["per_rally"][0]["best_half"], "near")
+        self.assertAlmostEqual(rep["per_rally"][0]["best_t_rel"], -0.1)
+
+    def test_serve_window_without_half_map(self):
+        gt = [(10.0, 15.0)]
+        swings = [{"t": 10.0, "track": 7, "strength": 4.5}]
+        rep = serve_window_report(swings, gt, half_by_track=None)
+        self.assertEqual(rep["per_rally"][0]["max_strength"], 4.5)
+        self.assertIsNone(rep["per_rally"][0]["best_half"])
+        self.assertEqual(rep["attribution"], {"near": 0, "far": 0, "none": 1})
 
 
 if __name__ == "__main__":

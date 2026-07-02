@@ -159,6 +159,55 @@ def swing_strength_split(swings: Sequence[dict], gt_spans: Sequence[Span],
     return rep
 
 
+def _strongest_in(swings: Sequence[dict], lo_t: float, hi_t: float,
+                  half_by_track: Optional[Dict[int, str]] = None) -> Optional[dict]:
+    """Strongest swing sample with ``lo_t <= t <= hi_t`` (closed bounds, matching the veto
+    sweep's span±margin test) as ``{"t", "strength", "half"}`` — half None when the track is
+    unmapped. Ties resolve to the earliest sample; None when the window holds no sample."""
+    best = None
+    for s in sorted(swings, key=lambda s: s["t"]):
+        if lo_t <= s["t"] <= hi_t and (best is None or s["strength"] > best["strength"]):
+            best = s
+    if best is None:
+        return None
+    return {"t": best["t"], "strength": best["strength"],
+            "half": (half_by_track or {}).get(best["track"])}
+
+
+def serve_window_report(swings: Sequence[dict], gt_spans: Sequence[Span],
+                        half_by_track: Optional[Dict[int, str]] = None,
+                        pre_s: float = 0.5, post_s: float = 0.5) -> dict:
+    """Serve-instant swing report: per GT rally, the strongest swing within
+    ``[t_start − pre_s, t_start + post_s]`` and which court half it belongs to — the
+    back-to-camera check with serve swings ISOLATED (the per-sample in-rally split lumps every
+    shot type and diluted the answer).
+
+    Honest caveat: the server's identity is unlabeled. Attribution = strongest swing in the
+    window, and serves alternate ≈50/50, so a strong attribution skew toward 'far' (or
+    systematically weaker near-attributed maxima) is the back-to-camera signal — not per-rally
+    truth. ``no_sample_rallies`` separately exposes rallies with NO swing sample at the serve
+    instant (pose dropout or a fully missed swing); ``attribution['none']`` additionally counts
+    best swings on unmapped tracks."""
+    per_rally: List[dict] = []
+    for t0, _ in gt_spans:
+        lo, hi = t0 - pre_s, t0 + post_s
+        inw = [s for s in swings if lo <= s["t"] <= hi]
+        best = _strongest_in(inw, lo, hi, half_by_track)
+        per_rally.append({"t_start": t0, "n_samples": len(inw),
+                          "max_strength": best["strength"] if best else None,
+                          "best_half": best["half"] if best else None,
+                          "best_t_rel": (best["t"] - t0) if best else None})
+    attribution = {"near": 0, "far": 0, "none": 0}
+    for r in per_rally:
+        attribution[r["best_half"] if r["best_half"] in ("near", "far") else "none"] += 1
+    return {"pre_s": pre_s, "post_s": post_s, "per_rally": per_rally,
+            "no_sample_rallies": sum(1 for r in per_rally if r["n_samples"] == 0),
+            "attribution": attribution,
+            "max_by_half": {h: _pctiles([r["max_strength"] for r in per_rally
+                                         if r["best_half"] == h])
+                            for h in ("near", "far")}}
+
+
 def veto_operating_points(swings: Sequence[dict], pred: Sequence[Span], gt: Sequence[Span],
                           thresholds: Sequence[float], margin_s: float = 0.5,
                           min_overlap_s: float = 0.2) -> Dict[float, dict]:
