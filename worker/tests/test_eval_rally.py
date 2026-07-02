@@ -9,7 +9,7 @@ bridged), which are hard flip gates.
 import unittest
 
 from worker.eval_rally import (boundary_prf, confusion, evaluate, format_report, gt_from_db,
-                               span_stats, split_gaps)
+                               span_stats, split_gaps, swing_strength_split, veto_operating_points)
 
 
 class TestBoundaryPRF(unittest.TestCase):
@@ -156,6 +156,56 @@ class TestCLIGlue(unittest.TestCase):
         machine = [(0.0, 5.0), (6.5, 8.0), (9.0, 14.0), (20.0, 28.0)]
         gt = [(0.0, 14.0), (20.0, 28.0)]  # trainer merged the first three machine rallies
         self.assertEqual(split_gaps(machine, gt), [1.0, 1.5])
+
+
+class TestSwingTuning(unittest.TestCase):
+    def test_swing_hist_partitions_in_vs_out_of_rally(self):
+        gt = [(10.0, 15.0)]
+        swings = [
+            {"t": 11.0, "track": 1, "strength": 6.0},   # in-rally
+            {"t": 14.5, "track": 2, "strength": 8.0},   # in-rally
+            {"t": 20.0, "track": 1, "strength": 1.5},   # between rallies
+        ]
+        rep = swing_strength_split(swings, gt)
+        self.assertEqual(rep["in_rally"]["n"], 2)
+        self.assertEqual(rep["between"]["n"], 1)
+        self.assertEqual(rep["in_rally"]["p50"], 7.0)
+        self.assertEqual(rep["between"]["p90"], 1.5)
+
+    def test_swing_hist_splits_by_court_half_when_mapped(self):
+        # Near player has their back to the camera — the split must expose a weaker near-side
+        # distribution instead of hiding it in the aggregate (back-to-camera check, T6).
+        gt = [(10.0, 15.0)]
+        swings = [
+            {"t": 11.0, "track": 1, "strength": 3.0},
+            {"t": 12.0, "track": 2, "strength": 9.0},
+        ]
+        rep = swing_strength_split(swings, gt, half_by_track={1: "near", 2: "far"})
+        self.assertEqual(rep["in_rally_near"]["n"], 1)
+        self.assertEqual(rep["in_rally_near"]["p50"], 3.0)
+        self.assertEqual(rep["in_rally_far"]["p50"], 9.0)
+
+    def test_veto_sweep_counts_covered_rallies_and_killed_phantoms(self):
+        gt = [(0.0, 5.0), (20.0, 24.0)]
+        pred = [(0.0, 5.0), (10.0, 11.5), (20.0, 24.0)]  # middle pred is a phantom
+        swings = [
+            {"t": 2.0, "track": 1, "strength": 6.0},    # inside gt rally 1
+            {"t": 20.2, "track": 2, "strength": 2.5},   # weak swing in gt rally 2
+        ]
+        pts = veto_operating_points(swings, pred, gt, thresholds=[2.0, 4.0], margin_s=0.5)
+        # thr=2.0: both real rallies have a swing >= thr (covered 2/2); the phantom has none.
+        self.assertEqual(pts[2.0]["rallies_covered"], 2)
+        self.assertEqual(pts[2.0]["gt_total"], 2)
+        self.assertEqual(pts[2.0]["phantoms_killed"], 1)
+        self.assertEqual(pts[2.0]["phantom_total"], 1)
+        # thr=4.0: the weak-swing rally is no longer covered -> would be a missed (hard-gate fail).
+        self.assertEqual(pts[4.0]["rallies_covered"], 1)
+
+    def test_veto_sweep_margin_saves_swing_just_outside_span(self):
+        gt = [(10.0, 11.0)]  # short serve-fault rally; swing sits 0.3 s before the span
+        swings = [{"t": 9.7, "track": 1, "strength": 5.0}]
+        pts = veto_operating_points(swings, [(10.0, 11.0)], gt, thresholds=[4.0], margin_s=0.5)
+        self.assertEqual(pts[4.0]["rallies_covered"], 1)
 
 
 if __name__ == "__main__":

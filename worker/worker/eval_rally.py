@@ -19,7 +19,7 @@ Run against a reviewed match (CLI, lazy imports):
 from __future__ import annotations
 
 from statistics import median
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 Span = Tuple[float, float]
 
@@ -123,6 +123,64 @@ def split_gaps(pred: Sequence[Span], gt: Sequence[Span], min_overlap_s: float = 
     return sorted(gaps)
 
 
+def _pctiles(values: Sequence[float]) -> dict:
+    """n + p10/p25/p50/p75/p90 of a strength list (None stats when empty)."""
+    n = len(values)
+    if n == 0:
+        return {"n": 0, "p10": None, "p25": None, "p50": None, "p75": None, "p90": None}
+    xs = sorted(values)
+
+    def p(q: float) -> float:
+        rank = q / 100.0 * (n - 1)
+        lo, hi = int(rank), min(int(rank) + 1, n - 1)
+        frac = rank - lo
+        return xs[lo] * (1 - frac) + xs[hi] * frac
+
+    return {"n": n, "p10": p(10), "p25": p(25), "p50": p(50), "p75": p(75), "p90": p(90)}
+
+
+def swing_strength_split(swings: Sequence[dict], gt_spans: Sequence[Span],
+                         half_by_track: Optional[Dict[int, str]] = None) -> dict:
+    """Swing-strength percentiles inside vs between trainer-approved rallies — the measured
+    separation the three strength thresholds are picked from (never guessed).
+
+    With ``half_by_track`` (track id → 'near'/'far') the in-rally distribution is additionally
+    split by court half: the near player has their back to the camera, so a systematically
+    weaker near distribution (foreshortened swings) must be visible here BEFORE thresholds are
+    chosen — the back-to-camera check (user concern 2026-07-02)."""
+    in_r = [s for s in swings if any(a <= s["t"] <= b for a, b in gt_spans)]
+    out_r = [s for s in swings if not any(a <= s["t"] <= b for a, b in gt_spans)]
+    rep = {"in_rally": _pctiles([s["strength"] for s in in_r]),
+           "between": _pctiles([s["strength"] for s in out_r])}
+    if half_by_track:
+        for half in ("near", "far"):
+            vals = [s["strength"] for s in in_r if half_by_track.get(s["track"]) == half]
+            rep[f"in_rally_{half}"] = _pctiles(vals)
+    return rep
+
+
+def veto_operating_points(swings: Sequence[dict], pred: Sequence[Span], gt: Sequence[Span],
+                          thresholds: Sequence[float], margin_s: float = 0.5,
+                          min_overlap_s: float = 0.2) -> Dict[float, dict]:
+    """Direct veto operating curve per candidate threshold: how many trainer-approved rallies
+    carry a swing ≥ thr within ±margin_s (must be ALL — anything less is a hard-gate `missed`),
+    and how many machine phantoms (predictions with no GT overlap) carry none (the kill rate).
+    Uses the same GT/prediction data as the baseline, so the numbers translate 1:1 to T7."""
+    phantoms = [p for p in pred
+                if not any(_overlap_s(p, g) >= min_overlap_s for g in gt)]
+    out: Dict[float, dict] = {}
+    for thr in thresholds:
+        ts = [s["t"] for s in swings if s["strength"] >= thr]
+
+        def hit(span: Span) -> bool:
+            return any(span[0] - margin_s <= t <= span[1] + margin_s for t in ts)
+
+        out[thr] = {"rallies_covered": sum(1 for g in gt if hit(g)), "gt_total": len(gt),
+                    "phantoms_killed": sum(1 for p in phantoms if not hit(p)),
+                    "phantom_total": len(phantoms)}
+    return out
+
+
 def format_report(rep: dict) -> str:
     """Human-readable scorecard for the CLI — confusion lines in the trainer's vocabulary."""
     b, c = rep["boundary"], rep["confusion"]
@@ -192,6 +250,46 @@ def predict_from_cache(video_id: str, cfg) -> List[Span]:
     return [(float(r["t_start_s"]), float(r["t_end_s"])) for r in out["rallies"]]
 
 
+def load_swing_samples(video_id: str, cfg) -> Tuple[List[dict], Dict[int, str]]:
+    """Per-sample swing strengths (emission floor 0, no coalescing — the raw distribution the
+    thresholds are picked from) + track→court-half map. Pose rows join to tracks.parquet kept
+    track ids; frame→t via frames.json; `source=\"interp\"` rows have no pose — harmless."""
+    import json
+    from pathlib import Path
+
+    import polars as pl  # lazy
+
+    from .rally.swing import swing_events
+
+    cache = Path(cfg.frame_cache_dir).expanduser() / str(video_id)
+    manifest = json.loads((cache / "frames.json").read_text())
+    frame_t = {int(f["frame"]): float(f["t"]) for f in manifest["frames"]}
+
+    half_by_track: Dict[int, str] = {}
+    for r in pl.read_parquet(cache / "tracks.parquet").iter_rows(named=True):
+        tid = r.get("track_id")
+        half = (r.get("role") or "").split("_")[0]
+        if tid is not None and half in ("near", "far"):
+            half_by_track.setdefault(int(tid), half)
+
+    rows = [{"t": frame_t[int(r["frame"])], "track": int(r["track"]),
+             "kp": r["kp"], "kp_score": r["kp_score"]}
+            for r in pl.read_parquet(cache / "pose.parquet").iter_rows(named=True)
+            if int(r["track"]) in half_by_track and int(r["frame"]) in frame_t]
+    samples = swing_events(rows, min_tlps=0.0, merge_s=0.0)
+    return samples, half_by_track
+
+
+SWEEP_THRESHOLDS = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0]
+
+
+def _fmt_pct(st: dict) -> str:
+    if not st["n"]:
+        return "n=0"
+    return (f"n={st['n']:>6}  p10={st['p10']:5.2f}  p25={st['p25']:5.2f}  p50={st['p50']:5.2f}"
+            f"  p75={st['p75']:5.2f}  p90={st['p90']:5.2f}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
     import json
@@ -205,6 +303,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--slug", required=True, help="match slug (e.g. 2026-06-30-session2-game1)")
     ap.add_argument("--tol", type=float, default=0.5, help="boundary match tolerance ±s")
     ap.add_argument("--json", action="store_true", help="machine-readable report")
+    ap.add_argument("--swing-hist", action="store_true",
+                    help="swing-strength tuning report (in/between rally + near/far + veto sweep)")
     args = ap.parse_args(argv)
 
     cfg = load_config()
@@ -214,6 +314,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not video:
         raise RuntimeError(f"eval_rally: match {args.slug!r} has no video row")
     pred = predict_from_cache(video["id"], cfg)
+
+    if args.swing_hist:
+        samples, half_by_track = load_swing_samples(video["id"], cfg)
+        split = swing_strength_split(samples, gt, half_by_track)
+        sweep = veto_operating_points(samples, pred, gt, SWEEP_THRESHOLDS)
+        if args.json:
+            print(json.dumps({"slug": args.slug, "split": split,
+                              "sweep": {str(k): v for k, v in sweep.items()}}, indent=2))
+            return 0
+        print(f"[{args.slug}] swing-strength tuning report (tl/s, per-sample, floor 0)")
+        print("=" * 68)
+        for key in ("in_rally", "in_rally_near", "in_rally_far", "between"):
+            if key in split:
+                print(f"{key:14}: {_fmt_pct(split[key])}")
+        print("-" * 68)
+        print("veto sweep (swing >= thr within ±0.5 s saves a rally / kills a phantom):")
+        for thr, pt in sweep.items():
+            gate = "OK  " if pt["rallies_covered"] == pt["gt_total"] else "MISS"
+            print(f"  thr={thr:4.1f}  rallies {pt['rallies_covered']:3}/{pt['gt_total']:<3} {gate}"
+                  f"  phantoms killed {pt['phantoms_killed']:3}/{pt['phantom_total']}")
+        return 0
 
     rep = evaluate(pred, gt, tol_s=args.tol)
     rep["meta"] = {"slug": args.slug, "video_id": video["id"], "tol_s": args.tol,
