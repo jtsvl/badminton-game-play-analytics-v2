@@ -115,23 +115,43 @@ bottom):
 
 ## Numeric targets (provisional until the baseline table below is filled)
 
-| Metric (game1 unless noted) | Baseline | Target |
+| Metric (game1 unless noted) | Baseline (measured) | Target |
 | --- | --- | --- |
-| boundary-F1 @ ±0.5 s | ≈ 0.76 | **≥ 0.85** |
-| `false_rallies` | ~16 | **≤ 8** (≥50% cut) |
+| boundary-F1 @ ±0.5 s | 0.762 | **≥ 0.85** |
+| `false_rallies` | 15 (16 aggregate w/ game5) | **≤ 8 aggregate** (≥50% cut) |
 | `splits` | 4 | **≤ 1** |
 | `missed` (falsely vetoed real rally) | 0 | **hard 0, every reviewed game** |
 | `merges` (falsely bridged pair) | 0 | **hard 0, every reviewed game** |
-| game5 | F1 TBD | no regression |
+| game5 | F1 0.955 | no regression |
 
 Flags flip ON by default **only** when all hard gates pass on every reviewed game (mirrors the
 promoted-checkpoint precedent). If a criterion fails: re-tune from the measured histograms only —
 no new rule conditions without a new measured failure class.
 
-### Baseline table (filled by the harness, T3/T4)
+### Baseline table (measured 2026-07-02, flags off, tol ±0.5 s, `eval_rally` CLI)
 
-*TBD (T3): per-game boundary-F1 + confusion, kept-rally span distribution (→
-`RALLY_SWING_VETO_MAX_S`), merged-pair gap histogram (→ `RALLY_SWING_BRIDGE_S`).*
+| game | machine | kept | boundary-F1 | precision | recall | false_rallies | splits | missed | merges |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| game1 | 52 | 32 | **0.762** | 0.615 | 1.000 | 15 | 4 | 0 | 0 |
+| game5 | 23 | 21 | **0.955** | 0.913 | 1.000 | 1 | 1 | 0 | 0 |
+
+Both games reproduce the pre-review machine output exactly (recall 1.0, `missed=0`, `merges=0`)
+— the flags-off determinism check passes, and the plan's expected game1 F1 ≈ 0.76 lands at 0.762.
+
+**Merged-pair gap histogram** (interior gaps of trainer-merged rallies): game1
+`[1.58, 1.58, 1.58, 1.67, 1.92]` s, game5 `[1.92]` s — max **1.92 s**, all just above
+`RALLY_BRIDGE_S`=1.5. → `RALLY_SWING_BRIDGE_S` ≈ **2.2 s** (just above the max merged gap;
+the plan's guessed 4.0 s was too wide).
+
+**Kept-rally span distribution — CONTRADICTS the plan's veto-guard expectation.** The plan
+assumed the shortest kept rally ≈ 3 s, so `RALLY_SWING_VETO_MAX_S` could sit "just below the
+shortest kept rally" and make every real rally veto-ineligible by span alone. Measured: game1
+min **0.50 s** / median 3.13 s with **15/32** kept rallies under 3 s; game5 min **0.50 s** /
+median 2.17 s with **15/21** under 3 s. Real short rallies (serve faults, quick kills) overlap
+the phantom band (0.5–2.5 s) almost completely — **no span guard can separate them**. If the
+veto ships, the span guard can only cap eligibility (damage control for pose dropouts); the
+swing signal alone must protect real short rallies, and the hard `missed == 0` gate is the
+arbiter. *Decision pending at the T4 trainer-review checkpoint.*
 
 ### Swing-strength distributions (T6)
 
@@ -149,11 +169,11 @@ no new rule conditions without a new measured failure class.
 | `SWING_ELBOW_GAIN` | 1.8 | elbow-speed → wrist-speed proxy factor |
 | `SWING_TORSO_WINDOW_S` | 2.0 | rolling-median torso window |
 | `RALLY_SWING_VETO` | **"0"** (off) | phantom-rally veto master switch |
-| `RALLY_SWING_VETO_MAX_S` | TBD (T3; ≈3 s expected) | rallies ≥ this can never be vetoed |
+| `RALLY_SWING_VETO_MAX_S` | TBD — T3 contradicted the ≈3 s plan (see baseline table); user decision pending | rallies ≥ this can never be vetoed |
 | `RALLY_SWING_VETO_MARGIN_S` | 0.5 | swing search margin around the rally span |
 | `RALLY_SWING_VETO_MIN_STRENGTH` | TBD (T6) | low bar — any plausible activity saves |
 | `RALLY_SWING_BRIDGE` | **"0"** (off) | swing-conditional gap bridging master switch |
-| `RALLY_SWING_BRIDGE_S` | TBD (T3) | max gap the swing bridge may close |
+| `RALLY_SWING_BRIDGE_S` | ≈2.2 (T3-measured; max trainer-merged gap 1.92 s) | max gap the swing bridge may close |
 | `RALLY_SWING_BRIDGE_MIN_STRENGTH` | TBD (T6) | high bar — unambiguous swings only |
 | `RALLY_SERVE_EXCLUSION_S` | 0.75 | no bridging on a swing this close to gap end |
 | `RALLY_SERVE_CONF_CORROBORATED` | 0.85 | serve confidence when swing-corroborated |

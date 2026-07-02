@@ -8,7 +8,8 @@ bridged), which are hard flip gates.
 """
 import unittest
 
-from worker.eval_rally import boundary_prf, confusion, evaluate, span_stats
+from worker.eval_rally import (boundary_prf, confusion, evaluate, format_report, gt_from_db,
+                               span_stats, split_gaps)
 
 
 class TestBoundaryPRF(unittest.TestCase):
@@ -97,6 +98,64 @@ class TestEvaluateAndStats(unittest.TestCase):
         self.assertEqual(st["min_span_s"], 1.0)
         self.assertEqual(st["median_span_s"], 3.0)
         self.assertEqual(st["gaps_s"], [2.0, 4.0])
+
+
+class _FakeStore:
+    def __init__(self, match, rallies):
+        self._match = match
+        self._rallies = rallies
+
+    def get_match_by_slug(self, slug):
+        return self._match
+
+    def get_rallies(self, match_id):
+        assert match_id == self._match["id"]
+        return self._rallies
+
+
+class TestCLIGlue(unittest.TestCase):
+    def test_gt_from_db_reads_current_rally_rows(self):
+        store = _FakeStore(
+            match={"id": "m1", "slug": "g1", "rally_edited_at": "2026-07-02T10:00:00Z"},
+            rallies=[{"idx": 0, "t_start_s": 1.5, "t_end_s": 9.0},
+                     {"idx": 1, "t_start_s": 12.0, "t_end_s": 30.25}])
+        spans, match = gt_from_db(store, "g1")
+        self.assertEqual(spans, [(1.5, 9.0), (12.0, 30.25)])
+        self.assertEqual(match["id"], "m1")
+
+    def test_gt_from_db_warns_on_unreviewed_match(self):
+        store = _FakeStore(match={"id": "m1", "rally_edited_at": None}, rallies=[])
+        with self.assertLogs("worker.eval_rally", level="WARNING"):
+            gt_from_db(store, "g1")
+
+    def test_report_lists_confusion_in_trainer_vocabulary(self):
+        text = format_report(evaluate([(0.0, 5.0), (7.0, 8.0)], [(0.0, 5.0)]))
+        self.assertIn("false rallies", text)
+        self.assertIn("drop", text)    # the trainer's op for a phantom
+        self.assertIn("splits", text)
+        self.assertIn("merge", text)   # the trainer's op for a split
+        self.assertIn("hard gate 0", text)
+
+    def test_baseline_gt_is_subset_of_machine_boundaries(self):
+        # Flags-off determinism: GT = machine output minus drops, plus merges of adjacent
+        # machine rallies — so the baseline can show false_rallies/splits but NEVER a missed
+        # real rally or a falsely-bridged pair (missed == 0 and merges == 0).
+        machine = [(0.0, 5.0), (6.5, 8.0), (9.0, 14.0), (15.0, 16.0), (20.0, 28.0)]
+        gt = [(0.0, 5.0),        # kept
+              (6.5, 14.0),       # trainer merged machine[1] + machine[2]
+              (20.0, 28.0)]      # kept; machine[3] was dropped as a phantom
+        conf = confusion(machine, gt)
+        self.assertEqual(conf["missed"], 0)
+        self.assertEqual(conf["merges"], 0)
+        self.assertEqual(conf["false_rallies"], 1)
+        self.assertEqual(conf["splits"], 1)
+        rep = boundary_prf(machine, gt)
+        self.assertEqual(rep["recall"], 1.0)  # every GT boundary is a machine boundary
+
+    def test_split_gaps_reports_trainer_merged_gaps(self):
+        machine = [(0.0, 5.0), (6.5, 8.0), (9.0, 14.0), (20.0, 28.0)]
+        gt = [(0.0, 14.0), (20.0, 28.0)]  # trainer merged the first three machine rallies
+        self.assertEqual(split_gaps(machine, gt), [1.0, 1.5])
 
 
 if __name__ == "__main__":

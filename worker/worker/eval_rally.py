@@ -105,6 +105,24 @@ def span_stats(spans: Sequence[Span]) -> dict:
             "gaps_s": gaps}
 
 
+def split_gaps(pred: Sequence[Span], gt: Sequence[Span], min_overlap_s: float = 0.2) -> List[float]:
+    """Interior gaps (seconds) of every split GT rally: for each GT rally covered by ≥2
+    predictions, the time gaps between its consecutive prediction fragments. On a flags-off
+    baseline these are exactly the gaps the trainer bridged by merging — the empirical basis
+    for the bridge cap RALLY_SWING_BRIDGE_S."""
+    frags: Dict[int, List[Span]] = {}
+    for p in pred:
+        hits = [j for j, g in enumerate(gt) if _overlap_s(p, g) >= min_overlap_s]
+        if len(hits) == 1:
+            frags.setdefault(hits[0], []).append(p)
+    gaps: List[float] = []
+    for spans in frags.values():
+        if len(spans) >= 2:
+            ordered = sorted(spans)
+            gaps.extend(b[0] - a[1] for a, b in zip(ordered, ordered[1:]))
+    return sorted(gaps)
+
+
 def format_report(rep: dict) -> str:
     """Human-readable scorecard for the CLI — confusion lines in the trainer's vocabulary."""
     b, c = rep["boundary"], rep["confusion"]
@@ -123,3 +141,100 @@ def format_report(rep: dict) -> str:
         f"matched gt rallies                 : {c['matched']}/{rep['n_gt']}",
     ]
     return "\n".join(lines)
+
+
+# ── CLI bottom half (lazy imports: DB + parquet glue, mirrors eval_corrections.py) ──────────
+
+
+def gt_from_db(store, slug: str) -> Tuple[List[Span], dict]:
+    """Trainer-reviewed rally spans of a match, straight from the DB (the post-review rally
+    list IS the ground truth). Warns when the match was never reviewed (rally_edited_at null) —
+    then the 'GT' is just the machine's own output and every score is trivially perfect."""
+    import logging
+
+    match = store.get_match_by_slug(slug)
+    if not match:
+        raise RuntimeError(f"eval_rally: no match with slug {slug!r}")
+    if not match.get("rally_edited_at"):
+        logging.getLogger("worker.eval_rally").warning(
+            "eval_rally: match %s has rally_edited_at=NULL — rallies are UNREVIEWED machine "
+            "output, scores against it are meaningless as GT", slug)
+    spans = [(float(r["t_start_s"]), float(r["t_end_s"])) for r in store.get_rallies(match["id"])]
+    return spans, match
+
+
+def predict_from_cache(video_id: str, cfg) -> List[Span]:
+    """Re-run build_rallies from the cached parquets through rally_hit's own loaders — NOT a
+    duplicate loading path, else the 'flags-off baseline reproduces the pre-review machine
+    output' claim silently breaks. Knobs come from env exactly like the pipeline."""
+    import json
+    from pathlib import Path
+
+    from .pipeline import rally_hit
+    from .rally import segment as seg
+
+    cache = Path(cfg.frame_cache_dir).expanduser() / str(video_id)
+    manifest = json.loads((cache / "frames.json").read_text())
+    frame_w, frame_h = int(manifest["width"]), int(manifest["height"])
+
+    dets = rally_hit.load_dets(str(cache / "shuttle.parquet"), frame_w, frame_h)
+
+    player_energy = None
+    tracks_path = cache / "tracks.parquet"
+    if tracks_path.exists():
+        import polars as pl  # lazy
+
+        tdf = pl.read_parquet(tracks_path)
+        if not tdf.is_empty():
+            player_energy = rally_hit._player_energy(tdf)
+
+    out = seg.build_rallies(dets, player_energy)
+    return [(float(r["t_start_s"]), float(r["t_end_s"])) for r in out["rallies"]]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    import argparse
+    import json
+
+    from .__main__ import _make_store
+    from .config import load_config
+
+    ap = argparse.ArgumentParser(
+        description="Rally-segmentation scorecard: build_rallies (cached parquets, env knobs) "
+                    "vs the trainer-reviewed rally list in the DB.")
+    ap.add_argument("--slug", required=True, help="match slug (e.g. 2026-06-30-session2-game1)")
+    ap.add_argument("--tol", type=float, default=0.5, help="boundary match tolerance ±s")
+    ap.add_argument("--json", action="store_true", help="machine-readable report")
+    args = ap.parse_args(argv)
+
+    cfg = load_config()
+    store = _make_store(cfg)
+    gt, match = gt_from_db(store, args.slug)
+    video = store.get_video_by_match(match["id"])
+    if not video:
+        raise RuntimeError(f"eval_rally: match {args.slug!r} has no video row")
+    pred = predict_from_cache(video["id"], cfg)
+
+    rep = evaluate(pred, gt, tol_s=args.tol)
+    rep["meta"] = {"slug": args.slug, "video_id": video["id"], "tol_s": args.tol,
+                   "rally_edited_at": match.get("rally_edited_at")}
+    # The two empirical-constant feeds (spec: veto span guard + bridge cap).
+    rep["gt_span_stats"] = span_stats(gt)
+    rep["split_gaps_s"] = split_gaps(pred, gt)
+
+    if args.json:
+        print(json.dumps(rep, indent=2))
+        return 0
+    print(f"[{args.slug}] video={video['id']}  tol=±{args.tol}s  "
+          f"reviewed={match.get('rally_edited_at') or 'NEVER'}")
+    print(format_report(rep))
+    st = rep["gt_span_stats"]
+    print(f"kept-rally spans: n={st['n']}  min={st['min_span_s']:.2f}s  "
+          f"median={st['median_span_s']:.2f}s")
+    gaps = rep["split_gaps_s"]
+    print("trainer-merged gaps (s): " + (", ".join(f"{g:.2f}" for g in gaps) if gaps else "none"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
