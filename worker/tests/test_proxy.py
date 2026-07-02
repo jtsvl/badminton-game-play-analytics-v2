@@ -7,14 +7,17 @@ raise: process_job's failure path sets matches.status='failed', and a supplement
 artifact must not knock a match out of review. We test against a fake store and mocked
 ffmpeg (shutil.which + subprocess.run patched in the proxy module).
 """
+import base64
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from worker.pipeline import proxy
 from worker.pipeline.ingest import resolve_source
+from worker.store import Store
 
 
 class _Cfg:
@@ -161,6 +164,100 @@ class TestProxyRun(unittest.TestCase):
             with self.assertLogs("worker.pipeline.proxy", level="WARNING"):
                 proxy.run(_ctx(tmp, store))
             self.assertEqual(store.resumable_uploads, [])
+
+
+class _FakeTusResponse:
+    def __init__(self, status_code, headers=None, text=""):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}: {self.text}")
+
+
+class _FakeTusStorage:
+    """Mimics the live self-hosted Storage TUS semantics (verified 2026-07-02): the creation
+    POST succeeds even with x-upsert when the object already exists — the first PATCH then
+    409s; a plain retry 409s again; delete-then-reupload succeeds. Doubles as the httpx.Client
+    stand-in (upload_resumable constructs one internally)."""
+
+    def __init__(self, existing=()):
+        self.objects = set(existing)
+        self._pending = {}  # location -> (object path, declared length)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def post(self, url, headers=None):
+        meta = dict(p.strip().split(" ", 1) for p in headers["Upload-Metadata"].split(","))
+        path = base64.b64decode(meta["objectName"]).decode()
+        loc = f"/upload/resumable/session-{len(self._pending)}"
+        self._pending[loc] = (path, int(headers["Upload-Length"]))
+        return _FakeTusResponse(201, {"location": loc})
+
+    def patch(self, url, headers=None, content=b""):
+        path, length = self._pending[url[url.index("/upload/resumable"):]]
+        if path in self.objects:
+            return _FakeTusResponse(409, text="The resource already exists")
+        offset = int(headers["Upload-Offset"]) + len(content)
+        if offset >= length:
+            self.objects.add(path)
+        return _FakeTusResponse(204, {"upload-offset": str(offset)})
+
+
+class _FakeStorageAPI:
+    """storage.from_(bucket) surface: remove() is a no-op success for missing objects
+    (verified live), which is what lets upload_resumable delete unconditionally."""
+
+    def __init__(self, tus):
+        self._tus = tus
+        self.removed = []
+
+    def from_(self, bucket):
+        return self
+
+    def remove(self, paths):
+        self.removed.extend(paths)
+        for p in paths:
+            self._tus.objects.discard(p)
+        return []
+
+
+class TestUploadResumableOverwrite(unittest.TestCase):
+    """upload_resumable must overwrite existing objects (specs/fix-later.md TUS 409): the
+    Storage version ignores x-upsert on the TUS path, so the fix deletes the target first."""
+
+    def _store(self, tus):
+        store = Store.__new__(Store)  # skip __init__ (would build a live supabase client)
+        store._url = "http://fake-kong"
+        store._key = "service-role-key"
+        store._sb = SimpleNamespace(storage=_FakeStorageAPI(tus))
+        return store
+
+    def _upload(self, store, tus):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "proxy_720p.mp4"
+            f.write_bytes(b"new-proxy-bytes")
+            with patch("httpx.Client", return_value=tus):
+                store.upload_resumable("analysis-artifacts", "vid-1/proxy_720p.mp4", f, "video/mp4")
+
+    def test_overwrites_existing_object(self):
+        tus = _FakeTusStorage(existing={"vid-1/proxy_720p.mp4"})
+        store = self._store(tus)
+        self._upload(store, tus)  # must not raise despite the pre-existing object
+        self.assertIn("vid-1/proxy_720p.mp4", tus.objects)
+        self.assertEqual(store._sb.storage.removed, ["vid-1/proxy_720p.mp4"])
+
+    def test_fresh_path_uploads_fine(self):
+        tus = _FakeTusStorage()
+        store = self._store(tus)
+        self._upload(store, tus)
+        self.assertIn("vid-1/proxy_720p.mp4", tus.objects)
 
 
 class TestResolveSource(unittest.TestCase):
