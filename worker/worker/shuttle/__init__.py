@@ -2,7 +2,8 @@
 
 The tracker backends (WASB, TrackNetV3) live behind the `ShuttleTracker` protocol in `base.py` and are
 loaded lazily so the pure track assembly (`track.py`) and its tests import without torch/cv2. Pick a
-backend with the `SHUTTLE_TRACKER` env (default `wasb`); see specs/features/shuttle-tracking.md.
+backend with the `SHUTTLE_TRACKER` env (default `tracknetv3` — the fine-tuned own-footage winner,
+F1 0.483→0.958; wasb stays available as the frozen baseline); see specs/features/shuttle-tracking.md.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ TRACKERS = ("wasb", "tracknetv3")
 def get_tracker(name: str | None = None, **kwargs):
     """Construct a ShuttleTracker backend by name (env `SHUTTLE_TRACKER` when omitted). Backends are
     imported lazily so heavy deps load only when a real run needs them."""
-    name = (name or os.environ.get("SHUTTLE_TRACKER", "wasb")).lower()
+    name = (name or os.environ.get("SHUTTLE_TRACKER", "tracknetv3")).lower()
     if name == "fake":
         from .base import FakeTracker
 

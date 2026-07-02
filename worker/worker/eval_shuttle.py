@@ -294,7 +294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         stats_manifest = {**manifest, "frames": scoped}
         print(f"note: --frames {a}:{b} → bench scoped to {len(scoped)} frames")
 
-    backends = list(TRACKERS) if args.compare else [args.tracker or os.environ.get("SHUTTLE_TRACKER", "wasb")]
+    backends = list(TRACKERS) if args.compare else [args.tracker or os.environ.get("SHUTTLE_TRACKER", "tracknetv3")]
     results: Dict[str, dict] = {}
     scores: Dict[str, dict] = {}
     print(f"shuttle bench — video={args.video_id}  frames={len(manifest['frames'])}")

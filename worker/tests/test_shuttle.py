@@ -3,7 +3,9 @@
 Pure math only (no torch/cv2) — the tracker backends produce raw per-frame peaks; this module turns
 them into court-space shuttle rows: threshold visibility, map crop->frame->court, reject spikes.
 """
+import os
 import unittest
+from unittest import mock
 
 from worker import geometry as g
 from worker.shuttle.track import build_shuttle_track
@@ -47,6 +49,30 @@ class TestBuildShuttleTrack(unittest.TestCase):
         raw = [(0, 200, 150, 0.9), (1, 400, 290, 0.9), (2, 200, 150, 0.9)]
         rows = self._run(raw, max_step=0.5)
         self.assertEqual([r["frame"] for r in rows], [0, 2])
+
+
+class TestGetTrackerDefault(unittest.TestCase):
+    """Locks the production default: no env, no arg → the fine-tuned TrackNetV3 backend (not WASB).
+    The backend classes are patched with sentinels so no weights load — this asserts SELECTION only."""
+
+    def test_no_env_default_is_tracknetv3(self):
+        import worker.shuttle.tracknetv3 as tnv3
+        from worker.shuttle import get_tracker
+
+        sentinel = object()
+        with mock.patch.dict(os.environ), \
+                mock.patch.object(tnv3, "TrackNetV3Tracker", lambda **kw: sentinel):
+            os.environ.pop("SHUTTLE_TRACKER", None)
+            self.assertIs(get_tracker(), sentinel)
+
+    def test_env_still_selects_wasb(self):
+        import worker.shuttle.wasb as wasb_mod
+        from worker.shuttle import get_tracker
+
+        sentinel = object()
+        with mock.patch.dict(os.environ, {"SHUTTLE_TRACKER": "wasb"}), \
+                mock.patch.object(wasb_mod, "WASBTracker", lambda **kw: sentinel):
+            self.assertIs(get_tracker(), sentinel)
 
 
 if __name__ == "__main__":
