@@ -14,9 +14,11 @@ The trainer's rally reviews are the evidence base (`rally_review` on Session-2 g
   survivors (idx 0 absorbed 1,2; idx 13 absorbed 14,15,16 → now 13.3 s, conf 0.42; idx 9; idx 44).
   ~14 removals are pure **drops**: phantom "rallies" 0.5–2.5 s, 1–4 shots, often conf 1.00 —
   dense short noise (pickup tosses, walk-backs, neighbour-court leaks).
-- **game5**: 23 → 21 (one merge: idx 15→14, survivor conf 0.44; one drop).
-- Unreviewed games 2/3/4 (61/61/49 rallies) show the same signature (min span 0.5–0.6 s; many
-  1.5–3 s inter-rally gaps).
+- **game5**: 23 → 21 on the first (light) pass; re-reviewed strictly the same day → **14** kept.
+- Games 2/3/4 reviewed 2026-07-02 evening: 61→36, 61→36, 49→31 — same signature everywhere
+  (~40 % of machine rallies are noise; full per-game numbers in the baseline table below). The
+  four review sessions on the capture-enabled build wrote the first **90 `rally_corrections`
+  rows** (60 drops, 15 merge pairs), end-to-end-verifying the FR-35 capture in production.
 
 Two failure classes, by measured frequency:
 
@@ -115,43 +117,52 @@ bottom):
 
 ## Numeric targets (provisional until the baseline table below is filled)
 
-| Metric (game1 unless noted) | Baseline (measured) | Target |
+| Metric (all 5 reviewed games) | Baseline (measured) | Target |
 | --- | --- | --- |
-| boundary-F1 @ ±0.5 s | 0.762 | **≥ 0.85** |
-| `false_rallies` | 15 (16 aggregate w/ game5) | **≤ 8 aggregate** (≥50% cut) |
-| `splits` | 4 | **≤ 1** |
+| boundary-F1 @ ±0.5 s | 0.742–0.775 per game | **up on every game** (game1 ≥ 0.85 aspirational) |
+| `false_rallies` | 76 aggregate (7–20/game) | **≤ 38 aggregate** (≥50% cut) |
+| `splits` | 20 aggregate (2–5/game) | **reduced on every game** |
 | `missed` (falsely vetoed real rally) | 0 | **hard 0, every reviewed game** |
 | `merges` (falsely bridged pair) | 0 | **hard 0, every reviewed game** |
-| game5 | F1 0.955 | no regression |
 
 Flags flip ON by default **only** when all hard gates pass on every reviewed game (mirrors the
 promoted-checkpoint precedent). If a criterion fails: re-tune from the measured histograms only —
 no new rule conditions without a new measured failure class.
 
-### Baseline table (measured 2026-07-02, flags off, tol ±0.5 s, `eval_rally` CLI)
+### Baseline table (measured 2026-07-02 after the trainer reviewed ALL 5 games, flags off, tol ±0.5 s)
 
-| game | machine | kept | boundary-F1 | precision | recall | false_rallies | splits | missed | merges |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| game1 | 52 | 32 | **0.762** | 0.615 | 1.000 | 15 | 4 | 0 | 0 |
-| game5 | 23 | 21 | **0.955** | 0.913 | 1.000 | 1 | 1 | 0 | 0 |
+| game | machine | kept | boundary-F1 | precision | recall | false_rallies | splits | missed | merges | min/median kept span |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| game1 | 52 | 32 | **0.762** | 0.615 | 1.000 | 15 | 4 | 0 | 0 | 0.50 / 3.13 s |
+| game2 | 61 | 36 | **0.742** | 0.590 | 1.000 | 20 | 5 | 0 | 0 | 1.00 / 3.04 s |
+| game3 | 61 | 36 | **0.742** | 0.590 | 1.000 | 20 | 5 | 0 | 0 | 0.58 / 3.46 s |
+| game4 | 49 | 31 | **0.775** | 0.633 | 1.000 | 14 | 4 | 0 | 0 | 0.83 / 3.42 s |
+| game5 | 23 | 14 | **0.757** | 0.609 | 1.000 | 7 | 2 | 0 | 0 | 1.00 / 2.71 s |
+| **Σ** | **246** | **149** | — | — | 1.000 | **76** | **20** | **0** | **0** | min 0.50 s |
 
-Both games reproduce the pre-review machine output exactly (recall 1.0, `missed=0`, `merges=0`)
-— the flags-off determinism check passes, and the plan's expected game1 F1 ≈ 0.76 lands at 0.762.
+Every game reproduces the pre-review machine output exactly (recall 1.0, `missed=0`,
+`merges=0`) — the flags-off determinism check passes on all 5. The picture is remarkably
+uniform: F1 0.74–0.78 everywhere, ~40 % of machine rallies are noise. (game5 was re-reviewed
+more strictly on 2026-07-02 18:33 — its GT tightened from 21 to 14 kept rallies, so its earlier
+provisional F1 of 0.955 was an artifact of the lighter first pass.)
 
-**Merged-pair gap histogram** (interior gaps of trainer-merged rallies): game1
-`[1.58, 1.58, 1.58, 1.67, 1.92]` s, game5 `[1.92]` s — max **1.92 s**, all just above
-`RALLY_BRIDGE_S`=1.5. → `RALLY_SWING_BRIDGE_S` ≈ **2.2 s** (just above the max merged gap;
-the plan's guessed 4.0 s was too wide).
+**Merged-pair gap histogram** (interior gaps of trainer-merged rallies, 20 pairs): game1
+`[1.58, 1.58, 1.58, 1.67, 1.92]`, game2 `[1.50, 1.50, 1.58, 1.84, 2.34]`, game3
+`[1.58, 1.58, 1.67, 1.84, 2.09]`, game4 `[1.50, 1.58, 2.17, 3.59]`, game5 `[1.92, 1.92]` (s).
+18/20 gaps ≤ 2.34 s; one outlier at **3.59 s** (game4). → `RALLY_SWING_BRIDGE_S` choice at
+T6/T11: **≈2.5 s** covers 18/20 splits with a tight cap, **≈3.7 s** covers all 20 but widens
+the false-bridge surface (mitigated by the interior-swing + serve-exclusion conditions). Start
+at 2.5, revisit against the measured swing distributions.
 
-**Kept-rally span distribution — CONTRADICTS the plan's veto-guard expectation.** The plan
-assumed the shortest kept rally ≈ 3 s, so `RALLY_SWING_VETO_MAX_S` could sit "just below the
-shortest kept rally" and make every real rally veto-ineligible by span alone. Measured: game1
-min **0.50 s** / median 3.13 s with **15/32** kept rallies under 3 s; game5 min **0.50 s** /
-median 2.17 s with **15/21** under 3 s. Real short rallies (serve faults, quick kills) overlap
-the phantom band (0.5–2.5 s) almost completely — **no span guard can separate them**. If the
-veto ships, the span guard can only cap eligibility (damage control for pose dropouts); the
-swing signal alone must protect real short rallies, and the hard `missed == 0` gate is the
-arbiter. *Decision pending at the T4 trainer-review checkpoint.*
+**Kept-rally span distribution — CONTRADICTS the plan's veto-guard expectation, on all 5
+games.** The plan assumed the shortest kept rally ≈ 3 s, so `RALLY_SWING_VETO_MAX_S` could sit
+"just below the shortest kept rally" and make every real rally veto-ineligible by span alone.
+Measured minima: 0.50 / 1.00 / 0.58 / 0.83 / 1.00 s; medians 2.7–3.5 s — roughly half of all
+kept rallies sit under 3 s. Real short rallies (serve faults, quick kills) overlap the phantom
+band (0.5–2.5 s) almost completely — **no span guard can separate them**. If the veto ships,
+the span guard can only cap eligibility (damage control for pose dropouts); the swing signal
+alone must protect real short rallies, and the hard `missed == 0` gate is the arbiter.
+*Decision pending at the T4 trainer-review checkpoint.*
 
 ### Swing-strength distributions (T6)
 
