@@ -110,6 +110,14 @@ seeking to ~1 s before the rally start; the row under the playhead is highlighte
 `aria-current`). **Deliberately no auto-stop at the rally end** — play visibly continuing past the
 detected end is the evidence for a merge. No proxy → list-only fallback (the original v1 UI).
 
+**Auto-follow (built 2026-07-02):** while the video *plays*, the list scrolls the active row to just
+below the sticky player — smooth `window.scrollTo`, offset measured from the sticky header's real
+height (a fixed `scrollIntoView` would hide rows under the video). Fires only when a **new** rally
+comes under the playhead or play starts (each row carries a `rally-<id>` DOM anchor), so it never
+fights manual scrolling mid-rally; **paused never scrolls** — that's the escape hatch for browsing
+and ticking checkboxes. A manual scroll during playback snaps back at the next rally boundary
+(user decision 2026-07-02: simplest predictable behavior, no follow-toggle UI).
+
 ## Honest limits
 - Boundary *adjustment* (drag start/end) is deferred — drop/merge covers the observed failure modes
   (foreign-court leaks, dropout splits) without a timeline UI. Revisit after the rally labeler exists.

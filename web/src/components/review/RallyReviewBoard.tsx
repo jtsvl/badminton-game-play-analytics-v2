@@ -72,9 +72,14 @@ export function RallyReviewBoard({ initialRows, saving, saveError, onSave, onPla
               </label>
             )}
             <div
+              id={`rally-${r.id}`}
               aria-current={isActive || undefined}
               style={{
-                border: `1px solid ${isActive ? 'var(--primary, #FA8832)' : 'var(--hairline, hsl(214.3 31.8% 91.4%))'}`,
+                // Per-side borders (no `border` shorthand): the active highlight rerenders these
+                // values during playback, and React warns when a shorthand and a longhand mix.
+                borderTop: `1px solid ${isActive ? 'var(--primary, #FA8832)' : 'var(--hairline, hsl(214.3 31.8% 91.4%))'}`,
+                borderRight: `1px solid ${isActive ? 'var(--primary, #FA8832)' : 'var(--hairline, hsl(214.3 31.8% 91.4%))'}`,
+                borderBottom: `1px solid ${isActive ? 'var(--primary, #FA8832)' : 'var(--hairline, hsl(214.3 31.8% 91.4%))'}`,
                 borderLeft: `4px solid ${isDropped ? 'var(--heat-max, #C0392B)' : 'var(--primary, #FA8832)'}`,
                 borderRadius: 12,
                 padding: '12px 14px',

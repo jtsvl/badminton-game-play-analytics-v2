@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { supabase, isConfigured } from '../lib/supabase'
 import { resolvePlaybackSrc } from '../lib/storage'
@@ -36,6 +36,26 @@ export function RallyReview() {
   // Distinct position key (slug + '/rallies') — the report page persists under 'bca-vt-'+slug.
   const hasFootage = Boolean(ctx?.videoSrc)
   const player = useVideoPlayer(slug ? slug + '/rallies' : undefined, hasFootage)
+  const stickyRef = useRef<HTMLDivElement>(null)
+
+  const activeRallyId =
+    (hasFootage &&
+      ctx?.rows.find(
+        (r) => r.tStart !== null && r.tEnd !== null && player.time >= r.tStart && player.time <= r.tEnd,
+      )?.id) ||
+    null
+
+  // Auto-follow: while the video plays, scroll the row under the playhead to just below the
+  // sticky player — fires only when a NEW rally starts (or play begins), so it never fights a
+  // scrubbing/browsing trainer. Paused never scrolls (the escape hatch for list work).
+  useEffect(() => {
+    if (!player.playing || !activeRallyId) return
+    const el = document.getElementById(`rally-${activeRallyId}`)
+    if (!el) return
+    const headerBottom = stickyRef.current?.getBoundingClientRect().bottom ?? 0
+    const top = window.scrollY + el.getBoundingClientRect().top - headerBottom - 8
+    window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+  }, [activeRallyId, player.playing])
 
   useEffect(() => {
     if (!slug) return
@@ -174,10 +194,6 @@ export function RallyReview() {
     player.seek(Math.max(0, (row.tStart ?? 0) - 1))
     if (!player.playing) player.togglePlay()
   }
-  const activeRallyId =
-    ctx.rows.find(
-      (r) => r.tStart !== null && r.tEnd !== null && player.time >= r.tStart && player.time <= r.tEnd,
-    )?.id ?? null
 
   return (
     <main style={{ minHeight: '100%', background: 'var(--beige, #FEF4EA)', color: 'var(--ink, #0A0A0B)', fontFamily: 'var(--font-body)' }}>
@@ -193,6 +209,7 @@ export function RallyReview() {
 
         {hasFootage && (
           <div
+            ref={stickyRef}
             style={{
               position: 'sticky',
               top: 0,
