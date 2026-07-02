@@ -9,7 +9,8 @@ bridged), which are hard flip gates.
 import unittest
 
 from worker.eval_rally import (boundary_prf, confusion, evaluate, format_report, gt_from_db,
-                               serve_window_report, span_stats, split_gaps, swing_strength_split,
+                               phantom_spans, rally_max_strengths, serve_window_report,
+                               span_stats, split_gaps, swing_strength_split,
                                veto_operating_points)
 
 
@@ -275,6 +276,45 @@ class TestServeWindow(unittest.TestCase):
         self.assertEqual(rep["per_rally"][0]["max_strength"], 4.5)
         self.assertIsNone(rep["per_rally"][0]["best_half"])
         self.assertEqual(rep["attribution"], {"near": 0, "far": 0, "none": 1})
+
+
+class TestRallyMax(unittest.TestCase):
+    def test_rally_max_record_shape_and_margin(self):
+        spans = [(10.0, 12.0)]
+        swings = [
+            {"t": 9.6, "track": 1, "strength": 5.0},   # inside the pre-margin
+            {"t": 11.0, "track": 2, "strength": 3.0},
+            {"t": 12.5, "track": 1, "strength": 1.0},  # exactly t_end + margin → in
+            {"t": 12.6, "track": 1, "strength": 9.0},  # past the margin → out
+        ]
+        recs = rally_max_strengths(swings, spans, half_by_track={1: "near", 2: "far"})
+        self.assertEqual(len(recs), 1)
+        r = recs[0]
+        self.assertEqual(r["t_start"], 10.0)
+        self.assertEqual(r["span_s"], 2.0)
+        self.assertEqual(r["n_samples"], 3)
+        self.assertEqual(r["max_strength"], 5.0)
+        self.assertEqual(r["best_half"], "near")
+        self.assertAlmostEqual(r["best_t_rel"], -0.4)
+
+    def test_rally_max_none_when_no_samples(self):
+        recs = rally_max_strengths([{"t": 50.0, "track": 1, "strength": 4.0}], [(10.0, 12.0)])
+        r = recs[0]
+        self.assertEqual(r["n_samples"], 0)
+        self.assertIsNone(r["max_strength"])
+        self.assertIsNone(r["best_half"])
+        self.assertIsNone(r["best_t_rel"])
+
+    def test_phantom_spans_matches_veto_definition(self):
+        gt = [(10.0, 20.0)]
+        pred = [(19.81, 25.0),   # 0.19 s overlap < 0.2 → phantom
+                (19.75, 25.0),   # 0.25 s overlap → real
+                (40.0, 42.0)]    # no overlap → phantom
+        ph = phantom_spans(pred, gt)
+        self.assertEqual(ph, [(19.81, 25.0), (40.0, 42.0)])
+        # Consistency lock: the sweep's phantom_total is the same definition by construction.
+        pts = veto_operating_points([], pred, gt, thresholds=[1.0])
+        self.assertEqual(pts[1.0]["phantom_total"], len(ph))
 
 
 if __name__ == "__main__":

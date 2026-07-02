@@ -208,6 +208,32 @@ def serve_window_report(swings: Sequence[dict], gt_spans: Sequence[Span],
                             for h in ("near", "far")}}
 
 
+def phantom_spans(pred: Sequence[Span], gt: Sequence[Span],
+                  min_overlap_s: float = 0.2) -> List[Span]:
+    """THE phantom definition (shared by the sweep, the per-rally-max report and `confusion`'s
+    `false_rallies` semantics): predictions with no GT overlap ≥ ``min_overlap_s``."""
+    return [p for p in pred if not any(_overlap_s(p, g) >= min_overlap_s for g in gt)]
+
+
+def rally_max_strengths(swings: Sequence[dict], spans: Sequence[Span], margin_s: float = 0.5,
+                        half_by_track: Optional[Dict[int, str]] = None) -> List[dict]:
+    """Per-span max swing strength over ``[t_start − margin_s, t_end + margin_s]`` — the exact
+    quantity the veto thresholds against. Run on GT rallies it shows which real rallies pin the
+    threshold down (``max_strength=None`` = unsavable by ANY swing threshold — pose dropout);
+    run on ``phantom_spans(pred, gt)`` it shows the kill-side distribution. Per-rally, unlike
+    the per-sample ``swing_strength_split`` — this is the decision-relevant separation."""
+    records: List[dict] = []
+    for s0, e0 in spans:
+        lo, hi = s0 - margin_s, e0 + margin_s
+        inw = [s for s in swings if lo <= s["t"] <= hi]
+        best = _strongest_in(inw, lo, hi, half_by_track)
+        records.append({"t_start": s0, "span_s": e0 - s0, "n_samples": len(inw),
+                        "max_strength": best["strength"] if best else None,
+                        "best_half": best["half"] if best else None,
+                        "best_t_rel": (best["t"] - s0) if best else None})
+    return records
+
+
 def veto_operating_points(swings: Sequence[dict], pred: Sequence[Span], gt: Sequence[Span],
                           thresholds: Sequence[float], margin_s: float = 0.5,
                           min_overlap_s: float = 0.2) -> Dict[float, dict]:
@@ -215,8 +241,7 @@ def veto_operating_points(swings: Sequence[dict], pred: Sequence[Span], gt: Sequ
     carry a swing ≥ thr within ±margin_s (must be ALL — anything less is a hard-gate `missed`),
     and how many machine phantoms (predictions with no GT overlap) carry none (the kill rate).
     Uses the same GT/prediction data as the baseline, so the numbers translate 1:1 to T7."""
-    phantoms = [p for p in pred
-                if not any(_overlap_s(p, g) >= min_overlap_s for g in gt)]
+    phantoms = phantom_spans(pred, gt, min_overlap_s)
     out: Dict[float, dict] = {}
     for thr in thresholds:
         ts = [s["t"] for s in swings if s["strength"] >= thr]
