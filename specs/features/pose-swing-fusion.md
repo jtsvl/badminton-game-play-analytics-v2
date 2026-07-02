@@ -114,6 +114,10 @@ bottom):
   in the trainer's own vocabulary via max-overlap assignment (NOT IoU≥0.5 — split fragments fail
   IoU and would miscount): `false_rallies` (=drops), `splits` (=merges), `missed` (false-veto
   alarm), `merges` (false-bridge alarm).
+- **`--swing-hist` diagnostics** (T6): per-sample in/between strength split (near/far), the
+  serve-window report, per-rally max GT-vs-phantom distributions with the weakest-GT listing,
+  settled-before-start counts, and the veto sweep with swing-only vs fused (swing-OR-settled)
+  columns; `--json` carries the raw per-rally records.
 
 ## Numeric targets (provisional until the baseline table below is filled)
 
@@ -166,8 +170,38 @@ alone must protect real short rallies, and the hard `missed == 0` gate is the ar
 
 ### Swing-strength distributions (T6)
 
-*TBD (T6): in-rally vs between-rally strength percentiles per game (→ `SWING_MIN_TLPS`,
-`RALLY_SWING_VETO_MIN_STRENGTH`, `RALLY_SWING_BRIDGE_MIN_STRENGTH`).*
+**First pass (measured 2026-07-02, per-sample):** the naive veto — save a candidate iff any
+swing sample ≥ thr within span ±0.5 s — kills only **4/76** phantoms aggregate at the largest
+threshold that keeps `missed == 0` on all 5 games, far under the ≥50 % target; the per-sample
+in-rally vs between-rally distributions overlap heavily, and a run-length variant did not
+separate either. Back-to-camera check on game1 (all in-rally samples): near p50 = 1.35 vs far
+p50 = 1.14 tl/s — **inconclusive**, because it lumps every shot type; serve-instant swings were
+never isolated.
+
+**T6 extension (2026-07-02): decision-shaped diagnostics**, all emitted by ONE `--swing-hist`
+run per game (`--json` additionally carries the raw per-rally records for offline re-analysis):
+
+- **Serve-window report** — per GT rally, the strongest swing in `t_start ± 0.5 s`, attributed
+  to its court half. The server is unlabeled: attribution = strongest swing in the window, and
+  serves alternate ≈50/50, so a strong far-skew (or systematically weaker near-attributed
+  maxima) is the back-to-camera signal; `no_sample_rallies` separately counts serve instants
+  with no pose signal at all.
+- **Per-rally max** over span ±0.5 s — the exact quantity the veto thresholds on — GT vs
+  phantom distributions plus the weakest-GT listing (the rallies that pin the missed==0
+  threshold down; `max=None` = unsavable by any swing threshold, i.e. a pose dropout).
+- **Settled fusion** — `players_settled_before(t_start)` counts at 3/4/6 km/h and a fused
+  sweep column `swing ≥ thr OR settled` (production serve-cue defaults): the measured phantom
+  classes (pickup toss, walk-back) should lack the settled-before-start pattern real serves
+  have, letting thr rise past the naive pin point.
+
+**Per-game results: pending** the Mac runs
+(`uv run python -m worker.eval_rally --slug <slug> --swing-hist [--json]`).
+
+**Pre-registered decision rule** (set before seeing the numbers): fused sweep reaches ≥38/76
+kills with fused-missed == 0 on every game → the T7 veto condition is swing-OR-settled. The
+serve-window report showing near-serve blindness (strong far-skew / high no-sample count) is a
+T7 design input, not a reason to lower thresholds. Neither separates → drop the veto (bridge
+T8 only); phantom removal stays the trainer's one-click drop in rally-review.
 
 ## Env knobs (defaults; pattern = module constant + default kwarg, `segment.py` style)
 
