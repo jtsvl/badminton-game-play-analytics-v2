@@ -54,3 +54,4 @@ worker/training/ft_smoke/
 
 # --- Build artifacts ---
 *.tsbuildinfo
+.playwright-mcp/

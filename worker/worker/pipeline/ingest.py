@@ -19,6 +19,22 @@ log = logging.getLogger("worker.pipeline.ingest")
 DEFAULT_ANALYSIS_FPS = 12.0
 
 
+def resolve_source(cfg, storage_path: str, cache_dir: Path, store) -> Path:
+    """Locate the source video: local videos/ file (decode in place — no copy, no extra disk)
+    → cached download → fetch from the video bucket. Shared with the proxy stage."""
+    local = Path(cfg.local_video_dir).expanduser() / storage_path
+    if local.exists() and local.stat().st_size > 0:
+        log.info("using local file %s (in place)", local)
+        return local
+    ext = Path(storage_path).suffix or ".mp4"
+    src = cache_dir / f"source{ext}"
+    if not src.exists() or src.stat().st_size == 0:
+        log.info("downloading %s/%s", cfg.video_bucket, storage_path)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(store.download(cfg.video_bucket, storage_path))
+    return src
+
+
 def run(ctx) -> None:
     store = ctx["store"]
     cfg = ctx["cfg"]
@@ -35,17 +51,7 @@ def run(ctx) -> None:
     frames_dir = cache_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
 
-    storage_path = video["storage_path"]
-    ext = Path(storage_path).suffix or ".mp4"
-    local = Path(cfg.local_video_dir).expanduser() / storage_path
-    if local.exists() and local.stat().st_size > 0:
-        src = local  # decode in place — no copy, no extra disk (videos/ is git-ignored)
-        log.info("using local file %s (in place)", src)
-    else:
-        src = cache_dir / f"source{ext}"
-        if not src.exists() or src.stat().st_size == 0:
-            log.info("downloading %s/%s", cfg.video_bucket, storage_path)
-            src.write_bytes(store.download(cfg.video_bucket, storage_path))
+    src = resolve_source(cfg, video["storage_path"], cache_dir, store)
     log.info("source = %.1f MB", src.stat().st_size / 1e6)
 
     import av  # lazy (ml extra)

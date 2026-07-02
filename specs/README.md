@@ -16,3 +16,5 @@ the data model, and the design handoffs.
 
 Phasing (build order): **P0** foundations · **P1** calibration + movement · **P2** shuttle + events ·
 **P3** pose + strokes · **P4** polish/automation. Full plan: `~/.claude/plans/help-me-build-an-atomic-lagoon.md`.
+Target end-state for the review workflow: [`features/graduated-autonomy.md`](./features/graduated-autonomy.md)
+— review gates become confidence-gated auto-accepts; player naming stays the one human step.
