@@ -3,7 +3,7 @@ import { supabase, isConfigured } from '../lib/supabase'
 import { dateParts } from '../lib/format'
 import { matchResult } from '../lib/score'
 import { shotDE } from '../lib/labels'
-import { resolveVideoSrc } from '../lib/storage'
+import { resolvePlaybackSrc } from '../lib/storage'
 import type {
   CourtCalibrationPointsRow, MatchPlayerJoinRow, MatchRallyStatsRow, MatchReport, MatchRow,
   MatchVideoRow, PairMatchStatRow, PlayerMatchStatsRow, PlayerShotStatRow, RallyEndRow,
@@ -106,7 +106,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
         let videoSrc = ''
         if (vid) {
           const [srcUrl, calibRes, trackRes] = await Promise.all([
-            resolveVideoSrc(vid.storage_path),
+            resolvePlaybackSrc(vid),
             supabase
               .from('court_calibrations')
               .select('confirmed_points, image_size')
@@ -135,6 +135,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
             id: mid, dateLabel: dp.dateLabel, weekday: m.weekday, dd: dp.dd,
             discipline: m.discipline, durationMin: m.duration_min, restMin: m.rest_min,
             court: m.court, score: m.score, games, result, resultLine,
+            status: m.status,
           },
           rallies: rally
             ? {

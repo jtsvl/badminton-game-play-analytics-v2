@@ -66,6 +66,7 @@ const singles: MatchReport = {
     games: [[21, 18], [19, 21], [21, 15]],
     result: 'win',
     resultLine: 'Sieg 2:1',
+    status: 'done',
   },
   rallies: { count: 112, avgShots: 6.5, avgSec: 7.8, longShots: 34, longSec: 52, endLine: 'Der Smash beendete 31 % aller Ballwechsel.' },
   pairs: [], // hook returns [] for singles — must not be treated as doubles
@@ -90,6 +91,7 @@ const doubles: MatchReport = {
     games: [[21, 17], [21, 19]],
     result: 'win',
     resultLine: 'Sieg 2:0',
+    status: 'done',
   },
   rallies: { count: 89, avgShots: 5.4, avgSec: 6.6, longShots: 28, longSec: 40, endLine: '' },
   pairs: [

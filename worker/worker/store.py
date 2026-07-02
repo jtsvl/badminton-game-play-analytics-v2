@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("worker.store")
@@ -49,6 +50,8 @@ class Store:
         from supabase import create_client  # lazy: only when running against Supabase
 
         self._sb = create_client(supabase_url, service_role_key)
+        self._url = supabase_url.rstrip("/")
+        self._key = service_role_key
         self._worker_id = "worker-1"
         self._stale_job_timeout_s = stale_job_timeout_s
 
@@ -167,6 +170,11 @@ class Store:
             {"fps": fps, "duration_s": duration_s, "width": width, "height": height}
         ).eq("id", video_id).execute()
 
+    def set_video_proxy(self, video_id: str, proxy_path: str) -> None:
+        self._sb.table("match_videos").update({"proxy_path": proxy_path}).eq(
+            "id", video_id
+        ).execute()
+
     # ── calibration ────────────────────────────────────────────────────────
     def get_calibration(self, video_id: str) -> Optional[dict]:
         res = (
@@ -228,6 +236,15 @@ class Store:
             rows, on_conflict="video_id,source_id"
         ).execute()
 
+    def get_rallies(self, match_id: str) -> List[dict]:
+        """A match's rally rows, ordered by idx (rally_sync maps events' rally_id → idx off these)."""
+        res = self._sb.table("rallies").select("*").eq("match_id", match_id).order("idx").execute()
+        return res.data or []
+
+    def get_events(self, match_id: str) -> List[dict]:
+        res = self._sb.table("events").select("*").eq("match_id", match_id).execute()
+        return res.data or []
+
     def replace_rallies(self, match_id: str, rallies: List[dict], events: List[dict]) -> int:
         """Idempotently replace a match's rallies + events (stage 6 output). Returns the rally count.
 
@@ -235,6 +252,14 @@ class Store:
         unique(match_id,idx)), so a re-run must clear the match's rows first or events would pile up.
         PostgREST refuses an unfiltered delete, so the `.eq("match_id", …)` filter is load-bearing — never
         drop it. Events are deleted before rallies (events.rally_id FKs rallies)."""
+        row = (self._sb.table("matches").select("rally_edited_at").eq("id", match_id)
+               .execute().data or [{}])[0]
+        if row.get("rally_edited_at"):
+            # FR-35 rally review: the trainer dropped/merged rallies; a full re-run regenerates them
+            # from scratch. Surface the clobber loudly (specs/features/rally-shot-review.md).
+            log.warning("replace_rallies: overwriting trainer rally edits for match %s "
+                        "(rally_edited_at=%s) — review the rallies again after this run",
+                        match_id, row["rally_edited_at"])
         self._sb.table("events").delete().eq("match_id", match_id).execute()
         self._sb.table("rallies").delete().eq("match_id", match_id).execute()
         if not rallies:
@@ -290,3 +315,55 @@ class Store:
         self._sb.storage.from_(bucket).upload(
             path, data, {"content-type": content_type, "upsert": "true"}
         )
+
+    def upload_resumable(
+        self, bucket: str, path: str, file_path: str | Path, content_type: str
+    ) -> None:
+        """TUS chunked upload for large files. The Kong gateway kills any single request at
+        ~60 s (measured 2026-07-02: HTTP 499 on a 60 MB plain POST at ~9 Mbps), so anything
+        bigger than ~40 MB must go up in chunks. Supabase's resumable endpoint expects
+        exactly 6 MiB chunks (except the last)."""
+        import base64
+
+        import httpx
+
+        chunk_size = 6 * 1024 * 1024
+        file_path = Path(file_path)
+        size = file_path.stat().st_size
+
+        def b64(s: str) -> str:
+            return base64.b64encode(s.encode()).decode()
+
+        headers = {"Authorization": f"Bearer {self._key}", "Tus-Resumable": "1.0.0"}
+        with httpx.Client(timeout=120) as client:
+            res = client.post(
+                f"{self._url}/storage/v1/upload/resumable",
+                headers={
+                    **headers,
+                    "Upload-Length": str(size),
+                    "x-upsert": "true",
+                    "Upload-Metadata": (
+                        f"bucketName {b64(bucket)},objectName {b64(path)},"
+                        f"contentType {b64(content_type)}"
+                    ),
+                },
+            )
+            res.raise_for_status()
+            loc = res.headers["location"]
+            if loc.startswith("/"):
+                loc = self._url + loc
+            offset = 0
+            with file_path.open("rb") as f:
+                while offset < size:
+                    chunk = f.read(chunk_size)
+                    res = client.patch(
+                        loc,
+                        headers={
+                            **headers,
+                            "Upload-Offset": str(offset),
+                            "Content-Type": "application/offset+octet-stream",
+                        },
+                        content=chunk,
+                    )
+                    res.raise_for_status()
+                    offset = int(res.headers["upload-offset"])

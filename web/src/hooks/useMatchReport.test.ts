@@ -22,7 +22,7 @@ vi.mock('../lib/supabase', () => ({
   isConfigured: true,
   supabase: { from: (table: string) => stub(h.tables[table] ?? { data: [] }) },
 }))
-vi.mock('../lib/storage', () => ({ resolveVideoSrc: async () => '' }))
+vi.mock('../lib/storage', () => ({ resolvePlaybackSrc: async () => '' }))
 
 function seedTables() {
   h.tables = {

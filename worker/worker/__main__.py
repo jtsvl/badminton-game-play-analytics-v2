@@ -1,9 +1,11 @@
 """Worker entry point: poll → claim → run pipeline → update. `python -m worker enqueue ...` to seed.
 
 Job `stage` selects the slice to run, honoring the gates (specs/40-worker-contract.md):
-  ingest    → [ingest]                                 then match.status='calibrating'
-  calibrate → RESUME_STAGES (calibrate…overlay, incl. shuttle+rally_hit)  then match.status='review'
-  remap     → [remap,aggregate,overlay]                then match.status='done'
+  ingest       → [ingest,proxy]                           then match.status='calibrating'
+  calibrate    → RESUME_STAGES (calibrate…overlay, incl. shuttle+rally_hit)  then match.status='review'
+  remap        → [remap,rally_sync,aggregate,overlay]     then match.status='done'
+  rally_review → [remap,rally_sync,aggregate]             then params.return_status (default 'done')
+  proxy        → [proxy] standalone (backfill; match status untouched, stage never raises)
 The trainer confirms corners (calibrate) then the track→player mapping (remap, FR-35) in the web UI
 between jobs; remap reuses the cached tracks.parquet, so it recomputes stats/overlays without re-detecting.
 """
@@ -25,12 +27,21 @@ RESUME_STAGES = ["calibrate", "detect", "pose", "gate_track", "shuttle", "rally_
 def _slice_for(job: dict) -> tuple[list[str], str | None]:
     stage = job.get("stage") or "ingest"
     if stage == "ingest":
-        return ["ingest"], "calibrating"
+        # proxy rides along so every new upload gets a playback proxy (video-proxy spec);
+        # it never raises, so a proxy hiccup can't fail the ingest.
+        return ["ingest", "proxy"], "calibrating"
     if stage in ("calibrate", "resume_after_calibration"):
         return RESUME_STAGES, "review"
     if stage == "remap":
         # FR-35: trainer corrected the track→player mapping → cheap recompute (no re-detect).
-        return ["remap", "aggregate", "overlay"], "done"
+        # rally_sync keeps the DB-authoritative rally spans (incl. trainer edits) in the cache.
+        return ["remap", "rally_sync", "aggregate", "overlay"], "done"
+    if stage == "rally_review":
+        # FR-35: trainer dropped/merged rallies in the web UI → re-gate the stats. No overlay
+        # (it never reads rallies). End status = where the match was before the edit ('review'
+        # must not skip the PlayerReview confirmation; 'done' stays done).
+        end = (job.get("params") or {}).get("return_status") or "done"
+        return ["remap", "rally_sync", "aggregate"], end
     return [stage], None
 
 

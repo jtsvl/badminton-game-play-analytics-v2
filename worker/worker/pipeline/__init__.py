@@ -44,8 +44,11 @@ def _lazy(name: str) -> Callable[[StageContext], None]:
 # RESUME_STAGES (__main__) now that shuttle is verified on real footage.
 # `remap` is the FR-35 identity-recompute prep: it resolves the cached tracks.parquet (no re-detect) so a
 # `remap` job can re-run [aggregate, overlay] after the trainer corrects the track→player mapping.
+# `rally_sync` is the FR-35 rally-review prep: it rewrites cache rallies/events.parquet from the
+# (possibly trainer-edited) DB rows so aggregate re-gates against the authoritative spans.
+# `proxy` is the 720p playback proxy (specs/features/video-proxy.md) — supplementary, never raises.
 _REAL = ("ingest", "calibrate", "detect", "pose", "gate_track", "shuttle", "rally_hit",
-         "aggregate", "overlay", "remap")
+         "aggregate", "overlay", "remap", "rally_sync", "proxy")
 STAGES: Dict[str, Callable[[StageContext], None]] = {name: _todo(name) for name in STAGE_ORDER}
 STAGES.update({name: _lazy(name) for name in _REAL})
 

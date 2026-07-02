@@ -24,13 +24,16 @@ sync). Incorporates lessons adopted from the prior v1 schema (see "v1 lessons" a
 `id · slug unique · played_on date · weekday · discipline∈{singles,doubles} · court int · score text ·
 games jsonb [[a,b]…] · duration_min · rest_min · result_side_a∈{win,loss} ·
 status∈{uploaded,calibrating,processing,awaiting_mapping,review,done,failed} ·
-processed_at? · error? · notified_at?  (report link sent) · is_test · created_at`
+processed_at? · error? · notified_at?  (report link sent) · is_test ·
+rally_edited_at?  (0008 — trainer dropped/merged rallies, FR-35; `replace_rallies` warns before clobbering) · created_at`
 (`awaiting_mapping` is **reserved, currently unset** — the implemented flow goes `processing→review` and
 the trainer confirms the track→player mapping there; see specs/40 "Contracts". Kept in the enum to avoid
 a pointless migration.)
 
 ### match_videos
-`id · match_id → matches · storage_path · label · angle∈{overhead,side} · duration_s · fps · width · height · created_at`
+`id · match_id → matches · storage_path · label · angle∈{overhead,side} · duration_s · fps · width · height ·
+proxy_path?  (0010 — 720p playback proxy in `analysis-artifacts`, `features/video-proxy.md`; null = not
+generated; the 4K originals stay off storage) · created_at`
 
 ### court_calibrations  (first-class state machine — decision #4, FR-5/6/10)
 `id · video_id? · match_id? · court int? · status∈{proposed,needs_review,accepted,finalized,rejected} ·
@@ -57,10 +60,13 @@ heatmap_uri? · placement_uri? · fastest?  (ESTIMATE)` — unique (match_id, pl
 `id · match_id · side∈{A,B} · label · fb · ss · rot` — unique (match_id, side)
 
 ### rallies
-`id · match_id · idx · t_start_s · t_end_s · shot_count · winner_side? · end_shot_type? · confidence?` — unique (match_id, idx)
+`id · match_id · idx · t_start_s · t_end_s · shot_count · winner_side? · end_shot_type? · confidence? · edited_at?  (0008)` — unique (match_id, idx)
 > Written by stage 6 (`rally_hit`, image-space segmentation). `winner_side`/`end_shot_type` are **estimates**
 > (stage 6 / landing), **decoupled from `matches.score`** — never reconciled against the human-entered score.
 > `shot_count` is a provisional reversal count (serve + contacts); `confidence` = in-rally detection density.
+> `edited_at` null = machine-written; set by the rally-review UI on merge-modified rows (FR-35,
+> `features/rally-shot-review.md`). Drop provenance lives on `matches.rally_edited_at` (set on every review
+> save — a dropped rally leaves no row behind). `idx` may keep gaps after drops/merges (never renumbered).
 
 ### events  (generic typed stream — raw hits/serves/bounces/rally markers)
 `id · match_id · rally_id? · t_s · type ∈ {serve,hit,rally_end,landing,bounce,…} · payload jsonb · confidence?`
@@ -76,6 +82,8 @@ heatmap_uri? · placement_uri? · fastest?  (ESTIMATE)` — unique (match_id, pl
 ### processing_jobs  (work queue — claimed with FOR UPDATE SKIP LOCKED)
 `id · match_id · video_id? · stage · status∈{queued,running,succeeded,failed,cancelled} · progress ·
 params jsonb? · error? · claimed_by? · claimed_at? · started_at? · finished_at? · created_at`
+> `params.return_status` (rally_review jobs): the match status to restore after the slice — editing at
+> `review` returns to `review` (must not skip the PlayerReview confirmation); default `done`.
 
 ### job_runs  (audit/observability log)
 `id · job · match_id? · started_at · finished_at? · is_ok? · detail?`
@@ -102,7 +110,7 @@ neither is a stored column.
 ## Frontend mapping (report object the web assembles — `useMatchReport`)
 ```
 report = {
-  video:   match_videos[0] → { src(signed url), label },
+  video:   match_videos[0] → { src(signed url, 720p proxy preferred — resolvePlaybackSrc), label },
   meta:    matches (+ dateParts, derived resultLine; discipline/result localized at render),
   rallies: match_rally_stats (+ endLine from rallies.end_shot_type),
   pairs:   pair_match_stats[] | null,

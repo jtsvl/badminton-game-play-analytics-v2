@@ -32,11 +32,13 @@ class TestRowMapping(unittest.TestCase):
 
 
 class _FakeTable:
-    def __init__(self, name, recorder):
+    def __init__(self, name, recorder, select_data):
         self.name, self.rec = name, recorder
+        self.select_data = select_data
         self.op = None
         self.filters = {}
         self.rows = None
+        self.ordered = None
 
     def delete(self):
         self.op = "delete"
@@ -46,28 +48,39 @@ class _FakeTable:
         self.op, self.rows = "insert", rows
         return self
 
+    def select(self, cols="*"):
+        self.op, self.rows = "select", cols
+        return self
+
     def eq(self, col, val):
         self.filters[col] = val
         return self
 
+    def order(self, col):
+        self.ordered = col
+        return self
+
     def execute(self):
-        self.rec.append((self.name, self.op, dict(self.filters), self.rows))
+        self.rec.append((self.name, self.op, dict(self.filters), self.rows, self.ordered))
         if self.op == "insert" and self.name == "rallies":
             return SimpleNamespace(data=[{**r, "id": f"rid-{r['idx']}"} for r in self.rows])
+        if self.op == "select":
+            return SimpleNamespace(data=self.select_data.get(self.name, []))
         return SimpleNamespace(data=[])
 
 
 class _FakeSB:
-    def __init__(self):
+    def __init__(self, select_data=None):
         self.calls = []
+        self.select_data = select_data or {}
 
     def table(self, name):
-        return _FakeTable(name, self.calls)
+        return _FakeTable(name, self.calls, self.select_data)
 
 
-def _store_with_fake():
+def _store_with_fake(select_data=None):
     s = Store.__new__(Store)        # bypass __init__ (no real supabase client)
-    s._sb = _FakeSB()
+    s._sb = _FakeSB(select_data)
     s._worker_id = "test"
     return s
 
@@ -88,10 +101,10 @@ class TestReplaceRalliesOrchestration(unittest.TestCase):
     def test_deletes_with_match_filter_before_inserting(self):
         s = _store_with_fake()
         s.replace_rallies("M1", self._rallies(), self._events())
-        calls = s._sb.calls
+        deletes = [c for c in s._sb.calls if c[1] == "delete"]
         # events deleted first (FK), then rallies, both filtered by match_id
-        self.assertEqual(calls[0][:3], ("events", "delete", {"match_id": "M1"}))
-        self.assertEqual(calls[1][:3], ("rallies", "delete", {"match_id": "M1"}))
+        self.assertEqual(deletes[0][:3], ("events", "delete", {"match_id": "M1"}))
+        self.assertEqual(deletes[1][:3], ("rallies", "delete", {"match_id": "M1"}))
 
     def test_inserts_rallies_then_events_with_resolved_ids(self):
         s = _store_with_fake()
@@ -107,8 +120,41 @@ class TestReplaceRalliesOrchestration(unittest.TestCase):
         s = _store_with_fake()
         n = s.replace_rallies("M1", [], [])
         self.assertEqual(n, 0)
-        ops = [(c[0], c[1]) for c in s._sb.calls]
+        ops = [(c[0], c[1]) for c in s._sb.calls if c[1] != "select"]
         self.assertEqual(ops, [("events", "delete"), ("rallies", "delete")])   # cleared, no inserts
+
+    def test_warns_before_clobbering_trainer_edits(self):
+        # FR-35 rally review: a full re-run regenerates rallies from scratch — trainer drop/merge
+        # edits (matches.rally_edited_at set on every review save) must at minimum be surfaced.
+        s = _store_with_fake(select_data={"matches": [{"rally_edited_at": "2026-07-02T10:00:00Z"}]})
+        with self.assertLogs("worker.store", level="WARNING") as logs:
+            n = s.replace_rallies("M1", self._rallies(), self._events())
+        self.assertEqual(n, 2)                       # still replaces — warn, don't block
+        self.assertTrue(any("rally" in m.lower() for m in logs.output))
+
+    def test_no_warning_without_trainer_edits(self):
+        s = _store_with_fake(select_data={"matches": [{"rally_edited_at": None}]})
+        with self.assertNoLogs("worker.store", level="WARNING"):
+            s.replace_rallies("M1", self._rallies(), self._events())
+
+
+class TestRallyReaders(unittest.TestCase):
+    def test_get_rallies_selects_by_match_ordered_by_idx(self):
+        rows = [{"id": "r0", "idx": 0}, {"id": "r1", "idx": 1}]
+        s = _store_with_fake(select_data={"rallies": rows})
+        self.assertEqual(s.get_rallies("M1"), rows)
+        call = next(c for c in s._sb.calls if c[0] == "rallies")
+        self.assertEqual(call[1], "select")
+        self.assertEqual(call[2], {"match_id": "M1"})
+        self.assertEqual(call[4], "idx")             # deterministic order for idx↔id mapping
+
+    def test_get_events_selects_by_match(self):
+        rows = [{"id": "e0", "rally_id": "r0"}]
+        s = _store_with_fake(select_data={"events": rows})
+        self.assertEqual(s.get_events("M1"), rows)
+        call = next(c for c in s._sb.calls if c[0] == "events")
+        self.assertEqual(call[1], "select")
+        self.assertEqual(call[2], {"match_id": "M1"})
 
 
 if __name__ == "__main__":

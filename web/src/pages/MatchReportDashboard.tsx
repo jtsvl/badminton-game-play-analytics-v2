@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import type { MatchReport } from '../types'
 import { deNum } from '../lib/format'
 import { disciplineDE } from '../lib/labels'
@@ -125,6 +126,14 @@ export function MatchReportDashboard({ report, tab, setTab, slug }: Props) {
         {/* Row 1, right (span 4): Endstand + Feldabdeckung */}
         <div style={{ gridColumn: 'span 4', gridRow: '1', minHeight: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
           <Endstand report={report} dense extra={rallyExtra} />
+          {r && ['review', 'done'].includes(m.status) && (
+            <Link
+              to={`/match/${slug}/rallies`}
+              style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--orange-shade, #C66C27)', alignSelf: 'flex-end', marginTop: -6 }}
+            >
+              Ballwechsel prüfen →
+            </Link>
+          )}
           <CourtCoverageCard
             spots={s.heat}
             sub={coverageSub}

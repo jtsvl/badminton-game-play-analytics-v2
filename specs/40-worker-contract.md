@@ -27,16 +27,21 @@ Studio; it owns no HTTP surface — it **polls** `processing_jobs`, does work, a
 
 ## Stage order & I/O
 Stages mirror `30-ml-pipeline.md`. Each stage reads the frame cache + prior artifacts and writes the next.
-`stage` string ∈ `ingest · calibrate · detect · pose · gate_track · shuttle · rally_hit · stroke · aggregate · overlay · remap`.
+`stage` string ∈ `ingest · calibrate · detect · pose · gate_track · shuttle · rally_hit · stroke · aggregate · overlay · remap · rally_sync · proxy`.
 (pose runs **before** gate_track: it supplies the ankle foot that gate_track projects instead of the bbox bottom.)
 
 A job's `stage` selects the **slice** the worker runs (`__main__.py`):
 
 | Job stage | Runs | Match status after |
 |---|---|---|
-| `ingest` | `[ingest]` | `calibrating` |
+| `ingest` | `[ingest, proxy]` (proxy = 720p playback artifact, never raises) | `calibrating` |
 | `calibrate` | `RESUME_STAGES` = `[calibrate, detect, pose, gate_track, shuttle, rally_hit, aggregate, overlay]` | `review` |
-| `remap` | `[remap, aggregate, overlay]` (FR-35 — reuses cached `tracks.parquet`, no re-detect) | `done` |
+| `remap` | `[remap, rally_sync, aggregate, overlay]` (FR-35 — reuses cached `tracks.parquet`, no re-detect; `rally_sync` keeps DB rally spans/trainer edits) | `done` |
+| `rally_review` | `[remap, rally_sync, aggregate]` (FR-35 — trainer dropped/merged rallies; no overlay, it never reads rallies) | `params.return_status` (default `done`) |
+| `proxy` | `[proxy]` standalone (backfill; `features/video-proxy.md`) | unchanged |
+
+`rally_review`'s end status returns the match to where it was before the edit — editing at `review`
+must not skip the PlayerReview confirmation; editing at `done` stays `done`.
 
 | Stage | Reads | Writes |
 |---|---|---|
@@ -50,6 +55,8 @@ A job's `stage` selects the **slice** the worker runs (`__main__.py`):
 | stroke | pose, shuttle, court xy | `events`(hit shot_type), `player_shot_stats` |
 | aggregate | tracks, **rallies** (in-rally gating), shots | `player_match_stats`, `pair_match_stats`, `match_rally_stats` inputs |
 | overlay | tracks, shuttle, hits | `track_keyframes` (~10 Hz), hit markers |
+| rally_sync | DB `rallies` + `events` (authoritative, incl. trainer edits) | cache `rallies.parquet`/`events.parquet` + re-uploaded artifacts, `ctx[rallies_path/events_path]` |
+| proxy | source video (local `videos/` or bucket) | `analysis-artifacts/<video_id>/proxy_720p.mp4` (TUS chunked — Kong kills single requests at ~60 s), `match_videos.proxy_path`. ffmpeg host dep; **never raises** (`features/video-proxy.md`) |
 | landing *(SPEC — `features/shuttle-landing-inout.md`)* | shuttle, rally-end (u,v) | `events`(type=landing) → `player_shot_stats.errors` |
 
 `rally_hit` runs all trajectory/serve logic in **normalized image space** (the ground homography can't place an

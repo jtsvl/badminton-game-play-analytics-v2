@@ -18,3 +18,17 @@ export async function signedUrl(bucket: string, path: string | null, ttl = 60 * 
 export function resolveVideoSrc(storagePath: string | null): Promise<string> {
   return signedUrl('match-videos', storagePath)
 }
+
+/** Playable URL preferring the 720p proxy (video-proxy spec) — the 4K originals never reach
+ *  storage (worker decodes them in place), so the proxy is usually the only playable source.
+ *  Falls back to the raw source path (keeps the small test clip working). */
+export async function resolvePlaybackSrc(v: {
+  storage_path: string | null
+  proxy_path: string | null
+}): Promise<string> {
+  if (v.proxy_path) {
+    const proxy = await signedUrl('analysis-artifacts', v.proxy_path)
+    if (proxy) return proxy
+  }
+  return resolveVideoSrc(v.storage_path)
+}

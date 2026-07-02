@@ -14,14 +14,46 @@ from worker.pipeline import remap
 
 
 class TestSliceFor(unittest.TestCase):
-    def test_remap_runs_aggregate_overlay_then_done(self):
-        self.assertEqual(_slice_for({"stage": "remap"}), (["remap", "aggregate", "overlay"], "done"))
+    def test_remap_runs_rally_sync_aggregate_overlay_then_done(self):
+        # rally_sync in the remap slice: identity recomputes keep the DB-authoritative rally spans
+        # (fresh-cache runs used to silently fall back to whole-clip gating in aggregate).
+        self.assertEqual(
+            _slice_for({"stage": "remap"}),
+            (["remap", "rally_sync", "aggregate", "overlay"], "done"),
+        )
 
-    def test_ingest_slice_unchanged(self):
-        self.assertEqual(_slice_for({"stage": "ingest"}), (["ingest"], "calibrating"))
+    def test_rally_review_slice_defaults_to_done(self):
+        # No overlay: rally edits change nothing overlay produces (it never reads rallies).
+        self.assertEqual(
+            _slice_for({"stage": "rally_review"}),
+            (["remap", "rally_sync", "aggregate"], "done"),
+        )
+
+    def test_rally_review_returns_to_prior_status(self):
+        # A trainer editing rallies at status 'review' must land back at 'review',
+        # not skip the PlayerReview confirmation.
+        self.assertEqual(
+            _slice_for({"stage": "rally_review", "params": {"return_status": "review"}}),
+            (["remap", "rally_sync", "aggregate"], "review"),
+        )
+
+    def test_rally_review_ignores_null_params(self):
+        self.assertEqual(
+            _slice_for({"stage": "rally_review", "params": None}),
+            (["remap", "rally_sync", "aggregate"], "done"),
+        )
+
+    def test_ingest_slice_includes_proxy(self):
+        # proxy rides along on ingest so every new upload gets a playback proxy; it never
+        # raises, so it cannot fail the ingest job (specs/features/video-proxy.md).
+        self.assertEqual(_slice_for({"stage": "ingest"}), (["ingest", "proxy"], "calibrating"))
 
     def test_default_stage_is_ingest(self):
-        self.assertEqual(_slice_for({}), (["ingest"], "calibrating"))
+        self.assertEqual(_slice_for({}), (["ingest", "proxy"], "calibrating"))
+
+    def test_proxy_backfill_runs_standalone_with_status_untouched(self):
+        # Backfill jobs (stage='proxy') must not move match.status — end_status None.
+        self.assertEqual(_slice_for({"stage": "proxy"}), (["proxy"], None))
 
     def test_calibrate_slice_unchanged(self):
         self.assertEqual(_slice_for({"stage": "calibrate"}), (RESUME_STAGES, "review"))
@@ -32,6 +64,13 @@ class TestSliceFor(unittest.TestCase):
 
     def test_remap_is_a_registered_runnable_stage(self):
         self.assertIn("remap", STAGES)
+
+    def test_rally_sync_is_a_registered_runnable_stage(self):
+        self.assertIn("rally_sync", STAGES)
+
+    def test_proxy_is_a_registered_runnable_stage(self):
+        # An unregistered stage name is a KeyError at claim time — backfill jobs need this.
+        self.assertIn("proxy", STAGES)
 
 
 class _Cfg:

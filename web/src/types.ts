@@ -22,6 +22,7 @@ export interface MatchVideoRow {
   id: string; match_id: string; storage_path: string; label: string | null
   angle: 'overhead' | 'side'; duration_s: number | null; fps: number | null
   width: number | null; height: number | null
+  proxy_path: string | null // 720p playback proxy in analysis-artifacts (video-proxy spec)
 }
 // Calibration is its own table now (court_calibrations) — see specs/20-data-model.md (P1).
 export interface MatchPlayerRow {
@@ -51,6 +52,12 @@ export interface MatchPlayerJoinRow {
   side: Side; slot: number; player_id: string; players: Embedded<PlayerNameRef>
 }
 export interface RallyEndRow { end_shot_type: string | null }
+// Full rally row for the review page (drop/merge, FR-35). edited_at set ⇒ trainer-edited (0008).
+export interface RallyRow {
+  id: string; idx: number; t_start_s: number | null; t_end_s: number | null
+  shot_count: number | null; winner_side: Side | null; end_shot_type: string | null
+  confidence: number | null; edited_at: string | null
+}
 export interface CourtCalibrationPointsRow {
   confirmed_points: Pt[] | null
   image_size: { w: number; h: number } | null
@@ -76,6 +83,7 @@ export interface ReportMeta {
   id: string; dateLabel: string; weekday: string | null; dd: string; discipline: Discipline
   durationMin: number | null; restMin: number | null; court: number | null
   score: string | null; games: number[][]; result: MatchResultCode | null; resultLine: string
+  status: string // gates review CTAs (rally review at 'review'/'done')
 }
 // Court calibration consumed by the overlay (the 4 confirmed corners are the source of truth;
 // the frontend derives court→frame via lib/calibration.homographyFromCorners).

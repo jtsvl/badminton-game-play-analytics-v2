@@ -38,7 +38,11 @@ export function MatchReportMobile({ report, tab, setTab, slug }: Props) {
   sections.push(<ZoneCard zones={s.zones} />)
   sections.push(<ActivityCard points={s.timeline} />)
   if (s.shots.length > 0) sections.push(<ShotMixCard shots={s.shots} fastest={s.fastest} />)
-  if (report.rallies) sections.push(<RallyCard rallies={report.rallies} />)
+  const canReviewRallies = ['review', 'done'].includes(report.meta.status)
+  if (report.rallies)
+    sections.push(
+      <RallyCard rallies={report.rallies} reviewTo={canReviewRallies ? `/match/${slug}/rallies` : undefined} />,
+    )
   if (report.pairs && report.pairs.length) sections.push(<FormationCard pairs={report.pairs} />)
 
   return (
