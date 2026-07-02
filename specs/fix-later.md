@@ -117,6 +117,22 @@ remaining gate is the labeling pass on Session-2 rallies (`verify --shuttle`), t
 Needed for the landing/in-out feature (`features/shuttle-landing-inout.md`), since out-landings fall outside
 the tight box.
 
+## upload_resumable can't overwrite an existing object — 409 on re-runs (2026-07-02)
+`Store.upload_resumable` (`worker/worker/store.py`) — the TUS chunked-upload path the proxy stage
+uses for large files (Kong kills plain POSTs at ~60 s) — sends `x-upsert: true` on the creation
+POST, but when an object already exists at the target path the first PATCH still fails with a 409.
+Worked around once by manually deleting the stale object while backfilling game 5's proxy.
+**Blast radius is TUS-only:** plain `store.upload` overwrites fine (rally_sync re-uploads parquet
+artifacts on every review save without issue). New videos get fresh paths, and the proxy stage
+never raises — so this only really bites when a proxy must actually be **regenerated** (source
+video replaced, proxy settings changed) or if a future large artifact adopts the resumable path.
+**Fix sketch:** delete (or existence-check) the target object before the TUS creation POST, or
+retry-on-409 with a delete; verify the root cause against Supabase Storage's TUS/x-upsert
+semantics first — the 409 symptom is recorded, the mechanism is inferred. Plus a test in
+`tests/test_proxy.py`. **Agreed 2026-07-02:** warm-up task of the next worker-touching session
+(likely the pose/swing-fusion implementation) — not worth its own session, must not block the
+fusion planning.
+
 ## Cross-session shuttle validation — READY, gate is labeling effort (2026-07-02)
 The fine-tuned TrackNetV3 (promoted to production default) is only *scored* on session-1 game1 (F1 0.958).
 The 5 Session-2 games processed at a tight 21–27% coverage band — an encouraging generalisation signal but
