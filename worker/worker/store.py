@@ -236,6 +236,15 @@ class Store:
             rows, on_conflict="video_id,source_id"
         ).execute()
 
+    def insert_rally_corrections(self, rows: List[dict]) -> None:
+        """Append-only persist of rally-review corrections (the rally_hit eval/threshold-tuning
+        corpus, 0011 migration). Unlike upsert_detection_corrections/upsert_shuttle_labels this is
+        a PLAIN INSERT: editing the same rally across separate review saves is itself useful
+        signal, so repeats are kept rather than replaced."""
+        if not rows:
+            return
+        self._sb.table("rally_corrections").insert(rows).execute()
+
     def get_rallies(self, match_id: str) -> List[dict]:
         """A match's rally rows, ordered by idx (rally_sync maps events' rally_id → idx off these)."""
         res = self._sb.table("rallies").select("*").eq("match_id", match_id).order("idx").execute()

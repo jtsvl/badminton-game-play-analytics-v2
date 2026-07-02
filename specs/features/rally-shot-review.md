@@ -67,6 +67,35 @@ human-entered, and rally-derived fields stay estimates decoupled from it (`40-wo
 - **Relabel shot** (deferred, needs stage 7): update the `events` hit row's `shot_type` in place;
   recompute `player_shot_stats` for the affected players. Meaningless before `stroke` exists.
 
+## Correction corpus (eval answer key, built alongside drop/merge)
+Every review save also persists **what the trainer judged wrong** as append-only `rally_corrections`
+rows (0011) — the eval/threshold-tuning corpus for stage 6's segmentation **heuristic**
+(`worker/rally/segment.py` constants — not a trained model, so this is an answer key like
+`detection_corrections` (0004), not NN supervision; it doubles as bootstrap labels if learned
+sub-classifiers ever land).
+
+- **Trigger is automatic** — no manual CLI step, unlike `detection_corrections`' offline
+  `worker verify` → `corrections.json` → `import-corrections` flow. The web builds the rows with
+  `rallyCorrections.ts` (pure mapper: pre-edit snapshot + `RallySavePlan`) and packs them into
+  `params.corrections` on the `rally_review` job it already enqueues on every save; the worker's
+  `rally_sync` stage inserts them server-side (`store.insert_rally_corrections`). Access posture
+  mirrors `detection_corrections`: service-role only, RLS with no anon policy — the dev-only anon
+  surface on `rallies`/`events` does not grow.
+- **Three `op` values** (the client plan's `rallyDeletes.deleteEvents` flag conflates the first two):
+  `drop` (rally judged noise), `merge_absorbed` (folded into a neighbour; `merged_into` = surviving
+  id at edit time), `merge_keep` (the survivor; `patch` = the exact `RallyPatch` written). All rows
+  carry the pre-edit `orig_*` snapshot.
+- **`rally_id`/`merged_into` are deliberately not FKs** — dropped/absorbed ids are gone by insert
+  time, and even surviving ids go stale on the next full stage-6 re-run (`replace_rallies` is
+  delete-then-insert). A correction must outlive the rally it describes. Same reasoning drives
+  `match_id`/`video_id` **ON DELETE SET NULL** (the `job_runs` audit precedent, not
+  `detection_corrections`' cascade): the signal stays meaningful after dev cleanup deletes.
+- **Failure isolation:** the insert is wrapped in its own try/except inside `rally_sync.run` — a
+  broken write logs, but never blocks the rallies/stats resync the trainer is waiting on.
+- **Out of scope for now:** the scorecard (`eval_rally_corrections.py`, mirroring
+  `eval_corrections.py`) and anything consuming the corpus — deferred until enough corrections
+  accumulate to be meaningful, like `detection_corrections` before it (`specs/fix-later.md`).
+
 ## UI (built — list + video panel)
 `RallyReview.tsx` (container, mirrors `PlayerReview.tsx`) + `RallyReviewBoard.tsx` (presentational,
 tested) + `rallyPlan.ts` (pure save-plan builder + validation, tested). Rows: Nr., start–end (`fmtTime`),

@@ -84,6 +84,9 @@ heatmap_uri? · placement_uri? · fastest?  (ESTIMATE)` — unique (match_id, pl
 params jsonb? · error? · claimed_by? · claimed_at? · started_at? · finished_at? · created_at`
 > `params.return_status` (rally_review jobs): the match status to restore after the slice — editing at
 > `review` returns to `review` (must not skip the PlayerReview confirmation); default `done`.
+> `params.corrections` (rally_review jobs, optional): the trainer's drop/merge edits as pre-shaped
+> `rally_corrections` rows (0011) — written server-side by `rally_sync`, never by the web
+> (`features/rally-shot-review.md` § Correction corpus).
 
 ### job_runs  (audit/observability log)
 `id · job · match_id? · started_at · finished_at? · is_ok? · detail?`

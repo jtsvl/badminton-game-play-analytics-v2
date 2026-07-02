@@ -21,12 +21,14 @@ class _Cfg:
 
 
 class _Store:
-    """Canned rally/event DB rows + a recorder for artifact uploads."""
+    """Canned rally/event DB rows + recorders for artifact uploads and correction inserts."""
 
-    def __init__(self, rallies=None, events=None):
+    def __init__(self, rallies=None, events=None, corrections_raise=False):
         self._rallies = rallies or []
         self._events = events or []
         self.uploads: list[tuple[str, str]] = []
+        self.corrections: list[dict] = []
+        self._corrections_raise = corrections_raise
 
     def get_rallies(self, match_id):
         return self._rallies
@@ -36,6 +38,11 @@ class _Store:
 
     def upload(self, bucket, path, data, content_type):
         self.uploads.append((bucket, path))
+
+    def insert_rally_corrections(self, rows):
+        if self._corrections_raise:
+            raise RuntimeError("boom")
+        self.corrections.extend(rows)
 
 
 def _db_rally(rid, idx, t0, t1, **extra):
@@ -131,6 +138,45 @@ class TestRallySync(unittest.TestCase):
             ctx = _ctx(tmp, _Store())   # cache dir for vid-1 does not exist yet
             rally_sync.run(ctx)
             self.assertTrue(Path(ctx["rallies_path"]).exists())
+
+
+class TestRallyCorrections(unittest.TestCase):
+    """FR-35 eval corpus: params.corrections (from the web's rally-review save) is persisted
+    server-side via store.insert_rally_corrections — stamped with match/video/job, and never
+    allowed to break the resync the trainer is waiting on."""
+
+    CORRECTION = {"op": "drop", "rally_id": "r-old", "rally_idx": 3,
+                  "merged_into": None, "orig_t_start_s": 8.0, "orig_t_end_s": 12.0,
+                  "orig_shot_count": 5, "orig_winner_side": None,
+                  "orig_end_shot_type": None, "orig_confidence": 0.4, "patch": None}
+
+    def test_corrections_are_stamped_and_inserted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _Store(rallies=[_db_rally("r0", 0, 1.0, 4.0)])
+            ctx = _ctx(tmp, store)
+            ctx["job"]["id"] = "job-7"
+            ctx["job"]["params"] = {"return_status": "done",
+                                    "corrections": [dict(self.CORRECTION)]}
+            rally_sync.run(ctx)
+            self.assertEqual(store.corrections,
+                             [{"match_id": "M1", "video_id": "vid-1", "job_id": "job-7",
+                               **self.CORRECTION}])
+
+    def test_no_params_key_writes_nothing(self):
+        # matches what a real `remap` job's ctx looks like — corrections stay a no-op there
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _Store(rallies=[_db_rally("r0", 0, 1.0, 4.0)])
+            rally_sync.run(_ctx(tmp, store))
+            self.assertEqual(store.corrections, [])
+
+    def test_insert_failure_never_blocks_the_resync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _Store(rallies=[_db_rally("r0", 0, 1.0, 4.0)], corrections_raise=True)
+            ctx = _ctx(tmp, store)
+            ctx["job"]["params"] = {"corrections": [dict(self.CORRECTION)]}
+            with self.assertLogs("worker.pipeline.rally_sync", level="ERROR"):
+                rally_sync.run(ctx)   # must not raise
+            self.assertTrue(Path(ctx["rallies_path"]).exists())   # resync still completed
 
 
 if __name__ == "__main__":

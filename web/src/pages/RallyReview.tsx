@@ -6,6 +6,7 @@ import { useMediaQuery } from '../hooks/useMediaQuery'
 import { useVideoPlayer } from '../hooks/useVideoPlayer'
 import { VideoControls } from '../components/report/VideoControls'
 import { RallyReviewBoard } from '../components/review/RallyReviewBoard'
+import { buildRallyCorrections } from '../components/review/rallyCorrections'
 import type { RallyReviewRow, RallySavePlan } from '../components/review/rallyPlan'
 import type { RallyRow } from '../types'
 
@@ -142,12 +143,18 @@ export function RallyReview() {
 
       // Cheap recompute: remap → rally_sync → aggregate. return_status brings the match back to
       // where it was — editing at 'review' must not skip the player confirmation.
+      // params.corrections: the pre-edit snapshot + plan, persisted server-side by rally_sync
+      // into rally_corrections (FR-35 eval corpus) — the web never writes that table itself.
+      const corrections = buildRallyCorrections(ctx.rows, plan)
       const jb = await supabase.from('processing_jobs').insert({
         match_id: ctx.matchId,
         video_id: ctx.videoId,
         stage: 'rally_review',
         status: 'queued',
-        params: { return_status: ctx.status === 'done' ? 'done' : 'review' },
+        params: {
+          return_status: ctx.status === 'done' ? 'done' : 'review',
+          ...(corrections.length > 0 ? { corrections } : {}),
+        },
       })
       if (jb.error) throw jb.error
       navigate(`/match/${slug}`)

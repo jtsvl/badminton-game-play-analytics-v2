@@ -21,6 +21,12 @@ _RALLY_COLS = ("idx", "t_start_s", "t_end_s", "shot_count", "winner_side",
                "end_shot_type", "confidence")
 
 
+def _rally_correction_rows(match_id, video_id, job_id, corrections: list[dict]) -> list[dict]:
+    """Stamp match/video/job onto the web's already DB-column-shaped params.corrections payload
+    (rallyCorrections.ts) -> rally_corrections insert rows."""
+    return [{"match_id": match_id, "video_id": video_id, "job_id": job_id, **c} for c in corrections]
+
+
 def run(ctx) -> None:
     store = ctx["store"]
     cfg = ctx["cfg"]
@@ -64,3 +70,19 @@ def run(ctx) -> None:
                  "application/octet-stream")
     store.upload(cfg.artifact_bucket, f"{video_id}/events.parquet", epath.read_bytes(),
                  "application/octet-stream")
+
+    # FR-35 eval corpus: params.corrections is only present on rally_review-triggered saves (the
+    # web's remap enqueue sends params={}), so this is naturally a no-op on the remap slice — no
+    # explicit job["stage"] check needed. Wrapped: a broken write must never block the rallies/
+    # stats resync the trainer is waiting on.
+    corrections = (job.get("params") or {}).get("corrections")
+    if corrections:
+        try:
+            store.insert_rally_corrections(
+                _rally_correction_rows(match_id, video_id, job.get("id"), corrections)
+            )
+            log.info("rally_sync: persisted %d rally correction(s) (match=%s)",
+                     len(corrections), match_id)
+        except Exception:
+            log.exception("rally_sync: failed to persist rally corrections (match=%s) — continuing",
+                          match_id)

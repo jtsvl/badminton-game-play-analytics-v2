@@ -138,6 +138,21 @@ class TestReplaceRalliesOrchestration(unittest.TestCase):
             s.replace_rallies("M1", self._rallies(), self._events())
 
 
+class TestInsertRallyCorrections(unittest.TestCase):
+    def test_plain_insert_of_given_rows(self):
+        # append-only by design (0011): a plain insert, NOT upsert — _FakeTable has no .upsert(),
+        # so an upsert here would raise AttributeError and fail this test.
+        rows = [{"op": "drop", "rally_id": "r-old", "match_id": "M1"}]
+        s = _store_with_fake()
+        s.insert_rally_corrections(rows)
+        self.assertEqual(s._sb.calls, [("rally_corrections", "insert", {}, rows, None)])
+
+    def test_empty_list_makes_no_call(self):
+        s = _store_with_fake()
+        s.insert_rally_corrections([])
+        self.assertEqual(s._sb.calls, [])
+
+
 class TestRallyReaders(unittest.TestCase):
     def test_get_rallies_selects_by_match_ordered_by_idx(self):
         rows = [{"id": "r0", "idx": 0}, {"id": "r1", "idx": 1}]

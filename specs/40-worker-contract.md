@@ -55,7 +55,7 @@ must not skip the PlayerReview confirmation; editing at `done` stays `done`.
 | stroke | pose, shuttle, court xy | `events`(hit shot_type), `player_shot_stats` |
 | aggregate | tracks, **rallies** (in-rally gating), shots | `player_match_stats`, `pair_match_stats`, `match_rally_stats` inputs |
 | overlay | tracks, shuttle, hits | `track_keyframes` (~10 Hz), hit markers |
-| rally_sync | DB `rallies` + `events` (authoritative, incl. trainer edits) | cache `rallies.parquet`/`events.parquet` + re-uploaded artifacts, `ctx[rallies_path/events_path]` |
+| rally_sync | DB `rallies` + `events` (authoritative, incl. trainer edits) | cache `rallies.parquet`/`events.parquet` + re-uploaded artifacts, `ctx[rallies_path/events_path]`; `rally_corrections` rows when `job.params.corrections` is present (FR-35 eval corpus, `features/rally-shot-review.md`) |
 | proxy | source video (local `videos/` or bucket) | `analysis-artifacts/<video_id>/proxy_720p.mp4` (TUS chunked — Kong kills single requests at ~60 s), `match_videos.proxy_path`. ffmpeg host dep; **never raises** (`features/video-proxy.md`) |
 | landing *(SPEC — `features/shuttle-landing-inout.md`)* | shuttle, rally-end (u,v) | `events`(type=landing) → `player_shot_stats.errors` |
 
