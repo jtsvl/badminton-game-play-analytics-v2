@@ -10,7 +10,7 @@ import unittest
 
 from worker.eval_rally import (boundary_prf, confusion, evaluate, format_report, gt_from_db,
                                phantom_spans, rally_max_strengths, serve_window_report,
-                               span_stats, split_gaps, swing_strength_split,
+                               settled_counts, span_stats, split_gaps, swing_strength_split,
                                veto_operating_points)
 
 
@@ -315,6 +315,60 @@ class TestRallyMax(unittest.TestCase):
         # Consistency lock: the sweep's phantom_total is the same definition by construction.
         pts = veto_operating_points([], pred, gt, thresholds=[1.0])
         self.assertEqual(pts[1.0]["phantom_total"], len(ph))
+
+
+class TestFusedVeto(unittest.TestCase):
+    def test_sweep_rows_have_no_fused_keys_without_energy(self):
+        pts = veto_operating_points([], [(0.0, 5.0)], [(0.0, 5.0)], thresholds=[1.0])
+        self.assertNotIn("fused_rallies_covered", pts[1.0])
+        self.assertNotIn("fused_phantoms_killed", pts[1.0])
+
+    def test_fused_saves_settled_quiet_rally_and_kills_unsettled_phantom(self):
+        # Real rally: players settled (< 4 km/h) just before the serve but its swing is weak.
+        # Phantom (walk-back): players still moving before its start, no swing at all.
+        gt = [(10.0, 14.0)]
+        pred = [(10.0, 14.0), (20.0, 21.5)]
+        swings = [{"t": 11.0, "track": 1, "strength": 2.5}]
+        energy = [(9.6, 1.0), (9.8, 1.5), (19.6, 20.0), (19.9, 18.0)]
+        pts = veto_operating_points(swings, pred, gt, thresholds=[4.0], player_energy=energy)
+        row = pts[4.0]
+        self.assertEqual(row["rallies_covered"], 0)        # swing-only would falsely veto
+        self.assertEqual(row["fused_rallies_covered"], 1)  # settledness saves the real rally
+        self.assertEqual(row["phantoms_killed"], 1)
+        self.assertEqual(row["fused_phantoms_killed"], 1)  # unsettled phantom still dies
+
+    def test_fused_settled_phantom_survives(self):
+        # The honest cost of the OR rule: a swing-free phantom whose start looks settled survives.
+        gt = [(10.0, 14.0)]
+        pred = [(10.0, 14.0), (20.0, 21.5)]
+        swings = [{"t": 11.0, "track": 1, "strength": 6.0}]
+        energy = [(9.7, 1.0), (19.7, 1.0)]  # quiet before BOTH starts
+        row = veto_operating_points(swings, pred, gt, thresholds=[4.0], player_energy=energy)[4.0]
+        self.assertEqual(row["phantoms_killed"], 1)
+        self.assertEqual(row["fused_phantoms_killed"], 0)
+
+    def test_fused_empty_energy_window_counts_unsettled(self):
+        # players_settled_before is False on an empty window — a phantom with no energy samples
+        # before its start must NOT read as settled (matches segment.py's serve-cue semantics).
+        gt = [(10.0, 14.0)]
+        pred = [(10.0, 14.0), (20.0, 21.5)]
+        swings = [{"t": 11.0, "track": 1, "strength": 6.0}]
+        energy = [(9.7, 1.0)]  # nothing in [19.5, 20.0)
+        row = veto_operating_points(swings, pred, gt, thresholds=[4.0], player_energy=energy)[4.0]
+        self.assertEqual(row["fused_phantoms_killed"], 1)
+
+    def test_settled_counts(self):
+        gt = [(10.0, 14.0), (30.0, 34.0)]
+        pred = [(10.0, 14.0), (30.0, 34.0), (50.0, 51.0)]
+        energy = [(9.7, 1.0),     # settled before gt rally 1
+                  (29.7, 12.0),   # moving before gt rally 2
+                  (49.7, 2.0)]    # settled before the phantom
+        rep = settled_counts(pred, gt, energy)
+        self.assertEqual(rep["settle_kmh"], 4.0)
+        self.assertEqual(rep["gt_settled"], 1)
+        self.assertEqual(rep["gt_total"], 2)
+        self.assertEqual(rep["phantom_settled"], 1)
+        self.assertEqual(rep["phantom_total"], 1)
 
 
 if __name__ == "__main__":

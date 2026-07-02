@@ -21,6 +21,8 @@ from __future__ import annotations
 from statistics import median
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from .rally.segment import SETTLE_KMH, SETTLE_WINDOW_S, players_settled_before
+
 Span = Tuple[float, float]
 
 
@@ -236,12 +238,23 @@ def rally_max_strengths(swings: Sequence[dict], spans: Sequence[Span], margin_s:
 
 def veto_operating_points(swings: Sequence[dict], pred: Sequence[Span], gt: Sequence[Span],
                           thresholds: Sequence[float], margin_s: float = 0.5,
-                          min_overlap_s: float = 0.2) -> Dict[float, dict]:
+                          min_overlap_s: float = 0.2,
+                          player_energy: Optional[Sequence] = None) -> Dict[float, dict]:
     """Direct veto operating curve per candidate threshold: how many trainer-approved rallies
     carry a swing ≥ thr within ±margin_s (must be ALL — anything less is a hard-gate `missed`),
     and how many machine phantoms (predictions with no GT overlap) carry none (the kill rate).
-    Uses the same GT/prediction data as the baseline, so the numbers translate 1:1 to T7."""
+    Uses the same GT/prediction data as the baseline, so the numbers translate 1:1 to T7.
+
+    With ``player_energy`` (``[(t_s, kmh)]``, the serve cue's series) each row additionally
+    scores the FUSED rule `swing ≥ thr OR players_settled_before(t_start)` at the production
+    serve-cue defaults: a real serve follows a settled instant, while the measured phantom
+    classes (pickup toss, walk-back) mostly don't — so settledness can protect quiet real
+    rallies and let thr rise above the naive missed==0 pin point (4/76 kills)."""
     phantoms = phantom_spans(pred, gt, min_overlap_s)
+    settled_gt = settled_ph = None
+    if player_energy is not None:  # threshold-independent — computed once, outside the sweep
+        settled_gt = [players_settled_before(g[0], player_energy) for g in gt]
+        settled_ph = [players_settled_before(p[0], player_energy) for p in phantoms]
     out: Dict[float, dict] = {}
     for thr in thresholds:
         ts = [s["t"] for s in swings if s["strength"] >= thr]
@@ -249,10 +262,34 @@ def veto_operating_points(swings: Sequence[dict], pred: Sequence[Span], gt: Sequ
         def hit(span: Span) -> bool:
             return any(span[0] - margin_s <= t <= span[1] + margin_s for t in ts)
 
-        out[thr] = {"rallies_covered": sum(1 for g in gt if hit(g)), "gt_total": len(gt),
-                    "phantoms_killed": sum(1 for p in phantoms if not hit(p)),
-                    "phantom_total": len(phantoms)}
+        row = {"rallies_covered": sum(1 for g in gt if hit(g)), "gt_total": len(gt),
+               "phantoms_killed": sum(1 for p in phantoms if not hit(p)),
+               "phantom_total": len(phantoms)}
+        if player_energy is not None:
+            row["fused_rallies_covered"] = sum(
+                1 for i, g in enumerate(gt) if hit(g) or settled_gt[i])
+            row["fused_phantoms_killed"] = sum(
+                1 for i, p in enumerate(phantoms) if not (hit(p) or settled_ph[i]))
+        out[thr] = row
     return out
+
+
+def settled_counts(pred: Sequence[Span], gt: Sequence[Span], player_energy: Sequence,
+                   min_overlap_s: float = 0.2, settle_kmh: float = SETTLE_KMH,
+                   settle_window_s: float = SETTLE_WINDOW_S) -> dict:
+    """Settledness split on its own, threshold-free: how many trainer-approved rallies vs
+    phantoms start from a settled instant (`players_settled_before` at ``settle_kmh``). Judges
+    the cue's separating power independently of any swing threshold; the CLI runs a small kmh
+    grid so one Mac run also answers whether a looser/tighter settle bar separates better."""
+    phantoms = phantom_spans(pred, gt, min_overlap_s)
+
+    def settled(span: Span) -> bool:
+        return players_settled_before(span[0], player_energy, settle_kmh, settle_window_s)
+
+    return {"settle_kmh": settle_kmh,
+            "gt_settled": sum(1 for g in gt if settled(g)), "gt_total": len(gt),
+            "phantom_settled": sum(1 for p in phantoms if settled(p)),
+            "phantom_total": len(phantoms)}
 
 
 def format_report(rep: dict) -> str:
