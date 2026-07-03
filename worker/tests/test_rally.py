@@ -21,6 +21,22 @@ def line(t0, x0, y0, dx, dy, n, dt=1 / 30, conf=0.7):
     return [det(t0 + i * dt, x0 + i * dx, y0 + i * dy, conf=conf) for i in range(n)]
 
 
+def rally_with_landing(t0=0.0, u=0.5, v=0.9, n_flat=4):
+    """A full rally whose tail is a visible landing: level flight → descent → at rest on the floor.
+
+    The resting detections carry the landing's court (u, v); in-flight ones carry a bogus (0.3, 0.3)
+    to prove the landing position comes from the contact detection, not the flight."""
+    dets = line(t0, 0.10, 0.30, 0.01, 0.0, 12)
+    t, x, y = t0 + 12 / 30, 0.10 + 12 * 0.01, 0.30
+    for _ in range(5):                       # descent (vy ≈ 0.6 norm/s)
+        dets.append(det(t, x, y, u=0.3, v=0.3))
+        t, x, y = t + 1 / 30, x + 0.01, y + 0.02
+    for _ in range(n_flat):                  # at rest — floor contact
+        dets.append(det(t, x, y, u=u, v=v))
+        t, y = t + 1 / 30, y + 0.001
+    return dets
+
+
 class TestGroupTrajectories(unittest.TestCase):
     def test_temporal_gap_splits_runs(self):
         dets = line(0.0, 0.1, 0.5, 0.01, 0.0, 3) + line(2.0, 0.2, 0.5, 0.01, 0.0, 3)
@@ -163,6 +179,46 @@ class TestBuildRallies(unittest.TestCase):
         end_ev = next(e for e in out["events"] if e["type"] == "rally_end")
         self.assertIn("u", end_ev["payload"])
         self.assertIn("v", end_ev["payload"])
+
+    def test_every_rally_gets_exactly_one_landing_event(self):
+        out = seg.build_rallies(rally_with_landing())
+        landings = [e for e in out["events"] if e["type"] == "landing"]
+        self.assertEqual(len(landings), 1)
+        p = landings[0]["payload"]
+        self.assertTrue(p["located"])
+        for key in ("call", "line", "u", "v", "px", "py", "margin_cm", "band_cm", "confidence"):
+            self.assertIn(key, p)
+        self.assertEqual(p["call"], "in")            # (0.5, 0.9) is comfortably inside
+        self.assertAlmostEqual(p["u"], 0.5)          # position from the contact det, not the flight
+        self.assertAlmostEqual(p["v"], 0.9)
+        # the event time is the contact time, inside the rally span
+        r = out["rallies"][0]
+        self.assertGreaterEqual(landings[0]["t_s"], r["t_start_s"])
+        self.assertLessEqual(landings[0]["t_s"], r["t_end_s"])
+
+    def test_degraded_landing_is_honest_and_positionless(self):
+        # level flight only — nothing ever descends, so there is no landing to locate
+        out = seg.build_rallies(line(0.0, 0.10, 0.5, 0.004, 0.0, 18))
+        p = next(e for e in out["events"] if e["type"] == "landing")["payload"]
+        self.assertFalse(p["located"])
+        self.assertEqual(p["call"], "uncertain")
+        self.assertNotIn("u", p)                     # never a fabricated position
+
+    def test_discipline_switches_the_boundary(self):
+        # 50 cm outside the singles side line = 4 cm inside the doubles line:
+        # out for singles (past the ±45 cm band), uncertain for doubles (well inside the band)
+        u = 0.46 / 6.10 - 0.50 / 6.10
+        singles = seg.build_rallies(rally_with_landing(u=u, v=0.9))
+        doubles = seg.build_rallies(rally_with_landing(u=u, v=0.9), discipline="doubles")
+        p_s = next(e for e in singles["events"] if e["type"] == "landing")["payload"]
+        p_d = next(e for e in doubles["events"] if e["type"] == "landing")["payload"]
+        self.assertEqual(p_s["call"], "out")
+        self.assertEqual(p_d["call"], "uncertain")
+
+    def test_winner_side_stays_none_in_pure_logic(self):
+        # even for a clear out landing — mapping halves to sides is the glue's job (needs match_players)
+        out = seg.build_rallies(rally_with_landing(u=-0.2, v=0.9))
+        self.assertIsNone(out["rallies"][0]["winner_side"])
 
     def test_dead_time_between_rallies_excluded(self):
         rally1 = line(0.0, 0.10, 0.5, 0.004, 0.0, 18)        # t 0.0..0.566

@@ -36,7 +36,10 @@ export interface PlayerMatchStatsRow {
   zones: Zones; timeline: number[]; heat: HeatKernel[]; heatmap_uri: string | null
   fastest: number | null
 }
-export interface PlayerShotStatRow { match_id: string; player_id: string; shot_type: string; count: number }
+export interface PlayerShotStatRow {
+  match_id: string; player_id: string; shot_type: string; count: number
+  errors: number | null // Aus-Schläge aus Rally-Ende-Landungen (unter shot_type 'unknown' bis Stage 7)
+}
 export interface PairMatchStatRow { match_id: string; side: Side; label: string; fb: number; ss: number; rot: number }
 export interface MatchRallyStatsRow {
   match_id: string; count: number; avg_shots: number; avg_sec: number
@@ -77,7 +80,10 @@ export interface PairStat { side: Side; label: string; fb: number; ss: number; r
 export interface ReportPlayer {
   playerId: string // needed to map a player to its track_keyframes subject ('player:<playerId>')
   name: string; first: string; isViewer: boolean; side: Side
-  stats: Omit<PlayerMatchStatsRow, 'match_id' | 'player_id'> & { shots: ShotPair[] }
+  stats: Omit<PlayerMatchStatsRow, 'match_id' | 'player_id'> & {
+    shots: ShotPair[]
+    outShots: number | null // „Aus-Schläge" (Schätzung, Untergrenze); null = Landing-Feature nie gelaufen
+  }
 }
 export interface ReportMeta {
   id: string; dateLabel: string; weekday: string | null; dd: string; discipline: Discipline

@@ -156,9 +156,14 @@ labeler are needed before a quantitative boundary/hit-F1 claim.
 *Accept:* rally boundaries within **±0.5 s** of hand-labeled boundaries *(provisional until the rally labeler
 exists — today's only evidence is the game1 6/6 spot-check above; initial target, revise with labels)*.
 
-**Landing + in/out (SPEC — `features/shuttle-landing-inout.md`):** the floor contact is the one moment the ground
-homography is valid (the shuttle is on the floor), so in/out reduces to "which pixel is the landing pixel, how
-sure". Estimate-grade „Aus-Schläge"; the match score stays human-entered.
+**Landing + in/out (BUILT 2026-07-03 — `features/shuttle-landing-inout.md`):** the floor contact is the one
+moment the ground homography is valid (the shuttle is on the floor), so in/out reduces to "which pixel is the
+landing pixel, how sure". `worker/rally/landing.py` (pure, unit-tested): descent-flattens-to-rest selection in
+image space, honest `located=false` degradation (never extrapolated), in/out vs the discipline's boundary with
+a ±45 cm band, out-landings → `rallies.winner_side` + `player_shot_stats.errors` (`shot_type='unknown'` until
+stage 7; singles only). Estimate-grade „Aus-Schläge"; the match score stays human-entered. `LANDING_*`
+thresholds are untuned until a real-footage re-run; no located-rate/precision claim before the landing
+answer key exists.
 
 ## Stage 7 — Stroke classification (FR-21/22/23)
 **BST (MIT, public weights)** — consumes player skeleton + shuttle xy + court xy (tiny transformer; hours to train
