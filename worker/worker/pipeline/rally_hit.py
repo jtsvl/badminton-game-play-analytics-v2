@@ -70,6 +70,21 @@ def _player_energy(tracks_df):
     return energy
 
 
+def _swings_from_frames(pose_df, tracks_df, frame_t: dict) -> list:
+    """Swing-activity events from already-loaded pose/tracks frames, restricted to gate_track's
+    kept player tracks (rows for any other track id — tracker noise, never assigned a role — are
+    dropped). Pure glue over swing_events; module-level so eval_rally reuses the identical join
+    (not a duplicate loading path)."""
+    from ..rally.swing import swing_events
+
+    kept = set(tracks_df["track_id"].unique().to_list())
+    rows = [{"t": frame_t[int(r["frame"])], "track": int(r["track"]),
+             "kp": r["kp"], "kp_score": r["kp_score"]}
+            for r in pose_df.iter_rows(named=True)
+            if int(r["track"]) in kept and int(r["frame"]) in frame_t]
+    return swing_events(rows)
+
+
 def run(ctx) -> None:
     cfg = ctx["cfg"]
     job = ctx["job"]
@@ -87,13 +102,20 @@ def run(ctx) -> None:
     dets = load_dets(shuttle_path, frame_w, frame_h)
 
     player_energy = None
+    swings = None
     tracks_path = ctx.get("tracks_path") or str(cache / "tracks.parquet")
     if Path(tracks_path).exists():
         tdf = pl.read_parquet(tracks_path)
         if not tdf.is_empty():
             player_energy = _player_energy(tdf)
+            pose_path = ctx.get("pose_path") or str(cache / "pose.parquet")
+            if Path(pose_path).exists():
+                pdf = pl.read_parquet(pose_path)
+                if not pdf.is_empty():
+                    frame_t = {int(f["frame"]): float(f["t"]) for f in manifest["frames"]}
+                    swings = _swings_from_frames(pdf, tdf, frame_t) or None
 
-    out = seg.build_rallies(dets, player_energy)
+    out = seg.build_rallies(dets, player_energy, swings)
     rallies, events = out["rallies"], out["events"]
     in_play = sum(max(0.0, r["t_end_s"] - r["t_start_s"]) for r in rallies)
     clip_s = manifest["frames"][-1]["t"] if manifest.get("frames") else 0.0

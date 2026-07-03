@@ -21,7 +21,8 @@ from __future__ import annotations
 from statistics import median
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .rally.segment import SETTLE_KMH, SETTLE_WINDOW_S, players_settled_before
+from .rally.segment import (BRIDGE_S, RALLY_SERVE_EXCLUSION_S, RALLY_SWING_BRIDGE_S, SETTLE_KMH,
+                            SETTLE_WINDOW_S, players_settled_before)
 
 Span = Tuple[float, float]
 
@@ -107,22 +108,73 @@ def span_stats(spans: Sequence[Span]) -> dict:
             "gaps_s": gaps}
 
 
-def split_gaps(pred: Sequence[Span], gt: Sequence[Span], min_overlap_s: float = 0.2) -> List[float]:
-    """Interior gaps (seconds) of every split GT rally: for each GT rally covered by ≥2
-    predictions, the time gaps between its consecutive prediction fragments. On a flags-off
-    baseline these are exactly the gaps the trainer bridged by merging — the empirical basis
-    for the bridge cap RALLY_SWING_BRIDGE_S."""
+def split_gap_spans(pred: Sequence[Span], gt: Sequence[Span],
+                    min_overlap_s: float = 0.2) -> List[Span]:
+    """(gap_start, gap_end) of every interior gap of a split GT rally: for each GT rally covered
+    by ≥2 predictions, the span between consecutive prediction fragments — the "should bridge"
+    population (T8): on a flags-off baseline these are exactly the gaps the trainer bridged by
+    merging. Unlike ``split_gaps`` (durations only) this keeps the timestamps a swing search
+    needs (``bridge_gap_strengths``)."""
     frags: Dict[int, List[Span]] = {}
     for p in pred:
         hits = [j for j, g in enumerate(gt) if _overlap_s(p, g) >= min_overlap_s]
         if len(hits) == 1:
             frags.setdefault(hits[0], []).append(p)
-    gaps: List[float] = []
-    for spans in frags.values():
-        if len(spans) >= 2:
-            ordered = sorted(spans)
-            gaps.extend(b[0] - a[1] for a, b in zip(ordered, ordered[1:]))
-    return sorted(gaps)
+    spans: List[Span] = []
+    for fspans in frags.values():
+        if len(fspans) >= 2:
+            ordered = sorted(fspans)
+            spans.extend((a[1], b[0]) for a, b in zip(ordered, ordered[1:]))
+    return sorted(spans)
+
+
+def split_gaps(pred: Sequence[Span], gt: Sequence[Span], min_overlap_s: float = 0.2) -> List[float]:
+    """Interior gaps (seconds) of every split GT rally — durations only; see ``split_gap_spans``
+    for the (start, end) spans. The empirical basis for the bridge cap RALLY_SWING_BRIDGE_S."""
+    return sorted(e - s for s, e in split_gap_spans(pred, gt, min_overlap_s))
+
+
+def real_gap_spans(gt: Sequence[Span]) -> List[Span]:
+    """(gap_start, gap_end) between every pair of consecutive real (GT) rallies — the "must NOT
+    bridge" population (T8): genuine silences between distinct real rallies. Needs no
+    predictions, only the trainer-approved rally list."""
+    ordered = sorted(gt)
+    return [(a[1], b[0]) for a, b in zip(ordered, ordered[1:])]
+
+
+def bridge_gap_strengths(swings: Sequence[dict], gap_spans: Sequence[Span],
+                         serve_exclusion_s: float = 0.75) -> List[dict]:
+    """Per-gap max swing strength in ``[gap_start, gap_end − serve_exclusion_s]`` — the exact
+    quantity ``segment.py``'s swing-bridge rule (``_swing_in_gap``) thresholds on. Run on
+    ``split_gap_spans`` (should-bridge) vs ``real_gap_spans`` (must-not) it is the bridge-side
+    analogue of ``rally_max_strengths``. ``max_strength=None`` = no qualifying sample (a pose
+    dropout, or the gap is too short to leave room outside the exclusion zone)."""
+    records: List[dict] = []
+    for gs, ge in gap_spans:
+        hi = ge - serve_exclusion_s
+        inw = [s for s in swings if gs <= s["t"] <= hi] if hi > gs else []
+        best = max(inw, key=lambda s: s["strength"], default=None)
+        records.append({"gap_start": gs, "gap_end": ge, "gap_s": ge - gs, "n_samples": len(inw),
+                        "max_strength": best["strength"] if best else None})
+    return records
+
+
+def bridge_operating_points(swings: Sequence[dict], split_gap_spans_: Sequence[Span],
+                            real_gap_spans_: Sequence[Span], thresholds: Sequence[float],
+                            serve_exclusion_s: float = 0.75) -> Dict[float, dict]:
+    """Bridge operating curve per candidate threshold: how many trainer-merged (split) gaps carry
+    a swing ≥ thr in their bridgeable interior (recovered splits), and how many genuine
+    inter-rally gaps in the same candidate range would be incorrectly glued (``false_merges`` —
+    the hard gate that must stay 0 before RALLY_SWING_BRIDGE_MIN_STRENGTH is ever set)."""
+    def covers(gs: float, ge: float, thr: float) -> bool:
+        hi = ge - serve_exclusion_s
+        return hi > gs and any(gs <= s["t"] <= hi and s["strength"] >= thr for s in swings)
+
+    return {thr: {"splits_bridged": sum(1 for gs, ge in split_gap_spans_ if covers(gs, ge, thr)),
+                 "splits_total": len(split_gap_spans_),
+                 "false_merges": sum(1 for gs, ge in real_gap_spans_ if covers(gs, ge, thr)),
+                 "real_gaps_total": len(real_gap_spans_)}
+            for thr in thresholds}
 
 
 def _pctiles(values: Sequence[float]) -> dict:
@@ -335,7 +387,8 @@ def gt_from_db(store, slug: str) -> Tuple[List[Span], dict]:
 def predict_from_cache(video_id: str, cfg) -> List[Span]:
     """Re-run build_rallies from the cached parquets through rally_hit's own loaders — NOT a
     duplicate loading path, else the 'flags-off baseline reproduces the pre-review machine
-    output' claim silently breaks. Knobs come from env exactly like the pipeline."""
+    output' claim silently breaks. Knobs (incl. RALLY_SWING_BRIDGE) come from env exactly like
+    the pipeline, so this single path stays truthful once the swing-bridge flag flips on."""
     import json
     from pathlib import Path
 
@@ -348,7 +401,7 @@ def predict_from_cache(video_id: str, cfg) -> List[Span]:
 
     dets = rally_hit.load_dets(str(cache / "shuttle.parquet"), frame_w, frame_h)
 
-    out = seg.build_rallies(dets, load_player_energy(video_id, cfg))
+    out = seg.build_rallies(dets, load_player_energy(video_id, cfg), load_swings(video_id, cfg))
     return [(float(r["t_start_s"]), float(r["t_end_s"])) for r in out["rallies"]]
 
 
@@ -368,6 +421,29 @@ def load_player_energy(video_id: str, cfg) -> Optional[list]:
 
     tdf = pl.read_parquet(tracks_path)
     return rally_hit._player_energy(tdf) if not tdf.is_empty() else None
+
+
+def load_swings(video_id: str, cfg) -> Optional[list]:
+    """Production-shaped swing events (thresholded + merged, via rally_hit's own join) — the
+    exact events the pipeline's swing-bridge rule sees. None when tracks/pose parquets are
+    absent or empty (same guard as ``load_player_energy``)."""
+    import json
+    from pathlib import Path
+
+    from .pipeline import rally_hit
+
+    cache = Path(cfg.frame_cache_dir).expanduser() / str(video_id)
+    tracks_path, pose_path = cache / "tracks.parquet", cache / "pose.parquet"
+    if not tracks_path.exists() or not pose_path.exists():
+        return None
+    import polars as pl  # lazy
+
+    tdf, pdf = pl.read_parquet(tracks_path), pl.read_parquet(pose_path)
+    if tdf.is_empty() or pdf.is_empty():
+        return None
+    manifest = json.loads((cache / "frames.json").read_text())
+    frame_t = {int(f["frame"]): float(f["t"]) for f in manifest["frames"]}
+    return rally_hit._swings_from_frames(pdf, tdf, frame_t) or None
 
 
 def load_swing_samples(video_id: str, cfg) -> Tuple[List[dict], Dict[int, str]]:
@@ -453,6 +529,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--swing-hist", action="store_true",
                     help="swing-strength tuning report (in/between + serve-window near/far + "
                          "per-rally max gt/phantom + settled counts + swing/fused veto sweep)")
+    ap.add_argument("--bridge-hist", action="store_true",
+                    help="bridge-gap tuning report (T8): split-gap (should-bridge) vs real-gap "
+                         "(must-not-bridge) swing-strength distributions + operating-point sweep")
     args = ap.parse_args(argv)
 
     cfg = load_config()
@@ -528,6 +607,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 line += (f"  |  fused {pt['fused_rallies_covered']:3}/{pt['gt_total']:<3} "
                          f"{fgate} kills {pt['fused_phantoms_killed']:3}/{pt['phantom_total']}")
             print(line)
+        return 0
+
+    if args.bridge_hist:
+        samples, _ = load_swing_samples(video["id"], cfg)
+        splits = split_gap_spans(pred, gt)
+        # candidate range only: gaps a swing-bridge could ever act on (longer real gaps are
+        # never at risk — they sit well outside RALLY_SWING_BRIDGE_S regardless of threshold).
+        cand_reals = [(gs, ge) for gs, ge in real_gap_spans(gt) if BRIDGE_S < ge - gs <= RALLY_SWING_BRIDGE_S]
+        split_recs = bridge_gap_strengths(samples, splits, RALLY_SERVE_EXCLUSION_S)
+        real_recs = bridge_gap_strengths(samples, cand_reals, RALLY_SERVE_EXCLUSION_S)
+        sweep = bridge_operating_points(samples, splits, cand_reals, SWEEP_THRESHOLDS,
+                                        RALLY_SERVE_EXCLUSION_S)
+        if args.json:
+            print(json.dumps({"slug": args.slug, "split_gaps": split_recs, "real_gaps": real_recs,
+                              "sweep": {str(k): v for k, v in sweep.items()}}, indent=2))
+            return 0
+        print(f"[{args.slug}] bridge-gap tuning report (tl/s, T8; candidate range "
+              f"{BRIDGE_S:.2f}–{RALLY_SWING_BRIDGE_S:.2f}s)")
+        print("=" * 68)
+        for name, recs in (("should-bridge (trainer-merged splits)", split_recs),
+                          ("must-NOT-bridge (real gaps, same range)", real_recs)):
+            s = _rally_max_summary(recs)
+            print(f"{name}: n={len(recs):3}  NO-SWING={s['n_no_swing']:2}  {_fmt_pct(s['pctiles'])}")
+        print("-" * 68)
+        print("bridge sweep (swing >= thr in gap interior, excl. last "
+              f"{RALLY_SERVE_EXCLUSION_S:.2f}s before the gap ends):")
+        for thr, pt in sweep.items():
+            gate = "OK  " if pt["false_merges"] == 0 else "MISS"
+            print(f"  thr={thr:4.2f}  bridges {pt['splits_bridged']:3}/{pt['splits_total']:<3}"
+                 f"  false-merges {pt['false_merges']:3}/{pt['real_gaps_total']:<3} {gate}")
         return 0
 
     rep = evaluate(pred, gt, tol_s=args.tol)
