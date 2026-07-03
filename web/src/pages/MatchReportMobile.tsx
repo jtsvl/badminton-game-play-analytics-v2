@@ -37,7 +37,9 @@ export function MatchReportMobile({ report, tab, setTab, slug }: Props) {
   sections.push(<CourtCoverageCard spots={s.heat} sub={coverageSub} width={222} />)
   sections.push(<ZoneCard zones={s.zones} />)
   sections.push(<ActivityCard points={s.timeline} />)
-  if (s.shots.length > 0) sections.push(<ShotMixCard shots={s.shots} fastest={s.fastest} />)
+  // outShots allein (ohne Schlagtypen, bis Stage 7) rendert die Karte im Leerzustand mit Aus-Schläge-foot
+  if (s.shots.length > 0 || s.outShots != null)
+    sections.push(<ShotMixCard shots={s.shots} fastest={s.fastest} outShots={s.outShots} />)
   const canReviewRallies = ['review', 'done'].includes(report.meta.status)
   if (report.rallies)
     sections.push(

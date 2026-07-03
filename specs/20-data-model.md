@@ -11,7 +11,9 @@ sync). Incorporates lessons adopted from the prior v1 schema (see "v1 lessons" a
   `shot_type ∈ {clear,smash,drop,net,drive,lift,serve,unknown}` → German labels (`web/src/lib/labels.ts`).
 - **Court coords** normalized `u,v ∈ [0,1]` (u left→right, v far→near baseline). Never store pixel coords on web-facing rows.
 - **Heatmaps** = gaussian-kernel list `heat=[{x,y,w,s}]` (frontend `CourtHeatmap` shape); optional raster in `heatmap_uri`/`placement_uri`.
-- **Shot distribution** = `player_shot_stats` rows → web builds `shots:[[shot_type,count]]` (sorted desc).
+- **Shot distribution** = `player_shot_stats` rows → web builds `shots:[[shot_type,count]]` (sorted desc,
+  **`count > 0` only** — errors-only rows from the landing feature must not render a zero bar); per-player
+  „Aus-Schläge" = the summed `errors` columns (`web/src/lib/landing.ts`, null ⇒ hidden).
 - **Units in names** (`*_s`, `*_m`, `*_pct`, `reprojection_error_m`); ML-derived rows carry `confidence`.
 - `is_test` separates demo/dev data from real matches.
 
@@ -54,7 +56,9 @@ heatmap_uri? · placement_uri? · fastest?  (ESTIMATE)` — unique (match_id, pl
 ### player_shot_stats
 `id · match_id · player_id · shot_type (canonical) · count · share_pct? · winners? · errors? · placements jsonb?` — unique (match_id, player_id, shot_type)
 > `errors` is sourced from rally-ending **out**-landings per shot_type (`features/shuttle-landing-inout.md`,
-> SPEC); the web sums them into „Aus-Schläge". An **estimate** — partial coverage (occlusion/sampling), a lower bound.
+> BUILT — under `shot_type='unknown'` until stage 7 attributes real types; singles only; the worker writes
+> only the `errors` column, so a future stroke-stage `count` on the same row is untouched); the web sums
+> them into „Aus-Schläge". An **estimate** — partial coverage (occlusion/sampling), a lower bound.
 
 ### pair_match_stats  (doubles)
 `id · match_id · side∈{A,B} · label · fb · ss · rot` — unique (match_id, side)
@@ -73,8 +77,10 @@ heatmap_uri? · placement_uri? · fastest?  (ESTIMATE)` — unique (match_id, pl
 - `hit` payload `{player_id, shot_type, speed_kmh, from:[u,v], to:[u,v]}`.
 - Stage 6 (`rally_hit`) emits `serve` `{settled:bool}`, provisional `hit` `{provisional:true}`, and
   `rally_end` `{x,y,u,v}` (image + court floor-contact candidate); stage 7 refines `hit.shot_type`.
-- `landing` (SPEC — `features/shuttle-landing-inout.md`) `{located,call:in|out|uncertain,line,u?,v?,px?,py?,margin_cm?,band_cm,confidence}`
-  — the rally-ending floor contact as an **estimate** („Schätzung"), never the match score (`'bounce'` reserved for raw mid-rally touches).
+- `landing` (BUILT — `features/shuttle-landing-inout.md`) `{located,call:in|out|uncertain,line,u?,v?,px?,py?,margin_cm?,band_cm,confidence,reason?}`
+  — the rally-ending floor contact as an **estimate** („Schätzung"), never the match score (`'bounce'` reserved
+  for raw mid-rally touches). `px,py` are **normalized** image coords (like `rally_end`'s x,y); `reason` only on
+  degraded (`located=false`) landings; exactly one landing event per rally.
 
 ### track_keyframes  (overlay, ~10 Hz)
 `id · video_id · subject ('player:<id>'|'shuttle') · data jsonb [{t,u,v}]` — unique (video_id, subject)
@@ -98,9 +104,10 @@ params jsonb? · error? · claimed_by? · claimed_at? · started_at? · finished
 ## Views
 ### match_rally_stats  (`security_invoker`)
 Per match → `{count, avg_shots, avg_sec, long_shots, long_sec}` (duration derived from `t_end_s - t_start_s`).
-`endLine` (ending-shot % summary) is computed in the app from `rallies.end_shot_type`. `outLine`
-(out-landing % summary, „Aus-Schläge") is likewise **app-derived** from `events.type='landing'` (SPEC) —
-neither is a stored column.
+`endLine` (ending-shot % summary) is computed in the app from `rallies.end_shot_type`. An `outLine`
+(out-landing % summary) would likewise be **app-derived** from `events.type='landing'` — **deferred**
+(user decision 2026-07-03; „Aus-Schläge" ships as the Schlagverteilung foot line from
+`player_shot_stats.errors` instead). Neither is a stored column.
 
 ## RLS
 - `service_role` (worker) bypasses RLS.

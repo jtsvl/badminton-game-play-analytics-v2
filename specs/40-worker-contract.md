@@ -51,17 +51,19 @@ must not skip the PlayerReview confirmation; editing at `done` stays `done`.
 | pose | frames, detections | pose.parquet `(frame,track,kp[],kp_score[],foot_x,foot_y,foot_conf,foot_source)` |
 | gate_track | detections, pose, homography | tracks.parquet `(t,track_id,u,v,role,source)` (in-court only) |
 | shuttle | frames, calibration (H + `mask_polygon_px`) | shuttle.parquet `(t,u,v,visibility[,frame,px,py,conf,tracker])` |
-| rally_hit | shuttle, tracks | `rallies` + `events`(serve/hit/rally_end); debug `rallies.parquet`/`events.parquet` |
+| rally_hit | shuttle, tracks, match_players (side binding) | `rallies` (+ `winner_side` from out landings) + `events`(serve/hit/rally_end/landing); debug `rallies.parquet`/`events.parquet` |
 | stroke | pose, shuttle, court xy | `events`(hit shot_type), `player_shot_stats` |
 | aggregate | tracks, **rallies** (in-rally gating), shots | `player_match_stats`, `pair_match_stats`, `match_rally_stats` inputs |
 | overlay | tracks, shuttle, hits | `track_keyframes` (~10 Hz), hit markers |
 | rally_sync | DB `rallies` + `events` (authoritative, incl. trainer edits) | cache `rallies.parquet`/`events.parquet` + re-uploaded artifacts, `ctx[rallies_path/events_path]`; `rally_corrections` rows when `job.params.corrections` is present (FR-35 eval corpus, `features/rally-shot-review.md`) |
 | proxy | source video (local `videos/` or bucket) | `analysis-artifacts/<video_id>/proxy_720p.mp4` (TUS chunked — Kong kills single requests at ~60 s), `match_videos.proxy_path`. ffmpeg host dep; **never raises** (`features/video-proxy.md`) |
-| landing *(SPEC — `features/shuttle-landing-inout.md`)* | shuttle, rally-end (u,v) | `events`(type=landing) → `player_shot_stats.errors` |
-
 `rally_hit` runs all trajectory/serve logic in **normalized image space** (the ground homography can't place an
 airborne shuttle); it writes the debug parquets so `aggregate` can gate player movement to in-rally spans
-(whole-clip fallback when no rallies). `landing` is a **future sub-step** of stage 6, not a wired stage.
+(whole-clip fallback when no rallies). Landing + in/out (BUILT — `features/shuttle-landing-inout.md`) is a
+**sub-step of stage 6, not a wired stage**: `build_rallies` emits one `landing` event per rally
+(`worker/rally/landing.py`), `rally_hit` sets `winner_side` from located out landings via the
+track_label↔role binding, and `aggregate` writes `player_shot_stats.errors` (`shot_type='unknown'` until
+stage 7; singles only; 0 overwrites stale counts after trainer drops).
 
 **Intermediate artifacts = Parquet** in `analysis-artifacts` storage (or local cache), keyed by `video_id`.
 Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web's only read surface).
@@ -84,7 +86,7 @@ Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web'
   **reserved, currently unset** value (kept to avoid a pointless migration).
 - Estimates (`fastest`, speeds) carry their estimate nature (the UI labels them; don't present as measured).
 - Stage-6 rally fields (`winner_side`, `end_shot_type`, `shot_count`) and the landing in/out call
-  (`events.type='landing'`, SPEC) are **estimates decoupled from the human-entered `matches.score`** — surfaced
+  (`events.type='landing'`, BUILT) are **estimates decoupled from the human-entered `matches.score`** — surfaced
   as „Schätzung" with a confidence/uncertainty band, never as an umpire call or the scoreboard.
 - Phase-4 recovery is self-labelling: `tracks.parquet.source` ∈ `detected`/`reid`/`interp` and
   `pose.parquet.foot_source` ∈ `ankle`/`head`/`none` mark re-ID'd, interpolated or head-grounded positions so the
@@ -108,6 +110,11 @@ was trained on that crop, see `specs/fix-later.md`), `SHUTTLE_BBOX_MARGIN`, `SHU
 (0.3, overlay gap cap), `SHUTTLE_CHUNK_FRAMES` (240 — bounded-memory chunked prediction, see
 features/shuttle-tracking.md; 0 = legacy single pass), `WASB_REPO`/`WASB_MODEL`,
 `TRACKNETV3_REPO`/`TRACKNETV3_MODEL` (vendored repo + weights, git-ignored).
+Landing/in-out (stage-6 sub-step, `features/shuttle-landing-inout.md` — **all defaults untuned until a
+real-footage run**): `LANDING_WINDOW_S` (0.5), `LANDING_MAX_WINDOW_DETS` (8), `LANDING_MIN_DETS` (4),
+`LANDING_MAX_END_GAP_FRAMES` (2), `LANDING_EDGE_MARGIN` (0.04 → located=false),
+`LANDING_UNCERTAIN_EDGE` (0.08 → forced uncertain), `LANDING_FLAT_VY_ABS` (0.25 norm/s),
+`LANDING_FLAT_VY_FRAC` (0.35), `LANDING_BAND_CM` (45), `LANDING_NET_MARGIN_M` (1.0).
 **Promoted-weights convention:** `models/weights/shuttle/ckpts/TrackNet_best.pt` is
 the production checkpoint the code loads by default; the upstream baseline stays byte-identical as
 `TrackNet_baseline.pt`, and each promoted fine-tune also keeps a named copy (e.g. `TrackNet_ft_session1.pt`)
