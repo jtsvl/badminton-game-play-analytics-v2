@@ -9,7 +9,9 @@ bridged), which are hard flip gates.
 import unittest
 
 from worker.eval_rally import (boundary_prf, confusion, evaluate, format_report, gt_from_db,
-                               span_stats, split_gaps, swing_strength_split, veto_operating_points)
+                               phantom_spans, rally_max_strengths, serve_window_report,
+                               settled_counts, span_stats, split_gaps, swing_strength_split,
+                               veto_operating_points)
 
 
 class TestBoundaryPRF(unittest.TestCase):
@@ -206,6 +208,167 @@ class TestSwingTuning(unittest.TestCase):
         swings = [{"t": 9.7, "track": 1, "strength": 5.0}]
         pts = veto_operating_points(swings, [(10.0, 11.0)], gt, thresholds=[4.0], margin_s=0.5)
         self.assertEqual(pts[4.0]["rallies_covered"], 1)
+
+
+class TestServeWindow(unittest.TestCase):
+    def test_serve_window_reports_per_rally_max_and_attribution(self):
+        gt = [(10.0, 15.0), (30.0, 34.0)]
+        half = {1: "near", 2: "far"}
+        swings = [
+            {"t": 10.2, "track": 1, "strength": 4.0},   # rally 1: near serve swing wins
+            {"t": 10.3, "track": 2, "strength": 2.0},
+            {"t": 29.8, "track": 2, "strength": 5.0},   # rally 2: far swing just before t_start
+            {"t": 30.1, "track": 1, "strength": 1.0},
+            {"t": 12.5, "track": 2, "strength": 9.0},   # mid-rally clear — outside both windows
+        ]
+        rep = serve_window_report(swings, gt, half)
+        r1, r2 = rep["per_rally"]
+        self.assertEqual(r1["n_samples"], 2)
+        self.assertEqual(r1["max_strength"], 4.0)
+        self.assertEqual(r1["best_half"], "near")
+        self.assertAlmostEqual(r1["best_t_rel"], 0.2)
+        self.assertEqual(r2["max_strength"], 5.0)
+        self.assertEqual(r2["best_half"], "far")
+        self.assertAlmostEqual(r2["best_t_rel"], -0.2)
+        self.assertEqual(rep["attribution"], {"near": 1, "far": 1, "none": 0})
+        self.assertEqual(rep["no_sample_rallies"], 0)
+        self.assertEqual(rep["max_by_half"]["near"]["p50"], 4.0)
+        self.assertEqual(rep["max_by_half"]["far"]["p50"], 5.0)
+
+    def test_serve_window_counts_rally_with_no_sample(self):
+        gt = [(10.0, 15.0)]
+        swings = [{"t": 13.0, "track": 1, "strength": 6.0}]  # mid-rally only, serve instant empty
+        rep = serve_window_report(swings, gt, {1: "near"})
+        r = rep["per_rally"][0]
+        self.assertEqual(r["n_samples"], 0)
+        self.assertIsNone(r["max_strength"])
+        self.assertIsNone(r["best_half"])
+        self.assertIsNone(r["best_t_rel"])
+        self.assertEqual(rep["no_sample_rallies"], 1)
+        self.assertEqual(rep["attribution"], {"near": 0, "far": 0, "none": 1})
+
+    def test_serve_window_boundaries_inclusive(self):
+        # Closed window bounds, matching the veto sweep's span±margin test.
+        gt = [(10.0, 15.0)]
+        swings = [
+            {"t": 9.5, "track": 1, "strength": 1.0},    # exactly t_start - pre_s → in
+            {"t": 10.5, "track": 1, "strength": 2.0},   # exactly t_start + post_s → in
+            {"t": 10.51, "track": 1, "strength": 9.0},  # just past → out
+        ]
+        rep = serve_window_report(swings, gt, {1: "near"})
+        self.assertEqual(rep["per_rally"][0]["n_samples"], 2)
+        self.assertEqual(rep["per_rally"][0]["max_strength"], 2.0)
+
+    def test_serve_window_tie_attributes_earliest(self):
+        gt = [(10.0, 15.0)]
+        swings = [
+            {"t": 9.9, "track": 1, "strength": 3.0},
+            {"t": 10.1, "track": 2, "strength": 3.0},
+        ]
+        rep = serve_window_report(swings, gt, {1: "near", 2: "far"})
+        self.assertEqual(rep["per_rally"][0]["best_half"], "near")
+        self.assertAlmostEqual(rep["per_rally"][0]["best_t_rel"], -0.1)
+
+    def test_serve_window_without_half_map(self):
+        gt = [(10.0, 15.0)]
+        swings = [{"t": 10.0, "track": 7, "strength": 4.5}]
+        rep = serve_window_report(swings, gt, half_by_track=None)
+        self.assertEqual(rep["per_rally"][0]["max_strength"], 4.5)
+        self.assertIsNone(rep["per_rally"][0]["best_half"])
+        self.assertEqual(rep["attribution"], {"near": 0, "far": 0, "none": 1})
+
+
+class TestRallyMax(unittest.TestCase):
+    def test_rally_max_record_shape_and_margin(self):
+        spans = [(10.0, 12.0)]
+        swings = [
+            {"t": 9.6, "track": 1, "strength": 5.0},   # inside the pre-margin
+            {"t": 11.0, "track": 2, "strength": 3.0},
+            {"t": 12.5, "track": 1, "strength": 1.0},  # exactly t_end + margin → in
+            {"t": 12.6, "track": 1, "strength": 9.0},  # past the margin → out
+        ]
+        recs = rally_max_strengths(swings, spans, half_by_track={1: "near", 2: "far"})
+        self.assertEqual(len(recs), 1)
+        r = recs[0]
+        self.assertEqual(r["t_start"], 10.0)
+        self.assertEqual(r["span_s"], 2.0)
+        self.assertEqual(r["n_samples"], 3)
+        self.assertEqual(r["max_strength"], 5.0)
+        self.assertEqual(r["best_half"], "near")
+        self.assertAlmostEqual(r["best_t_rel"], -0.4)
+
+    def test_rally_max_none_when_no_samples(self):
+        recs = rally_max_strengths([{"t": 50.0, "track": 1, "strength": 4.0}], [(10.0, 12.0)])
+        r = recs[0]
+        self.assertEqual(r["n_samples"], 0)
+        self.assertIsNone(r["max_strength"])
+        self.assertIsNone(r["best_half"])
+        self.assertIsNone(r["best_t_rel"])
+
+    def test_phantom_spans_matches_veto_definition(self):
+        gt = [(10.0, 20.0)]
+        pred = [(19.81, 25.0),   # 0.19 s overlap < 0.2 → phantom
+                (19.75, 25.0),   # 0.25 s overlap → real
+                (40.0, 42.0)]    # no overlap → phantom
+        ph = phantom_spans(pred, gt)
+        self.assertEqual(ph, [(19.81, 25.0), (40.0, 42.0)])
+        # Consistency lock: the sweep's phantom_total is the same definition by construction.
+        pts = veto_operating_points([], pred, gt, thresholds=[1.0])
+        self.assertEqual(pts[1.0]["phantom_total"], len(ph))
+
+
+class TestFusedVeto(unittest.TestCase):
+    def test_sweep_rows_have_no_fused_keys_without_energy(self):
+        pts = veto_operating_points([], [(0.0, 5.0)], [(0.0, 5.0)], thresholds=[1.0])
+        self.assertNotIn("fused_rallies_covered", pts[1.0])
+        self.assertNotIn("fused_phantoms_killed", pts[1.0])
+
+    def test_fused_saves_settled_quiet_rally_and_kills_unsettled_phantom(self):
+        # Real rally: players settled (< 4 km/h) just before the serve but its swing is weak.
+        # Phantom (walk-back): players still moving before its start, no swing at all.
+        gt = [(10.0, 14.0)]
+        pred = [(10.0, 14.0), (20.0, 21.5)]
+        swings = [{"t": 11.0, "track": 1, "strength": 2.5}]
+        energy = [(9.6, 1.0), (9.8, 1.5), (19.6, 20.0), (19.9, 18.0)]
+        pts = veto_operating_points(swings, pred, gt, thresholds=[4.0], player_energy=energy)
+        row = pts[4.0]
+        self.assertEqual(row["rallies_covered"], 0)        # swing-only would falsely veto
+        self.assertEqual(row["fused_rallies_covered"], 1)  # settledness saves the real rally
+        self.assertEqual(row["phantoms_killed"], 1)
+        self.assertEqual(row["fused_phantoms_killed"], 1)  # unsettled phantom still dies
+
+    def test_fused_settled_phantom_survives(self):
+        # The honest cost of the OR rule: a swing-free phantom whose start looks settled survives.
+        gt = [(10.0, 14.0)]
+        pred = [(10.0, 14.0), (20.0, 21.5)]
+        swings = [{"t": 11.0, "track": 1, "strength": 6.0}]
+        energy = [(9.7, 1.0), (19.7, 1.0)]  # quiet before BOTH starts
+        row = veto_operating_points(swings, pred, gt, thresholds=[4.0], player_energy=energy)[4.0]
+        self.assertEqual(row["phantoms_killed"], 1)
+        self.assertEqual(row["fused_phantoms_killed"], 0)
+
+    def test_fused_empty_energy_window_counts_unsettled(self):
+        # players_settled_before is False on an empty window — a phantom with no energy samples
+        # before its start must NOT read as settled (matches segment.py's serve-cue semantics).
+        gt = [(10.0, 14.0)]
+        pred = [(10.0, 14.0), (20.0, 21.5)]
+        swings = [{"t": 11.0, "track": 1, "strength": 6.0}]
+        energy = [(9.7, 1.0)]  # nothing in [19.5, 20.0)
+        row = veto_operating_points(swings, pred, gt, thresholds=[4.0], player_energy=energy)[4.0]
+        self.assertEqual(row["fused_phantoms_killed"], 1)
+
+    def test_settled_counts(self):
+        gt = [(10.0, 14.0), (30.0, 34.0)]
+        pred = [(10.0, 14.0), (30.0, 34.0), (50.0, 51.0)]
+        energy = [(9.7, 1.0),     # settled before gt rally 1
+                  (29.7, 12.0),   # moving before gt rally 2
+                  (49.7, 2.0)]    # settled before the phantom
+        rep = settled_counts(pred, gt, energy)
+        self.assertEqual(rep["settle_kmh"], 4.0)
+        self.assertEqual(rep["gt_settled"], 1)
+        self.assertEqual(rep["gt_total"], 2)
+        self.assertEqual(rep["phantom_settled"], 1)
+        self.assertEqual(rep["phantom_total"], 1)
 
 
 if __name__ == "__main__":
