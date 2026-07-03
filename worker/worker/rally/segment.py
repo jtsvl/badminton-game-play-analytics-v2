@@ -26,6 +26,14 @@ MIN_COS = float(os.environ.get("RALLY_MIN_COS", "0.3"))    # collinear (cos>=MIN
 MIN_RUN_LEN = int(os.environ.get("RALLY_MIN_RUN_LEN", "4"))      # a run this long counts as sustained flight
 BRIDGE_S = float(os.environ.get("RALLY_BRIDGE_S", "1.5"))        # max time gap to connect/bridge two runs
 BRIDGE_DIST = float(os.environ.get("RALLY_BRIDGE_DIST", "0.15")) # max endpoint distance to connect two runs
+# --- swing-conditional gap bridging (T8, specs/features/pose-swing-fusion.md) -----------------------
+# Promoted 2026-07-03: --bridge-hist on all 5 reviewed games recovers ~80% of measured splits at
+# thr=4.0 tl/s with zero measured false-merges (the real-gap population in the candidate range was
+# empty on this corpus — an untestable-not-proven-safe gap, accepted deliberately; see spec).
+RALLY_SWING_BRIDGE = os.environ.get("RALLY_SWING_BRIDGE", "1") == "1"  # master switch (default on)
+RALLY_SWING_BRIDGE_S = float(os.environ.get("RALLY_SWING_BRIDGE_S", "2.5"))  # raised cap when swing-backed
+RALLY_SWING_BRIDGE_MIN_STRENGTH = float(os.environ.get("RALLY_SWING_BRIDGE_MIN_STRENGTH", "4.0"))
+RALLY_SERVE_EXCLUSION_S = float(os.environ.get("RALLY_SERVE_EXCLUSION_S", "0.75"))  # no bridge this close to gap end
 # --- rally assembly --------------------------------------------------------------------------------
 MIN_RALLY_S = float(os.environ.get("RALLY_MIN_RALLY_S", "0.5"))  # discard spans shorter than this
 MIN_DETS = int(os.environ.get("RALLY_MIN_DETS", "5"))            # discard rallies with fewer detections
@@ -118,17 +126,43 @@ def reject_foreign_runs(runs: Sequence[List[Det]], min_run_len: int = MIN_RUN_LE
     return kept
 
 
+def _swing_in_gap(gap_start: float, gap_end: float, swings: Sequence[dict], min_strength: float,
+                  serve_exclusion_s: float) -> bool:
+    """True iff some swing >= ``min_strength`` falls in ``[gap_start, gap_end - serve_exclusion_s]``.
+
+    The exclusion zone excludes swings close to the gap's end: a quick re-serve puts a genuine swing
+    there, and bridging on it would glue two real rallies together (unrecoverable — no split op)."""
+    hi = gap_end - serve_exclusion_s
+    return hi > gap_start and any(gap_start <= s["t"] <= hi and s["strength"] >= min_strength
+                                  for s in swings)
+
+
 def merge_runs_into_rallies(runs: Sequence[List[Det]], max_bridge_s: float = BRIDGE_S,
-                            min_rally_s: float = MIN_RALLY_S, min_dets: int = MIN_DETS) -> List[List[Det]]:
+                            min_rally_s: float = MIN_RALLY_S, min_dets: int = MIN_DETS,
+                            swings: Optional[Sequence[dict]] = None,
+                            swing_bridge: bool = RALLY_SWING_BRIDGE,
+                            swing_bridge_s: float = RALLY_SWING_BRIDGE_S,
+                            swing_bridge_min_strength: float = RALLY_SWING_BRIDGE_MIN_STRENGTH,
+                            serve_exclusion_s: float = RALLY_SERVE_EXCLUSION_S) -> List[List[Det]]:
     """Group time-ordered runs into rallies: runs within ``max_bridge_s`` merge (a white-wall dropout stays
     one rally), a larger gap closes the rally. Each rally's detections are concatenated and time-sorted;
-    spans shorter than ``min_rally_s`` or with fewer than ``min_dets`` detections are discarded as noise."""
+    spans shorter than ``min_rally_s`` or with fewer than ``min_dets`` detections are discarded as noise.
+
+    When ``swing_bridge`` is on and ``swings`` is given, a gap in ``(max_bridge_s, swing_bridge_s]``
+    also merges iff a swing carrying enough strength lies in its interior (players kept swinging through
+    a longer shuttle-detection dropout) — see ``_swing_in_gap``. Default off until a measured tuning
+    pass sets ``swing_bridge_min_strength`` (T8, specs/features/pose-swing-fusion.md)."""
     runs = [r for r in runs if r]
     if not runs:
         return []
     groups: List[List[List[Det]]] = [[runs[0]]]
     for prev, cur in zip(runs, runs[1:]):
-        if _time_gap(prev, cur) <= max_bridge_s:
+        gap = _time_gap(prev, cur)
+        if gap <= max_bridge_s:
+            groups[-1].append(cur)
+        elif (swing_bridge and swings and gap <= swing_bridge_s and
+              _swing_in_gap(prev[-1]["t"], cur[0]["t"], swings, swing_bridge_min_strength,
+                           serve_exclusion_s)):
             groups[-1].append(cur)
         else:
             groups.append([cur])
@@ -200,6 +234,8 @@ def count_hits(rally_dets: Sequence[Det], deadband: float = HIT_DEADBAND) -> Opt
 
 
 def build_rallies(dets: Sequence[Det], player_energy: Optional[Sequence] = None,
+                  swings: Optional[Sequence[dict]] = None,
+                  swing_bridge: bool = RALLY_SWING_BRIDGE,
                   discipline: str = "singles") -> Dict[str, list]:
     """Orchestrate stage 6: detections → rallies + events shaped for the DB (rallies/events columns).
 
@@ -209,11 +245,14 @@ def build_rallies(dets: Sequence[Det], player_energy: Optional[Sequence] = None,
     human-entered match score). ``events`` reference their rally by ``rally_idx`` (the store resolves it
     to ``rally_id`` on insert). Per rally: a ``serve`` event, provisional ``hit`` events, a ``rally_end``
     event carrying the last in-flight ``(x, y, u, v)``, and a ``landing`` event with the in/out call
-    against the ``discipline``'s boundary (or an honest ``located=false``)."""
+    against the ``discipline``'s boundary (or an honest ``located=false``). ``swings`` (player
+    swing-activity events) only change output when ``swing_bridge`` is on — see
+    ``merge_runs_into_rallies``."""
     from .landing import landing_event  # local: landing.py imports END_MIN_CONF from here (no cycle)
 
     dets = sorted(dets, key=lambda d: d["t"])
-    rallies_dets = merge_runs_into_rallies(reject_foreign_runs(group_trajectories(dets)))
+    rallies_dets = merge_runs_into_rallies(reject_foreign_runs(group_trajectories(dets)),
+                                           swings=swings, swing_bridge=swing_bridge)
 
     rallies: List[dict] = []
     events: List[dict] = []

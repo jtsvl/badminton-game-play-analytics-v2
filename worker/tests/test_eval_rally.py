@@ -8,10 +8,11 @@ bridged), which are hard flip gates.
 """
 import unittest
 
-from worker.eval_rally import (boundary_prf, confusion, evaluate, format_report, gt_from_db,
-                               phantom_spans, rally_max_strengths, serve_window_report,
-                               settled_counts, span_stats, split_gaps, swing_strength_split,
-                               veto_operating_points)
+from worker.eval_rally import (boundary_prf, bridge_gap_strengths, bridge_operating_points,
+                               confusion, evaluate, format_report, gt_from_db, phantom_spans,
+                               rally_max_strengths, real_gap_spans, serve_window_report,
+                               settled_counts, span_stats, split_gap_spans, split_gaps,
+                               swing_strength_split, veto_operating_points)
 
 
 class TestBoundaryPRF(unittest.TestCase):
@@ -158,6 +159,43 @@ class TestCLIGlue(unittest.TestCase):
         machine = [(0.0, 5.0), (6.5, 8.0), (9.0, 14.0), (20.0, 28.0)]
         gt = [(0.0, 14.0), (20.0, 28.0)]  # trainer merged the first three machine rallies
         self.assertEqual(split_gaps(machine, gt), [1.0, 1.5])
+
+
+class TestBridgeGapDiagnostics(unittest.TestCase):
+    # T8 tuning inputs (specs/features/pose-swing-fusion.md): split_gap_spans is the "should
+    # bridge" population (real dropouts the trainer merged), real_gap_spans the "must NOT
+    # bridge" population (genuine silences between distinct real rallies).
+    def test_split_gap_spans_returns_interior_start_end(self):
+        machine = [(0.0, 5.0), (6.5, 8.0), (9.0, 14.0), (20.0, 28.0)]
+        gt = [(0.0, 14.0), (20.0, 28.0)]
+        self.assertEqual(split_gap_spans(machine, gt), [(5.0, 6.5), (8.0, 9.0)])
+
+    def test_real_gap_spans_between_consecutive_gt_rallies(self):
+        gt = [(0.0, 5.0), (8.0, 14.0), (20.0, 31.5)]
+        self.assertEqual(real_gap_spans(gt), [(5.0, 8.0), (14.0, 20.0)])
+
+    def test_bridge_gap_strengths_respects_serve_exclusion(self):
+        # swing at t=1.9 is within the last 0.75s before the gap ends — excluded (quick re-serve).
+        recs = bridge_gap_strengths([{"t": 1.9, "track": 1, "strength": 9.0}], [(0.0, 2.0)],
+                                    serve_exclusion_s=0.75)
+        self.assertIsNone(recs[0]["max_strength"])
+
+    def test_bridge_gap_strengths_finds_interior_swing(self):
+        recs = bridge_gap_strengths([{"t": 1.0, "track": 1, "strength": 9.0}], [(0.0, 2.0)],
+                                    serve_exclusion_s=0.75)
+        self.assertEqual(recs[0]["max_strength"], 9.0)
+        self.assertEqual(recs[0]["gap_s"], 2.0)
+
+    def test_bridge_operating_points_separates_split_from_real_gaps(self):
+        splits = [(0.0, 2.0)]     # should bridge — real dropout, players kept swinging
+        reals = [(10.0, 12.0)]    # should NOT bridge — a genuine gap between two rallies
+        swings = [{"t": 1.0, "track": 1, "strength": 9.0},    # inside the split gap
+                  {"t": 11.0, "track": 1, "strength": 1.0}]   # weak, inside the real gap
+        pts = bridge_operating_points(swings, splits, reals, thresholds=[5.0])
+        self.assertEqual(pts[5.0]["splits_bridged"], 1)
+        self.assertEqual(pts[5.0]["splits_total"], 1)
+        self.assertEqual(pts[5.0]["false_merges"], 0)
+        self.assertEqual(pts[5.0]["real_gaps_total"], 1)
 
 
 class TestSwingTuning(unittest.TestCase):

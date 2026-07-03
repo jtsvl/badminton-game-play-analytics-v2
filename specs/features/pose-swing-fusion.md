@@ -1,10 +1,14 @@
 # Feature — Pose/swing fusion for rally segmentation (FR-35 follow-up, step 2)
 
-**Status: SPEC ONLY — no code yet.** Rules over the existing heuristic, **not a learned segmenter**
-(settled 2026-07-02, deep-research verdict). The single biggest measured weakness of stage 6 is its
-single input signal (shuttle continuity); this fuses a **player swing-activity cue** — derived from the
-RTMPose keypoints the pipeline already caches — into the rule-based segmenter, plus the eval harness
-that proves the gain on the trainer's own reviewed footage. No new model, no web changes.
+**Status (2026-07-03): veto DROPPED (measured T6 verdict below); T8 bridge PROMOTED ON**
+(`RALLY_SWING_BRIDGE_MIN_STRENGTH=4.0`, ~80% measured split recovery) **with a known, deliberately
+accepted gap: the false-merge safety check had zero real test cases on the 5-game corpus** — see
+the T8 verdict below before touching this default. Rules over the existing heuristic, **not a
+learned segmenter** (settled 2026-07-02, deep-research verdict). The single biggest measured
+weakness of stage 6 is its single input signal (shuttle continuity); this fuses a **player
+swing-activity cue** — derived from the RTMPose keypoints the pipeline already caches — into the
+rule-based segmenter, plus the eval harness that proves the gain on the trainer's own reviewed
+footage. No new model, no web changes.
 
 ## Failure-mode inventory (measured on trainer-reviewed footage, 2026-07-02)
 
@@ -22,10 +26,13 @@ The trainer's rally reviews are the evidence base (`rally_review` on Session-2 g
 
 Two failure classes, by measured frequency:
 
-1. **Phantom short rallies** between real ones — the dominant class (~16 of 52 in game1). No swing
-   happens near them → swing **veto**.
+1. **Phantom short rallies** between real ones — the dominant class (~16 of 52 in game1). The
+   original hypothesis: no swing happens near them → swing **veto**. **Measured false 2026-07-03**
+   (see T6 verdict below) — real short rallies' swing strength overlaps phantoms' too much; this
+   class stays a manual one-click drop in rally-review.
 2. **Over-splits** at shuttle-detection dropouts longer than `RALLY_BRIDGE_S`=1.5 s (4+1 trainer
-   merges). Players keep swinging through the dropout → swing **bridge**.
+   merges). Players keep swinging through the dropout → swing **bridge** (T8, mechanism built,
+   threshold tuning pending).
 
 ## GT regime — what is measurable today (and what is not)
 
@@ -64,10 +71,11 @@ This signal is an **activity cue** ("racket-like arm motion in this window"), no
 ±83 ms timing is fine for veto/bridge and is one more reason hit/serve *timing* stays stage-7 /
 future work.
 
-**Two operating thresholds** on the same event stream: the veto filters at
-`RALLY_SWING_VETO_MIN_STRENGTH` (low — any plausible arm activity saves a rally), the bridge at
-`RALLY_SWING_BRIDGE_MIN_STRENGTH` (high — only unambiguous swings justify merging). Both picked
-from measured in-rally vs between-rally strength distributions, not guessed.
+**One operating threshold, one dropped:** the veto would have filtered at a low bar (any plausible
+arm activity saves a rally) — measured 2026-07-03 not to separate real short rallies from
+phantoms, so it was never implemented. The bridge filters at `RALLY_SWING_BRIDGE_MIN_STRENGTH`
+(high — only unambiguous swings justify merging), picked from measured gap-interior strength
+distributions (`--bridge-hist`), not guessed.
 
 ## Fusion rules (each env-gated, **default OFF** until the measured gate passes)
 
@@ -75,27 +83,30 @@ Cost asymmetry drives both rules' shape: the review UI can drop a surviving phan
 but a falsely vetoed real rally and a falsely bridged pair are **unrecoverable** (no restore/split
 op). Hence: veto = low threshold + span guard; bridge = high threshold + serve-exclusion zone.
 
-- **Veto** (after `merge_runs_into_rallies`, before the emit loop): discard a candidate rally iff
-  **no** swing ≥ veto-strength within `[t_start − RALLY_SWING_VETO_MARGIN_S, t_end + margin]` AND
-  span < `RALLY_SWING_VETO_MAX_S` (long rallies can never be vetoed; guard set from the measured
-  kept-span distribution — no kept rally may fall under it). No extra shuttle-conf/det-count
-  conditions: measured phantoms carry conf 1.00 and ≥5 dets, so those gates are pure overfitting
-  surface. Honest target: kills swing-free phantoms (≥50% of game1's ~16); phantoms with genuine
-  nearby arm motion (pickup tosses) survive **by design**.
-- **Bridge** (inside `merge_runs_into_rallies`): gaps in `(RALLY_BRIDGE_S, RALLY_SWING_BRIDGE_S]`
-  merge iff a swing ≥ bridge-strength lies in the gap **interior**,
-  `t ∈ [gap_start, gap_end − RALLY_SERVE_EXCLUSION_S]`. The exclusion zone exists because a quick
-  re-serve puts a genuine swing at a gap's *end* — bridging across it would glue two real rallies.
-  Cap set from the measured gap histogram of the trainer-merged pairs, not guessed.
+- **Veto — DROPPED (2026-07-03 measured verdict, see T6 below).** Never implemented in
+  `segment.py`. Design retained here only as the record of what was tried: discard a candidate
+  rally iff **no** swing ≥ veto-strength within `[t_start − RALLY_SWING_VETO_MARGIN_S, t_end +
+  margin]` AND span < `RALLY_SWING_VETO_MAX_S`. Measured fused (swing-OR-settled) kill rate at the
+  largest shared threshold keeping `missed == 0` on all 5 games: **2/76 (2.6%)**, nowhere near the
+  ≥50% target — phantom removal stays the trainer's one-click drop in rally-review.
+- **Bridge (T8 — PROMOTED ON 2026-07-03)** (inside `merge_runs_into_rallies`): gaps in
+  `(RALLY_BRIDGE_S, RALLY_SWING_BRIDGE_S]` merge iff a swing ≥ `RALLY_SWING_BRIDGE_MIN_STRENGTH`
+  (4.0 tl/s) lies in the gap **interior**, `t ∈ [gap_start, gap_end − RALLY_SERVE_EXCLUSION_S]`. The
+  exclusion zone exists because a quick re-serve puts a genuine swing at a gap's *end* — bridging
+  across it would glue two real rallies. Cap set from the measured gap histogram of the
+  trainer-merged pairs (18/20 ≤ 2.34s). Threshold picked from `--bridge-hist` (~80% split recovery,
+  see the T8 verdict below) — **but the false-merge side of that measurement had zero test cases**,
+  a deliberately accepted gap, not a proven-safe result.
 - **Serve corroboration** (confidence-only, **times never move**): `find_serve_frame` marks
   `payload.swing_corroborated` and raises confidence to `RALLY_SERVE_CONF_CORROBORATED` when
   settled AND a swing falls within ±`RALLY_SERVE_SWING_WINDOW_S` of the first detection. Feeds
   graduated-autonomy certainty surfacing; not scored by the harness.
 
-**Wiring:** `rally_hit.py` computes swings unconditionally when `pose.parquet` exists (join pose
-`track` → `tracks.parquet` kept track ids; `source="interp"` rows have no pose — harmless) and
-passes them to `build_rallies(dets, player_energy, swings)`. Gating lives ONLY inside the
-segment.py rules, so the eval harness flips flags via env without rewiring.
+**Wiring (built 2026-07-03):** `rally_hit.py` computes swings unconditionally when `pose.parquet`
+exists (join pose `track` → `tracks.parquet` kept track ids; `source="interp"` rows have no pose —
+harmless) and passes them to `build_rallies(dets, player_energy, swings)`. Gating lives ONLY
+inside the segment.py rules (`swing_bridge` flag), so the eval harness flips it via env without
+rewiring.
 
 ## Eval harness
 
@@ -118,20 +129,28 @@ bottom):
   serve-window report, per-rally max GT-vs-phantom distributions with the weakest-GT listing,
   settled-before-start counts, and the veto sweep with swing-only vs fused (swing-OR-settled)
   columns; `--json` carries the raw per-rally records.
+- **`--bridge-hist` diagnostics** (T8, added 2026-07-03): swing-strength distributions over
+  `split_gap_spans` (interior gaps of trainer-merged rallies — should bridge) vs `real_gap_spans`
+  restricted to the same candidate range (genuine gaps between distinct real rallies — must NOT
+  bridge), plus an operating-point sweep (`bridge_operating_points`) reporting `splits_bridged` and
+  the hard-gate `false_merges` per threshold; `--json` carries the raw per-gap records.
 
-## Numeric targets (provisional until the baseline table below is filled)
+## Numeric targets (updated 2026-07-03 — veto dropped, T8 bridge-only scope)
 
 | Metric (all 5 reviewed games) | Baseline (measured) | Target |
 | --- | --- | --- |
-| boundary-F1 @ ±0.5 s | 0.742–0.775 per game | **up on every game** (game1 ≥ 0.85 aspirational) |
-| `false_rallies` | 76 aggregate (7–20/game) | **≤ 38 aggregate** (≥50% cut) |
-| `splits` | 20 aggregate (2–5/game) | **reduced on every game** |
-| `missed` (falsely vetoed real rally) | 0 | **hard 0, every reviewed game** |
-| `merges` (falsely bridged pair) | 0 | **hard 0, every reviewed game** |
+| boundary-F1 @ ±0.5 s | 0.742–0.775 per game | **up on every game** — smaller gain now that only splits (not phantoms) are addressable |
+| `false_rallies` | 76 aggregate (7–20/game) | **ABANDONED** — the veto that targeted this (≤38, ≥50% cut) measured 2/76 (2.6%); phantom removal stays manual (rally-review one-click drop) |
+| `splits` | 20 aggregate (2–5/game) | **PROMOTED 2026-07-03** — thr=4.0 recovers 17/21 (81%) measured splits |
+| `missed` (falsely vetoed real rally) | 0 | **N/A** — no veto code exists in `segment.py`, so this can't regress |
+| `merges` (falsely bridged pair) | 0 | **untestable on this corpus** (0 real gaps in the 1.5–2.5s candidate range) — promoted anyway on a deliberate safety margin, see T8 verdict; **the tripwire is future rally-review data**, not this gate |
 
-Flags flip ON by default **only** when all hard gates pass on every reviewed game (mirrors the
-promoted-checkpoint precedent). If a criterion fails: re-tune from the measured histograms only —
-no new rule conditions without a new measured failure class.
+`RALLY_SWING_BRIDGE` was promoted ON 2026-07-03 despite the `false_merges` gate being untestable
+(vacuously 0 over an empty population) rather than measured-safe — a deliberate, surfaced
+exception to the "flip on only when the hard gate passes" rule, justified by the conservative
+threshold margin and the unrecoverable-but-rare failure mode. If future rally-review data ever
+shows a falsely-glued pair, raise `RALLY_SWING_BRIDGE_MIN_STRENGTH` or set `RALLY_SWING_BRIDGE=0`
+— both are env-only reverts, no code change needed.
 
 ### Baseline table (measured 2026-07-02 after the trainer reviewed ALL 5 games, flags off, tol ±0.5 s)
 
@@ -194,14 +213,90 @@ run per game (`--json` additionally carries the raw per-rally records for offlin
   classes (pickup toss, walk-back) should lack the settled-before-start pattern real serves
   have, letting thr rise past the naive pin point.
 
-**Per-game results: pending** the Mac runs
-(`uv run python -m worker.eval_rally --slug <slug> --swing-hist [--json]`).
-
 **Pre-registered decision rule** (set before seeing the numbers): fused sweep reaches ≥38/76
 kills with fused-missed == 0 on every game → the T7 veto condition is swing-OR-settled. The
 serve-window report showing near-serve blindness (strong far-skew / high no-sample count) is a
 T7 design input, not a reason to lower thresholds. Neither separates → drop the veto (bridge
 T8 only); phantom removal stays the trainer's one-click drop in rally-review.
+
+**Per-game results (measured 2026-07-03, all 5 games, `--swing-hist`)** — the largest shared
+threshold at which the FUSED (swing-OR-settled) rule keeps `missed == 0` on every game is
+**thr=3.00 tl/s**, killing only **2/76 (2.6%)** phantoms aggregate (game2: 2/20; all other games:
+0):
+
+| game | fused OK up to (tl/s) | kills at that thr | phantom_total |
+| --- | --- | --- | --- |
+| game1 | 4.00 | 1 | 15 |
+| game2 | 5.00 | 2 | 20 |
+| game3 | **3.00** (breaks at 4.00: 34/36, 2 real rallies falsely vetoed) | 0 | 20 |
+| game4 | 5.00 | 0 | 14 |
+| game5 | 6.00 | 0 | 7 |
+
+game3 is the binding constraint: its settled-before-start rate is far lower than the other games
+(15–20/36 across 3/4/6 km/h vs 24–30+/32–36 elsewhere) — players there don't reset between points
+as reliably, so the settled cue can't rescue it, and real short-rally swing strength overlaps
+phantom swing strength too much for the swing signal alone to separate them at any shared
+threshold. Even discounting the missed-rally violations entirely and pushing to the highest
+tested threshold (8.0 tl/s), aggregate kills only reach ~15/76 (20%) — still far under the ≥50%
+target. **Not a borderline call.**
+
+Serve-window (near/far) data: near-attributed serves skew mildly stronger than far in 4/5 games
+(game4 is the exception, small n), but every rally had *some* swing sample at the serve instant
+(`no_sample_rallies = 0` everywhere) — no severe back-to-camera blindness to explain the gap away.
+
+**Verdict: the veto is dropped**, per the pre-registered rule's "neither separates" branch. T7
+does not happen. Phantom-rally removal stays the trainer's one-click drop in rally-review
+(already shipped, FR-35) — this is not a regression, it's confirming the existing manual step is
+the right tool for this failure class. Work moves to **T8 (bridge-only)**.
+
+### T8 — bridge mechanism (built 2026-07-03)
+
+`merge_runs_into_rallies` and `build_rallies` (`worker/worker/rally/segment.py`) now accept an
+optional `swings` sequence and a `swing_bridge` flag (default `RALLY_SWING_BRIDGE`, env "0"/off):
+when on, a gap in `(RALLY_BRIDGE_S, RALLY_SWING_BRIDGE_S]` additionally merges if a swing ≥
+`RALLY_SWING_BRIDGE_MIN_STRENGTH` falls in `[gap_start, gap_end − RALLY_SERVE_EXCLUSION_S]` (10
+new unit tests, TDD, `worker/tests/test_rally.py::TestSwingBridge` +
+`TestBuildRallies::test_swings_threaded_through_to_the_bridge_rule`). `rally_hit.py` computes
+swings unconditionally whenever `pose.parquet` exists (`_swings_from_frames`, joined to
+`tracks.parquet`'s kept track ids) and passes them through — the flag alone gates behavior, so no
+rewiring is needed once a real threshold is set. `eval_rally.predict_from_cache` was updated to
+load and pass swings identically (`load_swings`, reusing `rally_hit._swings_from_frames` — not a
+duplicate path), so the plain scorecard stays truthful once the flag flips.
+
+**Per-game results (measured 2026-07-03, all 5 games, `--bridge-hist`):**
+
+| game | split gaps (should-bridge) | at thr=4.0: bridged | real gaps in (1.5, 2.5]s range (must-NOT-bridge) |
+| --- | --- | --- | --- |
+| game1 | 5 | 5/5 | 0 |
+| game2 | 5 | 3/5 | 0 |
+| game3 | 5 | 3/5 | 0 |
+| game4 | 4 | 4/4 | 0 |
+| game5 | 2 | 2/2 | 0 |
+| **Σ** | **21** | **17/21 (81%)** | **0** |
+
+At thr=2.5 tl/s every measured split gap bridges correctly (21/21) on all 5 games; recovery
+degrades unevenly above that (game3 first, at thr=3.0). thr=4.0 was chosen as a **deliberate safety
+margin** above the point of 100% recovery, at the cost of ~19% of the measured splits, precisely
+*because* the false-merge side of this measurement is empty (see below) — there was no
+data-driven way to justify staying at the lowest working threshold.
+
+**The honest gap: `real_gap_spans` restricted to the candidate range (1.5, 2.5]s was EMPTY on
+all 5 games — 0 samples, not 0 false-merges.** A `false_merges == 0` reading over an empty
+population is vacuously true, not evidence of safety — unlike the veto's `missed == 0` gate, which
+was tested against 149 real GT rallies per threshold. The plausible explanation: a real break
+between points is either a quick re-serve (well under 1.5s, already handled by the unconditional
+`RALLY_BRIDGE_S` path) or a proper reset pause (well over 2.5s) — gaps landing exactly in the
+1.5–2.5s band between two genuinely distinct rallies may simply be rare in this sport's rhythm.
+Plausible, **not proven** with 5 games.
+
+**Why promoted anyway (user decision, 2026-07-03):** a falsely-bridged pair is unrecoverable —
+the rally-review UI has no split/un-merge operation — so this is not a decision to take lightly.
+Weighed against that: the conservative threshold (well above the ~0.7–1.4 tl/s between-rally
+ambient-motion baseline measured in T6), the modest scope (rare 1.5–2.5s gaps only), and the
+existing rally-review capture (FR-35) as an ongoing observation channel. Accepted with eyes open,
+not defaulted into. **If a future review ever reveals a falsely-glued rally pair, this is the
+first thing to revisit** — either raise `RALLY_SWING_BRIDGE_MIN_STRENGTH` further or turn
+`RALLY_SWING_BRIDGE` back off; both are one env var away, no code change needed.
 
 ## Env knobs (defaults; pattern = module constant + default kwarg, `segment.py` style)
 
@@ -213,13 +308,13 @@ T8 only); phantom removal stays the trainer's one-click drop in rally-review.
 | `SWING_MAX_DT_S` | 0.25 | never differentiate across a longer gap |
 | `SWING_ELBOW_GAIN` | 1.8 | elbow-speed → wrist-speed proxy factor |
 | `SWING_TORSO_WINDOW_S` | 2.0 | rolling-median torso window |
-| `RALLY_SWING_VETO` | **"0"** (off) | phantom-rally veto master switch |
-| `RALLY_SWING_VETO_MAX_S` | TBD — T3 contradicted the ≈3 s plan (see baseline table); user decision pending | rallies ≥ this can never be vetoed |
-| `RALLY_SWING_VETO_MARGIN_S` | 0.5 | swing search margin around the rally span |
-| `RALLY_SWING_VETO_MIN_STRENGTH` | TBD (T6) | low bar — any plausible activity saves |
-| `RALLY_SWING_BRIDGE` | **"0"** (off) | swing-conditional gap bridging master switch |
-| `RALLY_SWING_BRIDGE_S` | ≈2.2 (T3-measured; max trainer-merged gap 1.92 s) | max gap the swing bridge may close |
-| `RALLY_SWING_BRIDGE_MIN_STRENGTH` | TBD (T6) | high bar — unambiguous swings only |
+| ~~`RALLY_SWING_VETO`~~ | DROPPED 2026-07-03 — never implemented in `segment.py` | phantom-rally veto master switch |
+| ~~`RALLY_SWING_VETO_MAX_S`~~ | DROPPED | rallies ≥ this can never be vetoed |
+| ~~`RALLY_SWING_VETO_MARGIN_S`~~ | DROPPED | swing search margin around the rally span |
+| ~~`RALLY_SWING_VETO_MIN_STRENGTH`~~ | DROPPED | low bar — any plausible activity saves |
+| `RALLY_SWING_BRIDGE` | **"1"** (on) — PROMOTED 2026-07-03, see T8 verdict | swing-conditional gap bridging master switch |
+| `RALLY_SWING_BRIDGE_S` | 2.5 (T6-measured gap histogram: 18/20 trainer-merged gaps ≤ 2.34s) | max gap the swing bridge may close |
+| `RALLY_SWING_BRIDGE_MIN_STRENGTH` | 4.0 — measured `--bridge-hist` (81% split recovery); deliberate margin above the 2.5 tl/s 100%-recovery point since false-merge safety was untestable (0 real-gap samples in range) | high bar — unambiguous swings only |
 | `RALLY_SERVE_EXCLUSION_S` | 0.75 | no bridging on a swing this close to gap end |
 | `RALLY_SERVE_CONF_CORROBORATED` | 0.85 | serve confidence when swing-corroborated |
 | `RALLY_SERVE_SWING_WINDOW_S` | 0.5 | ± window around first detection |
@@ -228,16 +323,21 @@ T8 only); phantom removal stays the trainer's one-click drop in rally-review.
 
 - **12 fps aliasing:** a very compact swing can land between analysis frames; the cue misses it.
   Mitigated (not solved) by the 2·dt gap bridging over blurred/unconfident peak frames.
-- **Backhand short serve** is the lowest-amplitude real swing → the false-veto risk. Mitigations:
-  the veto threshold is deliberately low, the elbow fallback catches wrist misses, and the ±margin
-  window catches slightly-off timing. The eval's hard `missed == 0` gate must confirm this on
-  every reviewed game before any default flips.
+- **The swing signal doesn't separate real short rallies from swing-free phantoms** (measured T6
+  verdict, 2026-07-03): even the fused (swing-OR-settled) rule only kills 2/76 phantoms at the
+  largest shared threshold that never falsely vetoes a real rally — real short-rally swing
+  strength overlaps phantom swing strength too much, and one game's players don't settle between
+  points as reliably as the others. This is *why* the veto was dropped rather than shipped with a
+  weak threshold — a plausible-but-barely-working auto-delete is worse than none.
 - **Pose exists only for tracked boxes:** `gate_track` failures cascade — where the tracker lost a
-  player, there are no keypoints, no swing events, and the veto could fire on a real rally. The
-  span guard (`RALLY_SWING_VETO_MAX_S`) bounds the damage to short rallies; `missed == 0` is the
-  tripwire.
-- **Arm-motion phantoms survive the veto by design** (pickup tosses, racket fidgeting near the
-  net). The veto targets swing-*free* phantoms only; expect `false_rallies` to halve, not vanish.
+  player, there are no keypoints, no swing events, and a swing-bridge gap with a real dropout-swing
+  could go unbridged (false negative — the rally still stays a `split`, no correctness risk, just
+  a missed improvement). The `false_merges == 0` hard gate is the correctness tripwire, not this.
+- **`RALLY_SWING_BRIDGE` was promoted ON with an untested safety gate** (2026-07-03): the 5-game
+  corpus had zero real inter-rally gaps in the 1.5–2.5s candidate range, so `false_merges == 0` is
+  vacuous, not measured-safe. A falsely bridged pair is unrecoverable (no split/un-merge op in
+  rally-review). Mitigated by a deliberate margin above the 100%-recovery threshold, not proven
+  safe — future rally-review data is the real tripwire; see the T8 verdict for the reasoning.
 - **GT is drop/merge-only:** kept-rally boundary correctness is *assumed*, not measured — serve/end
   timing quality is invisible to this harness (see GT regime above).
 

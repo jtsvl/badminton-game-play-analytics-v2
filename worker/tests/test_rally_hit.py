@@ -1,22 +1,39 @@
-"""rally_hit stage glue — _player_energy (serve cue) and the winner_side estimate from out landings.
+"""rally_hit stage glue — _player_energy, the winner_side estimate from out landings, and swings.
 
 _player_energy turns the player tracks parquet into the [(t_s, energy_kmh)] series find_serve_frame
 consumes. _side_by_role/_apply_out_winners map an out landing's court half to a match side via the
-track_label↔role binding — an ESTIMATE decoupled from the human-entered matches.score. The rest of
-run() is parquet + DB I/O, exercised by the standalone stage run on game1 (not here).
+track_label↔role binding — an ESTIMATE decoupled from the human-entered matches.score.
+_swings_from_frames turns cached pose/tracks parquets into the swing-activity events the T8 gap
+bridge consumes. The rest of run() is parquet + DB I/O, exercised by the standalone stage run on
+game1 (not here).
 """
 import unittest
 
 import polars as pl
 
+from worker.geometry import HEAD_KP, HIP_KP, WRIST_KP
+from worker.pipeline import rally_hit
 from worker.pipeline.rally_hit import _apply_out_winners, _player_energy, _side_by_role
 
 _SCHEMA = {"t": pl.Float64, "track_id": pl.Int64, "u": pl.Float64, "v": pl.Float64,
            "role": pl.Utf8, "source": pl.Utf8}
+_POSE_SCHEMA = {"frame": pl.Int64, "track": pl.Int64,
+               "kp": pl.List(pl.List(pl.Float64)), "kp_score": pl.List(pl.Float64)}
 
 
 def _tracks(rows):
     return pl.DataFrame(rows, schema=_SCHEMA)
+
+
+def _pose_row(frame, track, wrist_x):
+    """One Halpe-26 pose row: right wrist at (wrist_x, 0), unit torso (head→hip = 1.0)."""
+    kp = [[0.0, 0.0] for _ in range(26)]
+    score = [0.0] * 26
+    kp[HEAD_KP], kp[HIP_KP] = [0.0, 0.0], [0.0, 1.0]
+    score[HEAD_KP] = score[HIP_KP] = 0.9
+    kp[WRIST_KP[1]] = [wrist_x, 0.0]
+    score[WRIST_KP[1]] = 0.9
+    return {"frame": frame, "track": track, "kp": kp, "kp_score": score}
 
 
 class TestPlayerEnergy(unittest.TestCase):
@@ -109,6 +126,27 @@ class TestApplyOutWinners(unittest.TestCase):
         rallies = [_rally(0)]
         _apply_out_winners(rallies, [_landing(0, v=0.95)], {})
         self.assertIsNone(rallies[0]["winner_side"])
+
+
+class TestSwingsFromFrames(unittest.TestCase):
+    def test_fast_wrist_motion_becomes_a_swing_event_for_a_kept_track(self):
+        # 12fps spacing; wrist steps 0.5 torso-lengths in one frame = 6 tl/s.
+        pose_df = pl.DataFrame([_pose_row(0, 7, 0.0), _pose_row(1, 7, 0.5)], schema=_POSE_SCHEMA)
+        tracks_df = _tracks([{"t": 0.0, "track_id": 7, "u": 0.0, "v": 0.0,
+                              "role": "near", "source": "d"}])
+        frame_t = {0: 0.0, 1: 1 / 12}
+        events = rally_hit._swings_from_frames(pose_df, tracks_df, frame_t)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["track"], 7)
+        self.assertAlmostEqual(events[0]["strength"], 6.0, places=3)
+
+    def test_pose_rows_for_untracked_ids_are_ignored(self):
+        # track 99 never appears in tracks_df (not a gate_track-kept player) — its rows are dropped.
+        pose_df = pl.DataFrame([_pose_row(0, 99, 0.0), _pose_row(1, 99, 0.5)], schema=_POSE_SCHEMA)
+        tracks_df = _tracks([{"t": 0.0, "track_id": 7, "u": 0.0, "v": 0.0,
+                              "role": "near", "source": "d"}])
+        frame_t = {0: 0.0, 1: 1 / 12}
+        self.assertEqual(rally_hit._swings_from_frames(pose_df, tracks_df, frame_t), [])
 
 
 if __name__ == "__main__":

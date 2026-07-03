@@ -74,6 +74,21 @@ def _player_energy(tracks_df):
     return energy
 
 
+def _swings_from_frames(pose_df, tracks_df, frame_t: dict) -> list:
+    """Swing-activity events from already-loaded pose/tracks frames, restricted to gate_track's
+    kept player tracks (rows for any other track id — tracker noise, never assigned a role — are
+    dropped). Pure glue over swing_events; module-level so eval_rally reuses the identical join
+    (not a duplicate loading path)."""
+    from ..rally.swing import swing_events
+
+    kept = set(tracks_df["track_id"].unique().to_list())
+    rows = [{"t": frame_t[int(r["frame"])], "track": int(r["track"]),
+             "kp": r["kp"], "kp_score": r["kp_score"]}
+            for r in pose_df.iter_rows(named=True)
+            if int(r["track"]) in kept and int(r["frame"]) in frame_t]
+    return swing_events(rows)
+
+
 def _side_by_role(tracks_df, match_players: List[dict]) -> Dict[str, str]:
     """Map court half ('near'/'far') → match side via the track_label↔role binding.
 
@@ -132,17 +147,24 @@ def run(ctx) -> None:
 
     player_energy = None
     tdf = None
+    swings = None
     tracks_path = ctx.get("tracks_path") or str(cache / "tracks.parquet")
     if Path(tracks_path).exists():
         tdf = pl.read_parquet(tracks_path)
         if not tdf.is_empty():
             player_energy = _player_energy(tdf)
+            pose_path = ctx.get("pose_path") or str(cache / "pose.parquet")
+            if Path(pose_path).exists():
+                pdf = pl.read_parquet(pose_path)
+                if not pdf.is_empty():
+                    frame_t = {int(f["frame"]): float(f["t"]) for f in manifest["frames"]}
+                    swings = _swings_from_frames(pdf, tdf, frame_t) or None
 
     store = ctx.get("store")
     match = store.get_match(match_id) if (store is not None and match_id) else None
     discipline = (match or {}).get("discipline") or "singles"
 
-    out = seg.build_rallies(dets, player_energy, discipline)
+    out = seg.build_rallies(dets, player_energy, swings, discipline=discipline)
     rallies, events = out["rallies"], out["events"]
 
     # winner_side from out landings (estimate; matches.score stays human-entered and untouched).
