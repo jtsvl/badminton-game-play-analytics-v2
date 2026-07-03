@@ -170,6 +170,12 @@ def foot_keypoint(
 HEAD_KP: int = 17
 HIP_KP: int = 19
 
+# Halpe-26 arm keypoints (left, right) — the swing-activity cue (rally/swing.py) reads the most
+# distal confident joint per arm; shoulders reserved for stage-7 stroke work.
+SHOULDER_KP: Tuple[int, int] = (5, 6)
+ELBOW_KP: Tuple[int, int] = (7, 8)
+WRIST_KP: Tuple[int, int] = (9, 10)
+
 
 def fit_head_foot_model(samples: Sequence[Tuple[float, float, float]]) -> float | None:
     """Learn a per-player head→foot drop from confident, feet-visible frames (Phase-4 occlusion layer).

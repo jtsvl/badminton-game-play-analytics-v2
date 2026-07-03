@@ -114,6 +114,12 @@ describe('RallyReviewBoard', () => {
     expect((onPlay.mock.calls[0][0] as RallyReviewRow).id).toBe('b')
   })
 
+  it('anchors every row with a rally-<id> DOM id (auto-follow scroll target)', () => {
+    renderBoard([row('a', 0), row('b', 1)])
+    expect(document.getElementById('rally-a')?.textContent).toContain('Ballwechsel 1')
+    expect(document.getElementById('rally-b')?.textContent).toContain('Ballwechsel 2')
+  })
+
   it('marks the active rally row via aria-current', () => {
     render(
       <RallyReviewBoard

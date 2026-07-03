@@ -37,6 +37,22 @@ def _event_schema():
             "confidence": pl.Float64}
 
 
+def load_dets(shuttle_path, frame_w: int, frame_h: int) -> list:
+    """Shuttle detections → normalized image-space points (px/W, py/H), carrying court (u,v)
+    for the rally-end candidate. Missing parquet ⇒ [] (0 rallies, no crash). Module-level so
+    eval_rally can predict through the pipeline's own loading path (not a duplicate)."""
+    import polars as pl
+
+    if not Path(shuttle_path).exists():
+        log.warning("rally_hit: no shuttle.parquet at %s — 0 rallies", shuttle_path)
+        return []
+    sdf = pl.read_parquet(shuttle_path).sort("frame")
+    return [{"t": float(r["t"]), "x": float(r["px"]) / frame_w, "y": float(r["py"]) / frame_h,
+             "conf": float(r["conf"]), "frame": int(r["frame"]),
+             "u": float(r["u"]), "v": float(r["v"])}
+            for r in sdf.iter_rows(named=True)]
+
+
 def _player_energy(tracks_df):
     """Player motion series [(t_s, energy_kmh)] for the serve cue, reusing insights.step_speeds_kmh.
 
@@ -112,15 +128,7 @@ def run(ctx) -> None:
 
     # Detections → normalized image-space points (px/W, py/H); carry court (u,v) for the rally-end candidate.
     shuttle_path = ctx.get("shuttle_path") or str(cache / "shuttle.parquet")
-    dets = []
-    if Path(shuttle_path).exists():
-        sdf = pl.read_parquet(shuttle_path).sort("frame")
-        dets = [{"t": float(r["t"]), "x": float(r["px"]) / frame_w, "y": float(r["py"]) / frame_h,
-                 "conf": float(r["conf"]), "frame": int(r["frame"]),
-                 "u": float(r["u"]), "v": float(r["v"])}
-                for r in sdf.iter_rows(named=True)]
-    else:
-        log.warning("rally_hit: no shuttle.parquet at %s — 0 rallies", shuttle_path)
+    dets = load_dets(shuttle_path, frame_w, frame_h)
 
     player_energy = None
     tdf = None

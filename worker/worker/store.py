@@ -353,6 +353,12 @@ class Store:
         file_path = Path(file_path)
         size = file_path.stat().st_size
 
+        # The self-hosted Storage ignores x-upsert on the TUS path: with an existing object
+        # at the target, the creation POST still succeeds but the first PATCH 409s, and a
+        # plain retry 409s again (verified live 2026-07-02). remove() is a no-op success for
+        # missing objects, so delete unconditionally before the creation POST.
+        self._sb.storage.from_(bucket).remove([path])
+
         def b64(s: str) -> str:
             return base64.b64encode(s.encode()).decode()
 
