@@ -98,17 +98,19 @@ class TestSwingBridge(unittest.TestCase):
     A = line(0.0, 0.10, 0.5, 0.004, 0.0, 18)
     B = line(2.6, 0.20, 0.5, 0.004, 0.0, 18)
 
-    def test_flag_off_by_default_long_gap_stays_split(self):
+    def test_strong_interior_swing_bridges_by_default(self):
+        # RALLY_SWING_BRIDGE promoted on 2026-07-03 (T8 verdict: thr=4.0 tl/s, ~80% split recovery,
+        # false_merges untestable on the 5-game corpus but zero measured — see spec).
         rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=[swing(1.2, 8.0)])
-        self.assertEqual(len(rallies), 2)
-
-    def test_strong_interior_swing_bridges_when_enabled(self):
-        rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=[swing(1.2, 8.0)],
-                                              swing_bridge=True)
         self.assertEqual(len(rallies), 1)
 
-    def test_no_swings_provided_stays_split_even_when_enabled(self):
-        rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=None, swing_bridge=True)
+    def test_can_still_be_disabled_explicitly(self):
+        rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=[swing(1.2, 8.0)],
+                                              swing_bridge=False)
+        self.assertEqual(len(rallies), 2)
+
+    def test_no_swings_provided_stays_split_even_by_default(self):
+        rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=None)
         self.assertEqual(len(rallies), 2)
 
     def test_weak_swing_below_threshold_stays_split(self):
@@ -226,10 +228,10 @@ class TestBuildRallies(unittest.TestCase):
         rally1 = line(0.0, 0.10, 0.5, 0.004, 0.0, 18)         # ends t≈0.567
         rally2 = line(2.6, 0.20, 0.5, 0.004, 0.0, 18)         # gap≈2.033s — needs the swing bridge
         dets = rally1 + rally2
-        off = seg.build_rallies(dets, swings=[swing(1.2, 8.0)])
-        self.assertEqual(len(off["rallies"]), 2)              # flag off by default — unchanged
-        on = seg.build_rallies(dets, swings=[swing(1.2, 8.0)], swing_bridge=True)
-        self.assertEqual(len(on["rallies"]), 1)
+        on = seg.build_rallies(dets, swings=[swing(1.2, 8.0)])
+        self.assertEqual(len(on["rallies"]), 1)               # bridged by default (T8 promoted)
+        off = seg.build_rallies(dets, swings=[swing(1.2, 8.0)], swing_bridge=False)
+        self.assertEqual(len(off["rallies"]), 2)
 
 
 if __name__ == "__main__":

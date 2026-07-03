@@ -27,11 +27,12 @@ MIN_RUN_LEN = int(os.environ.get("RALLY_MIN_RUN_LEN", "4"))      # a run this lo
 BRIDGE_S = float(os.environ.get("RALLY_BRIDGE_S", "1.5"))        # max time gap to connect/bridge two runs
 BRIDGE_DIST = float(os.environ.get("RALLY_BRIDGE_DIST", "0.15")) # max endpoint distance to connect two runs
 # --- swing-conditional gap bridging (T8, specs/features/pose-swing-fusion.md) -----------------------
-RALLY_SWING_BRIDGE = os.environ.get("RALLY_SWING_BRIDGE", "0") == "1"  # master switch (default off)
+# Promoted 2026-07-03: --bridge-hist on all 5 reviewed games recovers ~80% of measured splits at
+# thr=4.0 tl/s with zero measured false-merges (the real-gap population in the candidate range was
+# empty on this corpus — an untestable-not-proven-safe gap, accepted deliberately; see spec).
+RALLY_SWING_BRIDGE = os.environ.get("RALLY_SWING_BRIDGE", "1") == "1"  # master switch (default on)
 RALLY_SWING_BRIDGE_S = float(os.environ.get("RALLY_SWING_BRIDGE_S", "2.5"))  # raised cap when swing-backed
-# TBD: unmeasured placeholder — a bridge-gap tuning pass (mirrors the T6 veto sweep) must set this
-# from real footage before RALLY_SWING_BRIDGE ever flips on by default.
-RALLY_SWING_BRIDGE_MIN_STRENGTH = float(os.environ.get("RALLY_SWING_BRIDGE_MIN_STRENGTH", "6.0"))
+RALLY_SWING_BRIDGE_MIN_STRENGTH = float(os.environ.get("RALLY_SWING_BRIDGE_MIN_STRENGTH", "4.0"))
 RALLY_SERVE_EXCLUSION_S = float(os.environ.get("RALLY_SERVE_EXCLUSION_S", "0.75"))  # no bridge this close to gap end
 # --- rally assembly --------------------------------------------------------------------------------
 MIN_RALLY_S = float(os.environ.get("RALLY_MIN_RALLY_S", "0.5"))  # discard spans shorter than this
