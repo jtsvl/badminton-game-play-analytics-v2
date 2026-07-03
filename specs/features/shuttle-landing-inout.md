@@ -1,10 +1,15 @@
 # Feature — Shuttle landing + in/out call (estimate-grade "Aus-Schläge")
 
-**Status: BUILT (2026-07-03) — v1: rally-ending out; singles full, doubles partial. Logic code-verified
-(unit-tested, no DDL); real-footage validation pending on the Mac Studio** (weights + frame caches live
-there). The match **score stays human-entered**; nothing here ever computes or overrides it. All
-`LANDING_*` thresholds are **untuned first guesses** until a real re-run — no located-rate or
-precision claim before the landing answer key exists (see accept criterion below).
+**Status: BUILT + real-footage-validated (2026-07-03) — v1: rally-ending out; singles full, doubles
+partial.** Validated on a disposable re-run of Session2_Game_5 (doubles, 23 rallies): invariants hold
+(one landing event per rally, degraded events carry reason + no position), but the located-rate was 1/23
+— and that one was a **false positive** (a between-points racket catch "at rest" in mid-air, projected
+2.85 m out by the ground homography; trainer-verified on video). That finding added the
+`LANDING_MAX_OUT_CM` plausibility guard (see below); after the guard the run yields 0 located landings —
+honest, coverage-limited (21 % shuttle coverage at ~12 fps analysis). The match **score stays
+human-entered**; nothing here ever computes or overrides it. All `LANDING_*` thresholds remain **untuned
+first guesses** — no located-rate or precision claim before the landing answer key exists (see accept
+criterion below).
 
 ## Goal
 For each rally that ends with the shuttle landing on the floor, estimate **where it landed** and call it
@@ -41,8 +46,13 @@ the single writer.
    `LANDING_MAX_END_GAP_FRAMES` 2 — 30 fps sampling straddled the contact), `edge_cutoff` (last det
    within `LANDING_EDGE_MARGIN` 0.04 of a frame border — descent left the frame/airspace mask),
    `no_contact` (track ends still falling — covers occlusion at contact, the labeler's never-click-a-guess
-   rule), `no_descent` (nothing fell). **Never extrapolate the arc to the floor** — a fabricated landing
-   pixel is worse than an absent one (CLAUDE.md persona).
+   rule), `no_descent` (nothing fell), `implausible` (the contact's court projection is >
+   `LANDING_MAX_OUT_CM` 100 outside every line — an **above-floor rest** like a racket catch, net cord or
+   between-points handover, which the image-space flatness test cannot tell from floor contact; the
+   ground homography projects such an elevated pixel meters past the lines. Found on real footage
+   2026-07-03: a shuttle handover caught mid-air minted a confident „out 2.85 m" + wrong `winner_side`).
+   **Never extrapolate the arc to the floor** — a fabricated landing pixel is worse than an absent one
+   (CLAUDE.md persona).
 3. **Contact pixel → (u,v)** comes for free: each shuttle detection already carries the ground-homography
    projection of its pixel (`shuttle/track.py`), which is exactly valid at floor contact — the landing
    detection's stored (u,v) IS the court position; no re-projection.
@@ -80,9 +90,9 @@ the single writer.
    u?,v?, px?,py?, margin_cm?, band_cm, confidence, reason?}
   ```
   `px, py` are **normalized** image coordinates (same convention as `rally_end`'s x, y); `reason` only
-  on degraded landings (sparse|straddle|edge_cutoff|no_contact|no_descent). Exactly one landing event
-  per rally, degraded or not. Reserve `'bounce'` for any raw mid-rally floor touches; `'landing'` is
-  the **rally-ending** contact.
+  on degraded landings (sparse|straddle|edge_cutoff|no_contact|no_descent|implausible). Exactly one
+  landing event per rally, degraded or not. Reserve `'bounce'` for any raw mid-rally floor touches;
+  `'landing'` is the **rally-ending** contact.
 - **`rallies.winner_side` / `rallies.end_shot_type`** are **estimates decoupled from `matches.score`** — a
   landing-derived `winner_side` is a guess, never reconciled against the human-entered score.
 - **`player_shot_stats.errors`** (already in the schema) is **sourced** here from rally-ending out-landings
@@ -97,6 +107,12 @@ the single writer.
   Coverage will be partial; „Aus-Schläge" is a **lower bound**, labelled as such.
 - **Foreign-court landings** can still leak in (the wider-box / rally-continuity work *reduces* but can't
   eliminate cross-court intrusion — see `shuttle-tracking.md`).
+- **Above-floor rests that project INSIDE the court are undetectable in v1.** The `LANDING_MAX_OUT_CM`
+  guard only catches elevated rests whose projection lands far outside the lines (the common case —
+  elevated pixels project away from the camera). A low racket catch mid-court can still read as an „in"
+  landing; only physics/net-band modeling or stage-7 stroke context can close that. Phantom rallies from
+  between-points shuttle handovers are a **rally-segmentation** problem (see pose/swing-fusion work),
+  not a landing one — trainer rally-drops remove their landings via `rally_sync`.
 - **Doubles is partial** (user decision 2026-07-03, scope extension over the original singles-only v1):
   landing events + in/out against the doubles boundary + side-level `winner_side` work; the per-player
   „Aus-Schläge" stays **singles-only** until stage 7 can attribute a shot within the pair. 4 players ⇒
@@ -113,8 +129,18 @@ sum is stable when attribution later refines); UI = one additive foot line in th
 **rally-ending out only** in v1 (mid-rally in/out and won-point landings come later). All `LANDING_*`
 knobs env-overridable (`40-worker-contract.md`).
 
-## Validation to run on the Mac Studio (before trusting any number)
-Re-run a Session-2 game (`calibrate` resume or a `rally_review` recompute), then: inspect
-`events.type='landing'` rows (located-rate, call distribution, degradation reasons), video-spot-check
-3–5 landings against the calls, and check the report („Aus-Schläge" foot renders; no „Sonstige 0" bar
-in the Schlagverteilung). Tune `LANDING_*` from what the spot-check shows.
+## Validation — RUN 2026-07-03 (Mac Studio, disposable match `landing-v1-smoketest`)
+Session2_Game_5.mp4 re-enqueued as a fresh doubles match (reviewed matches untouched); full
+calibrate-resume slice; trainer spot-checked the video. Results:
+- **Invariants hold:** 23 landings for 23 rallies (exactly one each); every degraded event carries a
+  `reason` and no position; no `errors` rows for doubles; web shows no „Sonstige 0" bar, Aus-Schläge
+  foot line hidden for doubles and rendered correctly for a synthetic singles errors row.
+- **Located-rate 1/23** (10 no_descent, 6 no_contact, 6 sparse) — ceiling set by 21 % shuttle coverage
+  at ~12 fps analysis, not by the landing logic (spot-checked misses were honest: detections died
+  before floor contact on real, human-visible landings).
+- **The 1 located landing was a false positive** (trainer-verified): a between-points shuttle handover
+  caught mid-air with the racket → flat-vy fired above the floor → projected „out 2.85 m", wrong
+  `winner_side`. Fixed in the same change with the `LANDING_MAX_OUT_CM` plausibility guard
+  (degrades to `reason=implausible`); re-run confirms the guard catches it.
+Still to do before trusting numbers: the landing answer key (≥2 sessions of labeled landings), then
+tune `LANDING_*` (esp. window/min-dets for ~12 fps sampling) against measured recall/precision.

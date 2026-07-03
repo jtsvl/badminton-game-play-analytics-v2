@@ -147,6 +147,30 @@ class TestLandingEvent(unittest.TestCase):
         self.assertTrue(p["located"])
         self.assertEqual(p["call"], "uncertain")
 
+    def test_implausibly_far_out_rest_is_degraded_not_called(self):
+        # Real-footage false positive (Session2_Game_5 rally 5, 2026-07-03): a shuttle caught mid-air
+        # at the net "came to rest" in image space; the ground homography projected the elevated pixel
+        # to (u=1.13, v=-0.21) — 2.85 m beyond the baseline. A landing that far out is (almost) never
+        # a floor contact → degrade honestly instead of fabricating a confident out call.
+        p = lnd.landing_event(descent_then_flat(u=1.13, v=-0.21), discipline="doubles")
+        self.assertFalse(p["located"])
+        self.assertEqual(p["reason"], "implausible")
+        self.assertEqual(p["call"], "uncertain")
+        self.assertIsNone(p["confidence"])
+        self.assertNotIn("u", p)
+        self.assertNotIn("px", p)
+
+    def test_out_landing_within_plausibility_cap_stays_out(self):
+        # 60 cm beyond the baseline: > the ±45 cm band (a clear out) but < the implausibility cap.
+        v = 1.0 + 0.60 / 13.40
+        p = lnd.landing_event(descent_then_flat(u=0.5, v=v), discipline="doubles")
+        self.assertTrue(p["located"])
+        self.assertEqual(p["call"], "out")
+
+    def test_plausibility_cap_default_is_wider_than_the_band(self):
+        self.assertGreater(lnd.LANDING_MAX_OUT_CM, lnd.LANDING_BAND_CM)
+        self.assertLessEqual(lnd.LANDING_MAX_OUT_CM, 200)
+
     def test_doubles_uses_full_width(self):
         # landing mid-alley: uncertain for singles (inside the band), in for doubles with the same
         # geometry only when the band allows — use a clearly-inside doubles point instead.

@@ -38,6 +38,7 @@ LANDING_FLAT_VY_ABS = float(os.environ.get("LANDING_FLAT_VY_ABS", "0.25"))   # |
 LANDING_FLAT_VY_FRAC = float(os.environ.get("LANDING_FLAT_VY_FRAC", "0.35")) # …or below this × peak descent
 # --- in/out call -------------------------------------------------------------------------------------
 LANDING_BAND_CM = float(os.environ.get("LANDING_BAND_CM", "45"))       # flat ± uncertainty band
+LANDING_MAX_OUT_CM = float(os.environ.get("LANDING_MAX_OUT_CM", "100"))  # farther out = elevated rest
 LANDING_NET_MARGIN_M = float(os.environ.get("LANDING_NET_MARGIN_M", "1.0"))  # near-net = ambiguous half
 LANDING_UNCERTAIN_CONF = 0.2
 
@@ -117,7 +118,10 @@ def landing_event(rally_dets: Sequence[Det], discipline: str = "singles",
 
     Located: ``{located, call, line, u, v, px, py, margin_cm, band_cm, confidence}`` — ``px, py`` are
     NORMALIZED image coordinates (same convention as the ``rally_end`` payload's x, y). Degraded:
-    ``{located: False, call: 'uncertain', line: None, reason, band_cm, confidence: None}``.
+    ``{located: False, call: 'uncertain', line: None, reason, band_cm, confidence: None}`` with
+    reason ∈ sparse | straddle | edge_cutoff | no_descent | no_contact | implausible — the last one
+    fires when the contact's court projection is > ``LANDING_MAX_OUT_CM`` outside every boundary
+    (an above-floor rest seen through the ground homography, e.g. a racket catch).
     ``edge_uncertain`` landings keep their position but are forced ``uncertain`` (lens bow near the
     frame edges; undistortion is still a no-op).
     """
@@ -126,6 +130,13 @@ def landing_event(rally_dets: Sequence[Det], discipline: str = "singles",
         return {"located": False, "call": "uncertain", "line": None, "reason": d["reason"],
                 "band_cm": LANDING_BAND_CM, "confidence": None}
     cls = classify_landing(d["u"], d["v"], discipline=discipline)
+    if cls["margin_cm"] < -LANDING_MAX_OUT_CM:
+        # A rally-ending landing this far outside every line is (almost) never a floor contact — it is
+        # the ground projection of a shuttle that came to REST ABOVE the floor (racket catch, net cord,
+        # between-points handover), which the image-space flatness test cannot tell from contact
+        # (proven on real footage 2026-07-03). Degrade honestly instead of fabricating an out call.
+        return {"located": False, "call": "uncertain", "line": None, "reason": "implausible",
+                "band_cm": LANDING_BAND_CM, "confidence": None}
     call = "uncertain" if d["edge_uncertain"] else cls["call"]
     if call == "uncertain":
         confidence = LANDING_UNCERTAIN_CONF

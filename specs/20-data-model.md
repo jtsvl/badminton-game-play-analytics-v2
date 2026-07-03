@@ -80,7 +80,10 @@ heatmap_uri? · placement_uri? · fastest?  (ESTIMATE)` — unique (match_id, pl
 - `landing` (BUILT — `features/shuttle-landing-inout.md`) `{located,call:in|out|uncertain,line,u?,v?,px?,py?,margin_cm?,band_cm,confidence,reason?}`
   — the rally-ending floor contact as an **estimate** („Schätzung"), never the match score (`'bounce'` reserved
   for raw mid-rally touches). `px,py` are **normalized** image coords (like `rally_end`'s x,y); `reason` only on
-  degraded (`located=false`) landings; exactly one landing event per rally.
+  degraded (`located=false`) landings — `sparse|straddle|edge_cutoff|no_descent|no_contact|implausible`
+  (`implausible` = the projection lies > `LANDING_MAX_OUT_CM` outside every line: an above-floor rest, e.g. a
+  racket catch, seen through the ground homography — found on real footage 2026-07-03); exactly one landing
+  event per rally.
 
 ### track_keyframes  (overlay, ~10 Hz)
 `id · video_id · subject ('player:<id>'|'shuttle') · data jsonb [{t,u,v}]` — unique (video_id, subject)

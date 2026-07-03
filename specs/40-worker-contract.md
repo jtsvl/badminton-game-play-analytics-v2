@@ -114,7 +114,9 @@ Landing/in-out (stage-6 sub-step, `features/shuttle-landing-inout.md` — **all 
 real-footage run**): `LANDING_WINDOW_S` (0.5), `LANDING_MAX_WINDOW_DETS` (8), `LANDING_MIN_DETS` (4),
 `LANDING_MAX_END_GAP_FRAMES` (2), `LANDING_EDGE_MARGIN` (0.04 → located=false),
 `LANDING_UNCERTAIN_EDGE` (0.08 → forced uncertain), `LANDING_FLAT_VY_ABS` (0.25 norm/s),
-`LANDING_FLAT_VY_FRAC` (0.35), `LANDING_BAND_CM` (45), `LANDING_NET_MARGIN_M` (1.0).
+`LANDING_FLAT_VY_FRAC` (0.35), `LANDING_BAND_CM` (45), `LANDING_MAX_OUT_CM` (100 — projections farther
+outside every line degrade to `located=false, reason=implausible`: above-floor rests like racket catches;
+validated against the 2026-07-03 real-footage false positive), `LANDING_NET_MARGIN_M` (1.0).
 **Promoted-weights convention:** `models/weights/shuttle/ckpts/TrackNet_best.pt` is
 the production checkpoint the code loads by default; the upstream baseline stays byte-identical as
 `TrackNet_baseline.pt`, and each promoted fine-tune also keeps a named copy (e.g. `TrackNet_ft_session1.pt`)
