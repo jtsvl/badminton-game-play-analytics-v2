@@ -9,6 +9,8 @@ import { SectionCard } from './SectionCard'
 interface Props {
   shots: ShotPair[]
   fastest?: number | null
+  /** „Aus-Schläge" aus Rally-Ende-Landungen (Schätzung, Untergrenze); null/undefined = ausblenden. */
+  outShots?: number | null
   dense?: boolean
   /** Tighter rows + no per-row percentage, for the narrow desktop tile. */
   compact?: boolean
@@ -17,16 +19,22 @@ interface Props {
 }
 
 /** "Schlagverteilung" — horizontal bars per shot type (canonical → German via shotDE), sorted desc. */
-export function ShotMixCard({ shots, fastest, dense, compact, style, anim = 'dezent' }: Props) {
+export function ShotMixCard({ shots, fastest, outShots, dense, compact, style, anim = 'dezent' }: Props) {
   const [ref, vis] = useInView<HTMLDivElement>(0.2)
   const on = prefersReducedMotion() || anim === 'aus' ? true : vis
   const total = shots.reduce((a, s) => a + s[1], 0)
   const sub = `${deNum(total)} Schläge`
-  const foot = fastest ? `Schnellster Smash ≈ ${deNum(fastest)} km/h — Schätzung aus der Shuttle-Verfolgung.` : undefined
+  const outLine = outShots != null
+    ? `Aus-Schläge: ${deNum(outShots)} (Schätzung, Untergrenze – nur sicher erkannte Landungen).`
+    : undefined
+  const fastLine = fastest ? `Schnellster Smash ≈ ${deNum(fastest)} km/h — Schätzung aus der Shuttle-Verfolgung.` : undefined
+  const foot = [fastLine, outLine].filter(Boolean).join(' ') || undefined
 
   if (shots.length === 0) {
+    // Bis Stage 7 (stroke) existiert, haben echte Spiele keine Schlagtypen, aber ggf. Aus-Schläge —
+    // der foot muss auch im Leerzustand erscheinen.
     return (
-      <SectionCard title="Schlagverteilung" sub={sub} dense={dense} style={style}>
+      <SectionCard title="Schlagverteilung" sub={sub} foot={foot} dense={dense} style={style}>
         <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0 }}>Noch keine Schlagdaten.</p>
       </SectionCard>
     )

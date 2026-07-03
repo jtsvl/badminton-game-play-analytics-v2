@@ -211,6 +211,19 @@ class Store:
             row, on_conflict="match_id,player_id"
         ).execute()
 
+    def upsert_player_shot_errors(
+        self, match_id: str, player_id: str, shot_type: str, errors: int
+    ) -> None:
+        """Errors from rally-ending out landings, per shot_type (``'unknown'`` until stage 7 exists).
+
+        Only the ``errors`` column is sent — PostgREST merge-duplicates leaves a future stroke-stage
+        ``count`` on the same row untouched."""
+        self._sb.table("player_shot_stats").upsert(
+            {"match_id": match_id, "player_id": player_id, "shot_type": shot_type,
+             "errors": errors},
+            on_conflict="match_id,player_id,shot_type",
+        ).execute()
+
     def upsert_track_keyframes(self, video_id: str, subject: str, data: list) -> None:
         self._sb.table("track_keyframes").upsert(
             {"video_id": video_id, "subject": subject, "data": data},

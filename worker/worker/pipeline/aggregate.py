@@ -1,11 +1,17 @@
-"""Stage: aggregate — per-player tracks → player_match_stats. Reuses insights.py verbatim.
+"""Stage: aggregate — per-player tracks → player_match_stats (+ out-landing errors). Reuses insights.py.
 
-`compute_player_stats` is pure (no polars) and unit-tested. The stage glue reads tracks.parquet,
-maps each track to its player via match_players.track_label, and upserts. Honesty: `fastest` is the
-estimated *shuttle* speed (needs the P2 shuttle stage) — left null, never fabricated from foot speed.
+`compute_player_stats` and `out_error_counts` are pure (no polars) and unit-tested. The stage glue
+reads tracks.parquet, maps each track to its player via match_players.track_label, and upserts.
+Honesty: `fastest` is the estimated *shuttle* speed (needs the P2 shuttle stage) — left null, never
+fabricated from foot speed. „Aus-Schläge": rally-ending OUT landings (stage 6 `landing` events) count
+against the hitting side and land in `player_shot_stats.errors` under `shot_type='unknown'` until
+stage 7 attributes real shot types — singles only (who of a doubles pair hit needs pose/stroke).
+Counting here keeps trainer edits honest: rally_sync rewrites the parquets from the edited DB before
+this stage runs, so a dropped rally loses its error attribution on the recompute.
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -64,6 +70,44 @@ def compute_player_stats(track: List[Sample], role: str, duration_min: float) ->
     }
 
 
+def out_error_counts(rally_rows: List[dict], event_rows: List[dict]) -> Optional[Dict[str, int]]:
+    """Pure: rally-ending OUT landings → errors per hitting side ('A'/'B', the schema's side domain).
+
+    A rally counts only when its landing is located AND called out AND `winner_side` is set (the
+    winner is the receiving side, so the hitter = the other side). Landings whose rally row is gone
+    (trainer drop) are orphans and never count. Returns None when there are no landing events at all
+    (a pre-landing cache) so the caller writes nothing instead of zeroing real data."""
+    landings = {e["rally_idx"]: e["payload"] for e in event_rows if e["type"] == "landing"}
+    if not landings:
+        return None
+    counts: Dict[str, int] = {}
+    by_idx = {r["idx"]: r for r in rally_rows}
+    for idx, p in landings.items():
+        rally = by_idx.get(idx)
+        if rally is None or not p.get("located") or p.get("call") != "out":
+            continue
+        winner = rally.get("winner_side")
+        if winner not in ("A", "B"):
+            continue
+        hitter = "B" if winner == "A" else "A"
+        counts[hitter] = counts.get(hitter, 0) + 1
+    return counts
+
+
+def _landing_rows(ctx, cache: Path) -> Tuple[List[dict], List[dict]]:
+    """rallies + events rows from the stage-6 parquets (ctx paths or cache fallback), payloads parsed."""
+    import polars as pl
+
+    rpath = ctx.get("rallies_path") or str(cache / "rallies.parquet")
+    epath = ctx.get("events_path") or str(cache / "events.parquet")
+    if not (Path(rpath).exists() and Path(epath).exists()):
+        return [], []
+    rallies = list(pl.read_parquet(rpath).iter_rows(named=True))
+    events = [{**e, "payload": json.loads(e["payload"]) if e.get("payload") else {}}
+              for e in pl.read_parquet(epath).iter_rows(named=True)]
+    return rallies, events
+
+
 def run(ctx) -> None:
     store = ctx["store"]
     cfg = ctx["cfg"]
@@ -120,6 +164,22 @@ def run(ctx) -> None:
         store.upsert_player_match_stats({"match_id": match_id, "player_id": mp["player_id"], **st})
         written += 1
     log.info("aggregate: wrote %d player_match_stats (duration=%.1f min)", written, duration_min)
+
+    # „Aus-Schläge" from out landings → player_shot_stats.errors (shot_type 'unknown' until stage 7).
+    match = store.get_match(match_id) or {}
+    if (match.get("discipline") or "singles") != "singles":
+        log.info("aggregate: doubles — per-player Aus-Schläge deferred (pair attribution needs stage 7)")
+        return
+    counts = out_error_counts(*_landing_rows(ctx, cache))
+    if counts is None:
+        log.info("aggregate: no landing events — player_shot_stats.errors untouched")
+        return
+    for mp in players:
+        if mp.get("player_id") and mp.get("side"):
+            # 0 included: overwrites a stale count after the trainer drops the rally behind it
+            store.upsert_player_shot_errors(match_id, mp["player_id"], "unknown",
+                                            counts.get(str(mp["side"]), 0))
+    log.info("aggregate: wrote out-landing errors per side %s", counts or "{}")
 
 
 def _span_min(df) -> float:

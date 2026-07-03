@@ -73,6 +73,10 @@ Done on `feat/frontend-port`, driven by the live seeded DB. Deviations from the 
   (consumed by the mobile card and the desktop `SafariFrame` surface).
 - **New variants**: `ShotMixCard` `compact` (tighter rows, no per-row %) and `KeyStats` `variant='bare'`
   (desktop Kennzahlen tile) — net-new, not in the prototype. `SectionCard` gained `foot`/`style`/`dense`.
+  `ShotMixCard` also takes `outShots` (2026-07-03, `features/shuttle-landing-inout.md`): an additive
+  „Aus-Schläge: N (Schätzung, Untergrenze …)" foot line, rendered even in the empty-shots state (real
+  matches have no shot types until stage 7 but can have Aus-Schläge); mobile renders the card when
+  `shots.length > 0 || outShots != null`.
 - **Empty/`null` shapes** the prototype assumed away are guarded: `pairs:[]` (gate on `.length`),
   `rallies:null`, `shots:[]` (empty-state tile), `result` is `'win'`/`'loss'`. Doubles with no video shows a
   "keine Videoanalyse" placeholder in the desktop span-8 so the grid doesn't collapse.

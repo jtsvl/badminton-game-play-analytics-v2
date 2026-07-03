@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase, isConfigured } from '../lib/supabase'
 import { dateParts } from '../lib/format'
+import { sumErrors } from '../lib/landing'
 import { matchResult } from '../lib/score'
 import { shotDE } from '../lib/labels'
 import { resolvePlaybackSrc } from '../lib/storage'
@@ -34,7 +35,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
         const [mpRes, pmsRes, pssRes, pairRes, rallyRes, vidRes, endRes] = await Promise.all([
           supabase.from('match_players').select('side, slot, player_id, players(name, first_name)').eq('match_id', mid),
           supabase.from('player_match_stats').select('*').eq('match_id', mid),
-          supabase.from('player_shot_stats').select('player_id, shot_type, count').eq('match_id', mid),
+          supabase.from('player_shot_stats').select('player_id, shot_type, count, errors').eq('match_id', mid),
           supabase.from('pair_match_stats').select('*').eq('match_id', mid),
           supabase.from('match_rally_stats').select('*').eq('match_id', mid).maybeSingle(),
           supabase.from('match_videos').select('*').eq('match_id', mid).limit(1),
@@ -45,10 +46,17 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
         const statsByPlayer = new Map<string, PlayerMatchStatsRow>(
           ((pmsRes.data ?? []) as PlayerMatchStatsRow[]).map((s) => [s.player_id, s]))
         const shotsByPlayer = new Map<string, ShotPair[]>()
+        const errorRowsByPlayer = new Map<string, PlayerShotStatRow[]>()
         for (const r of (pssRes.data ?? []) as PlayerShotStatRow[]) {
-          const list = shotsByPlayer.get(r.player_id) ?? []
-          list.push([r.shot_type, r.count])
-          shotsByPlayer.set(r.player_id, list)
+          // errors-only rows (unknown/count=0, vom Landing-Feature) dürfen keinen 0-Balken rendern
+          if (r.count > 0) {
+            const list = shotsByPlayer.get(r.player_id) ?? []
+            list.push([r.shot_type, r.count])
+            shotsByPlayer.set(r.player_id, list)
+          }
+          const errs = errorRowsByPlayer.get(r.player_id) ?? []
+          errs.push(r)
+          errorRowsByPlayer.set(r.player_id, errs)
         }
 
         const games: number[][] = Array.isArray(m.games) ? m.games : []
@@ -78,6 +86,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
               heatmap_uri: st?.heatmap_uri ?? null,
               fastest: st?.fastest ?? null,
               shots,
+              outShots: sumErrors(errorRowsByPlayer.get(mp.player_id) ?? []),
             },
           }
         })

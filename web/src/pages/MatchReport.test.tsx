@@ -24,7 +24,10 @@ beforeAll(() => {
 
 afterEach(cleanup)
 
-function mkPlayer(over: { side: Side; first: string; name?: string; isViewer?: boolean; shots?: ShotPair[] }): ReportPlayer {
+function mkPlayer(over: {
+  side: Side; first: string; name?: string; isViewer?: boolean; shots?: ShotPair[]
+  outShots?: number | null
+}): ReportPlayer {
   return {
     playerId: `p-${over.first}`,
     name: over.name ?? `${over.first} Muster`,
@@ -45,6 +48,7 @@ function mkPlayer(over: { side: Side; first: string; name?: string; isViewer?: b
         ['clear', 84],
         ['smash', 38],
       ],
+      outShots: over.outShots ?? null,
     },
   }
 }
@@ -122,6 +126,20 @@ describe('MatchReportMobile', () => {
     // no shots → no Schlagverteilung section on mobile; no video → no Video-Analyse
     expect(screen.queryByText('Video-Analyse')).not.toBeInTheDocument()
     expect(screen.queryByText('Schlagverteilung')).not.toBeInTheDocument()
+  })
+
+  it('shows Aus-Schläge even without shot types (real matches until stage 7)', () => {
+    const report: MatchReport = {
+      ...singles,
+      players: [
+        mkPlayer({ side: 'A', first: 'Lukas', isViewer: true, shots: [], outShots: 3 }),
+        mkPlayer({ side: 'B', first: 'Jonas', shots: [], outShots: 0 }),
+      ],
+    }
+    wrap(<MatchReportMobile report={report} tab={0} setTab={() => {}} slug="2026-06-10" />)
+    expect(screen.getByText('Schlagverteilung')).toBeInTheDocument()   // empty-state card renders
+    expect(screen.getByText('Noch keine Schlagdaten.')).toBeInTheDocument()
+    expect(screen.getByText(/Aus-Schläge: 3/)).toBeInTheDocument()     // the estimate foot line
   })
 })
 

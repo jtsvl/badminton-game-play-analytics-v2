@@ -16,6 +16,9 @@ from typing import Dict, List, Sequence, Tuple
 
 from .insights import COURT_W_M, COURT_L_M
 
+# Singles side lines sit this far inside each doubles side line (full length in singles).
+SINGLES_INSET_M = 0.46
+
 Pt = Tuple[float, float]
 Sample = Tuple[float, float, float]  # (t, u, v)
 

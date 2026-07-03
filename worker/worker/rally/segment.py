@@ -235,16 +235,21 @@ def count_hits(rally_dets: Sequence[Det], deadband: float = HIT_DEADBAND) -> Opt
 
 def build_rallies(dets: Sequence[Det], player_energy: Optional[Sequence] = None,
                   swings: Optional[Sequence[dict]] = None,
-                  swing_bridge: bool = RALLY_SWING_BRIDGE) -> Dict[str, list]:
+                  swing_bridge: bool = RALLY_SWING_BRIDGE,
+                  discipline: str = "singles") -> Dict[str, list]:
     """Orchestrate stage 6: detections → rallies + events shaped for the DB (rallies/events columns).
 
     Dead time falls out for free — anything not inside a surviving rally span is simply never emitted.
-    ``rallies`` rows carry no ``winner_side``/``end_shot_type`` (those are decoupled from the human-entered
-    match score and refined by stage 7). ``events`` reference their rally by ``rally_idx`` (the store
-    resolves it to ``rally_id`` on insert). Per rally: a ``serve`` event, provisional ``hit`` events, and a
-    ``rally_end`` event carrying the floor-contact ``(x, y, u, v)`` for the future in/out feature.
-    ``swings`` (player swing-activity events) only change output when ``swing_bridge`` is on — see
+    ``rallies`` rows carry no ``winner_side``/``end_shot_type`` here (``winner_side`` is an estimate the
+    rally_hit glue derives from an out landing + the track→player mapping; both stay decoupled from the
+    human-entered match score). ``events`` reference their rally by ``rally_idx`` (the store resolves it
+    to ``rally_id`` on insert). Per rally: a ``serve`` event, provisional ``hit`` events, a ``rally_end``
+    event carrying the last in-flight ``(x, y, u, v)``, and a ``landing`` event with the in/out call
+    against the ``discipline``'s boundary (or an honest ``located=false``). ``swings`` (player
+    swing-activity events) only change output when ``swing_bridge`` is on — see
     ``merge_runs_into_rallies``."""
+    from .landing import landing_event  # local: landing.py imports END_MIN_CONF from here (no cycle)
+
     dets = sorted(dets, key=lambda d: d["t"])
     rallies_dets = merge_runs_into_rallies(reject_foreign_runs(group_trajectories(dets)),
                                            swings=swings, swing_bridge=swing_bridge)
@@ -275,4 +280,7 @@ def build_rallies(dets: Sequence[Det], player_energy: Optional[Sequence] = None,
         events.append({"rally_idx": idx, "t_s": end["t"], "type": "rally_end",
                        "payload": {"x": end["x"], "y": end["y"], "u": end["u"], "v": end["v"]},
                        "confidence": None})
+        landing = landing_event(rd, discipline)
+        events.append({"rally_idx": idx, "t_s": landing.pop("t", end["t"]), "type": "landing",
+                       "payload": landing, "confidence": landing["confidence"]})
     return {"rallies": rallies, "events": events}

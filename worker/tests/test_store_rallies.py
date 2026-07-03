@@ -48,6 +48,10 @@ class _FakeTable:
         self.op, self.rows = "insert", rows
         return self
 
+    def upsert(self, rows, on_conflict=None):
+        self.op, self.rows = f"upsert:{on_conflict}", rows
+        return self
+
     def select(self, cols="*"):
         self.op, self.rows = "select", cols
         return self
@@ -140,8 +144,7 @@ class TestReplaceRalliesOrchestration(unittest.TestCase):
 
 class TestInsertRallyCorrections(unittest.TestCase):
     def test_plain_insert_of_given_rows(self):
-        # append-only by design (0011): a plain insert, NOT upsert — _FakeTable has no .upsert(),
-        # so an upsert here would raise AttributeError and fail this test.
+        # append-only by design (0011): a plain insert, NOT upsert — the recorded op asserts it.
         rows = [{"op": "drop", "rally_id": "r-old", "match_id": "M1"}]
         s = _store_with_fake()
         s.insert_rally_corrections(rows)
@@ -151,6 +154,17 @@ class TestInsertRallyCorrections(unittest.TestCase):
         s = _store_with_fake()
         s.insert_rally_corrections([])
         self.assertEqual(s._sb.calls, [])
+
+
+class TestUpsertPlayerShotErrors(unittest.TestCase):
+    def test_upserts_on_the_shot_stats_unique_key(self):
+        # PostgREST merge-duplicates only touches the sent columns, so an existing row's `count`
+        # (stage 7's column, once it exists) survives an errors-only upsert.
+        s = _store_with_fake()
+        s.upsert_player_shot_errors("M1", "P1", "unknown", 3)
+        self.assertEqual(s._sb.calls, [(
+            "player_shot_stats", "upsert:match_id,player_id,shot_type", {},
+            {"match_id": "M1", "player_id": "P1", "shot_type": "unknown", "errors": 3}, None)])
 
 
 class TestRallyReaders(unittest.TestCase):

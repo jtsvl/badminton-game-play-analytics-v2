@@ -157,7 +157,7 @@ export function MatchReportDashboard({ report, tab, setTab, slug }: Props) {
           <ActivityCard points={s.timeline} sub="je 5 Minuten" chartMaxWidth={320} dense />
         </Reveal>
         <Reveal i={3} style={{ gridColumn: 'span 3', gridRow: '2' }}>
-          <ShotMixCard shots={s.shots} fastest={s.fastest} dense compact />
+          <ShotMixCard shots={s.shots} fastest={s.fastest} outShots={s.outShots} dense compact />
         </Reveal>
       </div>
     </div>

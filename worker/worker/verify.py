@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, urlparse
 from PIL import Image, ImageDraw, ImageFont
 
 from .config import load_config
-from .geometry import UNIT_SQUARE, ankle_point, apply_homography, solve_homography
+from .geometry import SINGLES_INSET_M, UNIT_SQUARE, ankle_point, apply_homography, solve_homography
 from .store import Store
 
 log = logging.getLogger("worker.verify")
@@ -220,8 +220,8 @@ def annotate(data: DebugData, idx: int, *, show_all=True, show_court=True, show_
         # doubles long service lines, 0.76 m from each back line
         for yy in (fy(0.76), fy(13.40 - 0.76)):
             d.line([(mx, yy), (mx + mw, yy)], fill=LN, width=int(sw))
-        # singles side lines, 0.46 m inside each doubles side line (full length)
-        for xx in (fx(0.46), fx(6.10 - 0.46)):
+        # singles side lines, SINGLES_INSET_M inside each doubles side line (full length)
+        for xx in (fx(SINGLES_INSET_M), fx(6.10 - SINGLES_INSET_M)):
             d.line([(xx, my), (xx, my + mh)], fill=LN, width=int(sw))
         # centre line — splits the service courts: back line → short service line, on EACH half (never across the net)
         cx = mx + mw / 2
