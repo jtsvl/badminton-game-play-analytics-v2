@@ -1,8 +1,9 @@
 # Feature — Pose/swing fusion for rally segmentation (FR-35 follow-up, step 2)
 
-**Status (2026-07-03): veto DROPPED (measured T6 verdict below); T8 bridge-only mechanism built,
-flag off by default, threshold unmeasured** — a `--bridge-hist` tuning pass on the Mac Studio is the
-next step before `RALLY_SWING_BRIDGE` can ever flip on. Rules over the existing heuristic, **not a
+**Status (2026-07-03): veto DROPPED (measured T6 verdict below); T8 bridge PROMOTED ON**
+(`RALLY_SWING_BRIDGE_MIN_STRENGTH=4.0`, ~80% measured split recovery) **with a known, deliberately
+accepted gap: the false-merge safety check had zero real test cases on the 5-game corpus** — see
+the T8 verdict below before touching this default. Rules over the existing heuristic, **not a
 learned segmenter** (settled 2026-07-02, deep-research verdict). The single biggest measured
 weakness of stage 6 is its single input signal (shuttle continuity); this fuses a **player
 swing-activity cue** — derived from the RTMPose keypoints the pipeline already caches — into the
@@ -88,13 +89,14 @@ op). Hence: veto = low threshold + span guard; bridge = high threshold + serve-e
   margin]` AND span < `RALLY_SWING_VETO_MAX_S`. Measured fused (swing-OR-settled) kill rate at the
   largest shared threshold keeping `missed == 0` on all 5 games: **2/76 (2.6%)**, nowhere near the
   ≥50% target — phantom removal stays the trainer's one-click drop in rally-review.
-- **Bridge (T8 — built 2026-07-03, flag off, threshold unmeasured)** (inside
-  `merge_runs_into_rallies`): gaps in `(RALLY_BRIDGE_S, RALLY_SWING_BRIDGE_S]` merge iff a swing ≥
-  bridge-strength lies in the gap **interior**, `t ∈ [gap_start, gap_end − RALLY_SERVE_EXCLUSION_S]`.
-  The exclusion zone exists because a quick re-serve puts a genuine swing at a gap's *end* —
-  bridging across it would glue two real rallies. Cap set from the measured gap histogram of the
-  trainer-merged pairs (18/20 ≤ 2.34s), not guessed; `RALLY_SWING_BRIDGE_MIN_STRENGTH` is still an
-  unmeasured placeholder (6.0 tl/s) — see the T8 tuning step below.
+- **Bridge (T8 — PROMOTED ON 2026-07-03)** (inside `merge_runs_into_rallies`): gaps in
+  `(RALLY_BRIDGE_S, RALLY_SWING_BRIDGE_S]` merge iff a swing ≥ `RALLY_SWING_BRIDGE_MIN_STRENGTH`
+  (4.0 tl/s) lies in the gap **interior**, `t ∈ [gap_start, gap_end − RALLY_SERVE_EXCLUSION_S]`. The
+  exclusion zone exists because a quick re-serve puts a genuine swing at a gap's *end* — bridging
+  across it would glue two real rallies. Cap set from the measured gap histogram of the
+  trainer-merged pairs (18/20 ≤ 2.34s). Threshold picked from `--bridge-hist` (~80% split recovery,
+  see the T8 verdict below) — **but the false-merge side of that measurement had zero test cases**,
+  a deliberately accepted gap, not a proven-safe result.
 - **Serve corroboration** (confidence-only, **times never move**): `find_serve_frame` marks
   `payload.swing_corroborated` and raises confidence to `RALLY_SERVE_CONF_CORROBORATED` when
   settled AND a swing falls within ±`RALLY_SERVE_SWING_WINDOW_S` of the first detection. Feeds
@@ -139,14 +141,16 @@ bottom):
 | --- | --- | --- |
 | boundary-F1 @ ±0.5 s | 0.742–0.775 per game | **up on every game** — smaller gain now that only splits (not phantoms) are addressable |
 | `false_rallies` | 76 aggregate (7–20/game) | **ABANDONED** — the veto that targeted this (≤38, ≥50% cut) measured 2/76 (2.6%); phantom removal stays manual (rally-review one-click drop) |
-| `splits` | 20 aggregate (2–5/game) | **reduced on every game** (T8 bridge — still the live target) |
+| `splits` | 20 aggregate (2–5/game) | **PROMOTED 2026-07-03** — thr=4.0 recovers 17/21 (81%) measured splits |
 | `missed` (falsely vetoed real rally) | 0 | **N/A** — no veto code exists in `segment.py`, so this can't regress |
-| `merges` (falsely bridged pair) | 0 | **hard 0, every reviewed game** (T8's gate — see `false_merges` in `--bridge-hist`) |
+| `merges` (falsely bridged pair) | 0 | **untestable on this corpus** (0 real gaps in the 1.5–2.5s candidate range) — promoted anyway on a deliberate safety margin, see T8 verdict; **the tripwire is future rally-review data**, not this gate |
 
-`RALLY_SWING_BRIDGE` flips ON by default **only** when `false_merges == 0` on every reviewed game
-at the chosen threshold (mirrors the promoted-checkpoint precedent). If it can't clear that gate:
-re-tune from the measured histograms only — no new rule conditions without a new measured failure
-class; if no threshold works, T8 is dropped too and `splits` stays a review fact of life.
+`RALLY_SWING_BRIDGE` was promoted ON 2026-07-03 despite the `false_merges` gate being untestable
+(vacuously 0 over an empty population) rather than measured-safe — a deliberate, surfaced
+exception to the "flip on only when the hard gate passes" rule, justified by the conservative
+threshold margin and the unrecoverable-but-rare failure mode. If future rally-review data ever
+shows a falsely-glued pair, raise `RALLY_SWING_BRIDGE_MIN_STRENGTH` or set `RALLY_SWING_BRIDGE=0`
+— both are env-only reverts, no code change needed.
 
 ### Baseline table (measured 2026-07-02 after the trainer reviewed ALL 5 games, flags off, tol ±0.5 s)
 
@@ -259,29 +263,40 @@ rewiring is needed once a real threshold is set. `eval_rally.predict_from_cache`
 load and pass swings identically (`load_swings`, reusing `rally_hit._swings_from_frames` — not a
 duplicate path), so the plain scorecard stays truthful once the flag flips.
 
-**Still open: `RALLY_SWING_BRIDGE_MIN_STRENGTH` is an unmeasured placeholder (6.0 tl/s).** The
-mechanism is fully built and tested but must not flip on until a measured tuning pass — mirroring
-exactly what T6 did for the veto — sets this threshold from real footage. `eval_rally.py` gained
-`--bridge-hist` for exactly this: it reports swing-strength distributions over `split_gap_spans`
-(should-bridge — the same 20 trainer-merged interior gaps as the baseline table below) vs
-`real_gap_spans` restricted to the same candidate range (must-NOT-bridge), plus an operating-point
-sweep whose hard gate is `false_merges == 0` (bridging two genuinely distinct rallies together is
-unrecoverable, same cost asymmetry as the veto's `missed == 0`).
+**Per-game results (measured 2026-07-03, all 5 games, `--bridge-hist`):**
 
-**Next step (Mac Studio, mirrors the T6 measurement loop):**
-```
-cd worker
-for g in 1 2 3 4 5; do
-  slug="2026-06-30-session2-game${g}"
-  uv run python -m worker.eval_rally --slug "$slug" --bridge-hist
-  uv run python -m worker.eval_rally --slug "$slug" --bridge-hist --json > "/tmp/t8-game${g}.json"
-done
-```
-Decision rule (pre-registered, same shape as T6): the highest shared threshold with
-`false_merges == 0` on every game must recover a meaningful share of the 20 measured split gaps —
-if it does, flip `RALLY_SWING_BRIDGE_MIN_STRENGTH` to that value and `RALLY_SWING_BRIDGE=1`; if
-even the highest tested threshold can't keep `false_merges == 0`, or recovers too few splits to be
-worth carrying the flag, T8 is also dropped and `splits` stays a trainer-review fact of life.
+| game | split gaps (should-bridge) | at thr=4.0: bridged | real gaps in (1.5, 2.5]s range (must-NOT-bridge) |
+| --- | --- | --- | --- |
+| game1 | 5 | 5/5 | 0 |
+| game2 | 5 | 3/5 | 0 |
+| game3 | 5 | 3/5 | 0 |
+| game4 | 4 | 4/4 | 0 |
+| game5 | 2 | 2/2 | 0 |
+| **Σ** | **21** | **17/21 (81%)** | **0** |
+
+At thr=2.5 tl/s every measured split gap bridges correctly (21/21) on all 5 games; recovery
+degrades unevenly above that (game3 first, at thr=3.0). thr=4.0 was chosen as a **deliberate safety
+margin** above the point of 100% recovery, at the cost of ~19% of the measured splits, precisely
+*because* the false-merge side of this measurement is empty (see below) — there was no
+data-driven way to justify staying at the lowest working threshold.
+
+**The honest gap: `real_gap_spans` restricted to the candidate range (1.5, 2.5]s was EMPTY on
+all 5 games — 0 samples, not 0 false-merges.** A `false_merges == 0` reading over an empty
+population is vacuously true, not evidence of safety — unlike the veto's `missed == 0` gate, which
+was tested against 149 real GT rallies per threshold. The plausible explanation: a real break
+between points is either a quick re-serve (well under 1.5s, already handled by the unconditional
+`RALLY_BRIDGE_S` path) or a proper reset pause (well over 2.5s) — gaps landing exactly in the
+1.5–2.5s band between two genuinely distinct rallies may simply be rare in this sport's rhythm.
+Plausible, **not proven** with 5 games.
+
+**Why promoted anyway (user decision, 2026-07-03):** a falsely-bridged pair is unrecoverable —
+the rally-review UI has no split/un-merge operation — so this is not a decision to take lightly.
+Weighed against that: the conservative threshold (well above the ~0.7–1.4 tl/s between-rally
+ambient-motion baseline measured in T6), the modest scope (rare 1.5–2.5s gaps only), and the
+existing rally-review capture (FR-35) as an ongoing observation channel. Accepted with eyes open,
+not defaulted into. **If a future review ever reveals a falsely-glued rally pair, this is the
+first thing to revisit** — either raise `RALLY_SWING_BRIDGE_MIN_STRENGTH` further or turn
+`RALLY_SWING_BRIDGE` back off; both are one env var away, no code change needed.
 
 ## Env knobs (defaults; pattern = module constant + default kwarg, `segment.py` style)
 
@@ -297,9 +312,9 @@ worth carrying the flag, T8 is also dropped and `splits` stays a trainer-review 
 | ~~`RALLY_SWING_VETO_MAX_S`~~ | DROPPED | rallies ≥ this can never be vetoed |
 | ~~`RALLY_SWING_VETO_MARGIN_S`~~ | DROPPED | swing search margin around the rally span |
 | ~~`RALLY_SWING_VETO_MIN_STRENGTH`~~ | DROPPED | low bar — any plausible activity saves |
-| `RALLY_SWING_BRIDGE` | **"0"** (off) — mechanism built 2026-07-03, `segment.py` | swing-conditional gap bridging master switch |
+| `RALLY_SWING_BRIDGE` | **"1"** (on) — PROMOTED 2026-07-03, see T8 verdict | swing-conditional gap bridging master switch |
 | `RALLY_SWING_BRIDGE_S` | 2.5 (T6-measured gap histogram: 18/20 trainer-merged gaps ≤ 2.34s) | max gap the swing bridge may close |
-| `RALLY_SWING_BRIDGE_MIN_STRENGTH` | 6.0 — **unmeasured placeholder**; `--bridge-hist` tuning pass pending | high bar — unambiguous swings only |
+| `RALLY_SWING_BRIDGE_MIN_STRENGTH` | 4.0 — measured `--bridge-hist` (81% split recovery); deliberate margin above the 2.5 tl/s 100%-recovery point since false-merge safety was untestable (0 real-gap samples in range) | high bar — unambiguous swings only |
 | `RALLY_SERVE_EXCLUSION_S` | 0.75 | no bridging on a swing this close to gap end |
 | `RALLY_SERVE_CONF_CORROBORATED` | 0.85 | serve confidence when swing-corroborated |
 | `RALLY_SERVE_SWING_WINDOW_S` | 0.5 | ± window around first detection |
@@ -318,6 +333,11 @@ worth carrying the flag, T8 is also dropped and `splits` stays a trainer-review 
   player, there are no keypoints, no swing events, and a swing-bridge gap with a real dropout-swing
   could go unbridged (false negative — the rally still stays a `split`, no correctness risk, just
   a missed improvement). The `false_merges == 0` hard gate is the correctness tripwire, not this.
+- **`RALLY_SWING_BRIDGE` was promoted ON with an untested safety gate** (2026-07-03): the 5-game
+  corpus had zero real inter-rally gaps in the 1.5–2.5s candidate range, so `false_merges == 0` is
+  vacuous, not measured-safe. A falsely bridged pair is unrecoverable (no split/un-merge op in
+  rally-review). Mitigated by a deliberate margin above the 100%-recovery threshold, not proven
+  safe — future rally-review data is the real tripwire; see the T8 verdict for the reasoning.
 - **GT is drop/merge-only:** kept-rally boundary correctness is *assumed*, not measured — serve/end
   timing quality is invisible to this harness (see GT regime above).
 
