@@ -87,6 +87,55 @@ class TestMergeRunsIntoRallies(unittest.TestCase):
         self.assertEqual(seg.merge_runs_into_rallies([short]), [])
 
 
+def swing(t, strength, track=1):
+    """One swing-activity event in the shape worker.rally.swing.swing_events emits."""
+    return {"t": t, "track": track, "strength": strength}
+
+
+class TestSwingBridge(unittest.TestCase):
+    # a ends t≈0.567; b starts t=2.6 → gap≈2.033s, inside (BRIDGE_S=1.5, RALLY_SWING_BRIDGE_S=2.5].
+    # Interior search window for a bridging swing: [0.567, 2.6 - RALLY_SERVE_EXCLUSION_S(0.75)=1.85].
+    A = line(0.0, 0.10, 0.5, 0.004, 0.0, 18)
+    B = line(2.6, 0.20, 0.5, 0.004, 0.0, 18)
+
+    def test_strong_interior_swing_bridges_by_default(self):
+        # RALLY_SWING_BRIDGE promoted on 2026-07-03 (T8 verdict: thr=4.0 tl/s, ~80% split recovery,
+        # false_merges untestable on the 5-game corpus but zero measured — see spec).
+        rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=[swing(1.2, 8.0)])
+        self.assertEqual(len(rallies), 1)
+
+    def test_can_still_be_disabled_explicitly(self):
+        rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=[swing(1.2, 8.0)],
+                                              swing_bridge=False)
+        self.assertEqual(len(rallies), 2)
+
+    def test_no_swings_provided_stays_split_even_by_default(self):
+        rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=None)
+        self.assertEqual(len(rallies), 2)
+
+    def test_weak_swing_below_threshold_stays_split(self):
+        rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=[swing(1.2, 2.0)],
+                                              swing_bridge=True)
+        self.assertEqual(len(rallies), 2)
+
+    def test_swing_inside_serve_exclusion_zone_does_not_bridge(self):
+        # t=2.2 is within the last 0.75s before b starts — a quick re-serve, not a dropout bridge.
+        rallies = seg.merge_runs_into_rallies([self.A, self.B], swings=[swing(2.2, 8.0)],
+                                              swing_bridge=True)
+        self.assertEqual(len(rallies), 2)
+
+    def test_gap_beyond_swing_bridge_cap_never_bridges(self):
+        far_b = line(3.6, 0.20, 0.5, 0.004, 0.0, 18)          # gap≈3.03s > RALLY_SWING_BRIDGE_S=2.5
+        rallies = seg.merge_runs_into_rallies([self.A, far_b], swings=[swing(2.0, 8.0)],
+                                              swing_bridge=True)
+        self.assertEqual(len(rallies), 2)
+
+    def test_short_gap_still_bridges_without_any_swing(self):
+        close_b = line(1.0, 0.20, 0.5, 0.004, 0.0, 18)        # 0.43s gap — the original BRIDGE_S path
+        rallies = seg.merge_runs_into_rallies([self.A, close_b], swing_bridge=True)
+        self.assertEqual(len(rallies), 1)
+
+
 class TestFindServeFrame(unittest.TestCase):
     SETTLED = [(9.5, 1.0), (9.7, 1.2), (9.9, 0.8)]          # players calm before the serve
     MOVING = [(9.5, 12.0), (9.7, 10.0), (9.9, 9.0)]         # already in motion (no settled window)
@@ -174,6 +223,15 @@ class TestBuildRallies(unittest.TestCase):
         # no rally covers the dead-time blips at t≈3.0–4.4
         for t0, t1 in spans:
             self.assertFalse(t0 <= 3.7 <= t1)
+
+    def test_swings_threaded_through_to_the_bridge_rule(self):
+        rally1 = line(0.0, 0.10, 0.5, 0.004, 0.0, 18)         # ends t≈0.567
+        rally2 = line(2.6, 0.20, 0.5, 0.004, 0.0, 18)         # gap≈2.033s — needs the swing bridge
+        dets = rally1 + rally2
+        on = seg.build_rallies(dets, swings=[swing(1.2, 8.0)])
+        self.assertEqual(len(on["rallies"]), 1)               # bridged by default (T8 promoted)
+        off = seg.build_rallies(dets, swings=[swing(1.2, 8.0)], swing_bridge=False)
+        self.assertEqual(len(off["rallies"]), 2)
 
 
 if __name__ == "__main__":
