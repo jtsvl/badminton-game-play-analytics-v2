@@ -10,8 +10,11 @@ coverage ≥ 0.70, else the accuracy-coverage knee, flagged. Labels join the NPZ
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from pathlib import Path
+
+log = logging.getLogger("worker.stroke")
 
 CLASSES = ("clear", "smash", "drop", "net", "drive", "lift", "serve")  # frozen; index = class id
 _CLASS_INDEX = {c: i for i, c in enumerate(CLASSES)}
@@ -200,3 +203,192 @@ def load_dataset(dataset_dir: Path) -> tuple[dict, "pl.DataFrame"]:  # noqa: F82
         raise ValueError(f"meta.parquet is not row-aligned with the NPZ: shuttle_coverage "
                          f"mismatch on {off}/{n} rows — re-export the dataset")
     return data, meta
+
+
+# --- torch section (lazy imports; nothing above needs the ml stack) ---------------------
+
+HARD_PAIRS = (("drop", "net"), ("clear", "lift"))  # spec: confusion called out for these
+
+
+def _none_if_nan(x) -> float | None:
+    import math
+
+    v = float(x)
+    return None if math.isnan(v) else v
+
+
+def resolve_device(requested: str = "auto") -> str:
+    """MPS-first fp32 (CLAUDE.md): one real forward+backward probe — loss AND every grad
+    finite — else CPU with a loud log. Explicit cpu/mps requests are honored unprobed."""
+    import torch
+
+    if requested != "auto":
+        return requested
+    if not torch.backends.mps.is_available():
+        return "cpu"
+    from .model import BST4
+
+    try:
+        torch.manual_seed(0)
+        model = BST4(drop_p=0.0).to("mps")
+        loss = torch.nn.functional.cross_entropy(
+            model(torch.randn(4, 16, 4, 34, device="mps"),
+                  torch.randn(4, 16, 2, device="mps"),
+                  torch.rand(4, 16, 4, 2, device="mps")),
+            torch.zeros(4, dtype=torch.long, device="mps"))
+        loss.backward()
+        grads_finite = all(torch.isfinite(p.grad).all().item()
+                           for p in model.parameters() if p.grad is not None)
+        if torch.isfinite(loss).item() and grads_finite:
+            return "mps"
+        log.warning("stroke: MPS fwd+bwd probe non-finite — falling back to cpu")
+    except Exception as e:  # noqa: BLE001 — any MPS failure means: train on CPU
+        log.warning("stroke: MPS probe failed (%s) — falling back to cpu", e)
+    return "cpu"
+
+
+def train_fold(J, S, P, y, cfg: dict, device: str, rng) -> "BST4":  # noqa: F821
+    """Fixed-budget training (no early stopping — there is no honest val set inside a
+    fold, and a fixed budget keeps the final all-data train well-defined): AdamW, 5-epoch
+    linear warmup then cosine to 0, class-weighted CE from THIS split's rows, fresh ±1
+    temporal jitter each epoch, drop_last batches (keeps BatchNorm batches full)."""
+    import math
+
+    import numpy as np
+    import torch
+
+    from .model import BST4
+
+    torch.manual_seed(int(cfg.get("seed", 42)))
+    model = BST4(in_dim=int(J.shape[-1]), seq_len=int(J.shape[1]), n_class=len(CLASSES),
+                 variant=cfg.get("variant", "cg_ap")).to(device)
+    weights = torch.tensor(class_weights(y), dtype=torch.float32, device=device)
+    loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(cfg.get("lr", 1e-3)),
+                            weight_decay=1e-4)
+    epochs = int(cfg.get("epochs", 150))
+    warmup = min(5, epochs)
+
+    def lam(epoch: int) -> float:
+        if epoch < warmup:
+            return (epoch + 1) / warmup
+        return 0.5 * (1 + math.cos(math.pi * (epoch - warmup) / max(1, epochs - warmup)))
+
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lam)
+    n = len(y)
+    batch = min(int(cfg.get("batch_size", 32)), n)
+    y_t = torch.from_numpy(np.ascontiguousarray(y)).to(device)
+    model.train()
+    for _ in range(epochs):
+        jj, sj, pj = jitter_shift((J, S, P), rng.integers(-1, 2, n))
+        perm = rng.permutation(n)
+        for i in range(0, n - batch + 1, batch):
+            idx = perm[i:i + batch]
+            jb, sb, pb = (torch.from_numpy(np.ascontiguousarray(a[idx])).float().to(device)
+                          for a in (jj, sj, pj))
+            opt.zero_grad()
+            loss = loss_fn(model(jb, sb, pb), y_t[idx])
+            loss.backward()
+            opt.step()
+        sched.step()
+    return model
+
+
+def predict_probs(model, J, S, P, device: str, batch: int = 256):
+    """(n, 7) softmax probabilities. eval mode (BatchNorm running stats — batch-independent
+    by test), no jitter, fp32."""
+    import numpy as np
+    import torch
+
+    model.eval()
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(J), batch):
+            jb, sb, pb = (torch.from_numpy(np.ascontiguousarray(a[i:i + batch]))
+                          .float().to(device) for a in (J, S, P))
+            out.append(torch.softmax(model(jb, sb, pb), dim=1).double().cpu().numpy())
+    return np.concatenate(out, axis=0)
+
+
+def run_logo_cv(data: dict, meta, cfg: dict):
+    """Leave-one-game-out CV (locked eval): per fold, train on the OTHER games' confident
+    rows, predict every row of the held-out game — confident and Unsicher alike — so all
+    rows get exactly one out-of-fold prediction. Returns (oof_df in meta row order, report).
+    Gate metrics use confident rows only; τ is swept on the OOF confident rows (FR-22)."""
+    import numpy as np
+    import polars as pl
+
+    J, P = to_model_arrays(data["joints"], data["positions"],
+                           cfg.get("pose_style", "J_only"))
+    S = data["shuttle"]
+    video_ids = np.asarray([str(v) for v in meta["video_id"].to_list()])
+    confident = ~meta["is_calibration"].to_numpy()
+    shot_types = meta["shot_type"].to_list()
+    y = np.full(meta.height, -1, dtype=np.int64)
+    y[confident] = encode_labels([s for s, keep in zip(shot_types, confident) if keep])
+
+    device = resolve_device(cfg.get("device", "auto"))
+    folds = fold_split(video_ids.tolist())
+    probs = np.zeros((meta.height, len(CLASSES)), dtype=np.float64)
+    fold_of_row = np.zeros(meta.height, dtype=np.int64)
+    per_fold = []
+    for k, held in enumerate(folds):
+        train_mask = (video_ids != held) & confident
+        test_mask = video_ids == held
+        fold_of_row[test_mask] = k
+        rng = np.random.default_rng([int(cfg.get("seed", 42)), k])
+        model = train_fold(J[train_mask], S[train_mask], P[train_mask], y[train_mask],
+                           cfg, device, rng)
+        probs[test_mask] = predict_probs(model, J[test_mask], S[test_mask], P[test_mask],
+                                         device)
+        hm = test_mask & confident
+        fold_pred = probs[hm].argmax(axis=1)
+        fold_acc = accuracy(y[hm], fold_pred)
+        per_fold.append({
+            "fold": k, "video_id": held, "n": int(hm.sum()), "accuracy": fold_acc,
+            "per_class_recall": [_none_if_nan(r) for r in per_class_recall(y[hm], fold_pred)],
+        })
+        log.info("stroke: fold %d/%d (%s) n=%d acc=%.3f",
+                 k + 1, len(folds), held[:8], int(hm.sum()), fold_acc)
+
+    pred = probs.argmax(axis=1)
+    p_max = probs.max(axis=1)
+    tau_res = sweep_tau(p_max[confident], pred[confident] == y[confident])
+    cm = confusion(y[confident], pred[confident])
+    fold_accs = [f["accuracy"] for f in per_fold]
+    mean_acc = float(np.mean(fold_accs))
+
+    def _pair_block(a: str, b: str) -> dict:
+        ia, ib = _CLASS_INDEX[a], _CLASS_INDEX[b]
+        return {"labels": [a, b],
+                "matrix": [[int(cm[ia, ia]), int(cm[ia, ib])],
+                           [int(cm[ib, ia]), int(cm[ib, ib])]]}
+
+    report = {
+        "classes": list(CLASSES),
+        "folds": per_fold,
+        "mean_accuracy": mean_acc,
+        "std_accuracy": float(np.std(fold_accs)),
+        "pooled_accuracy": accuracy(y[confident], pred[confident]),
+        "per_class_recall": {c: _none_if_nan(r) for c, r in
+                             zip(CLASSES, per_class_recall(y[confident], pred[confident]))},
+        "confusion": cm.tolist(),
+        "hard_pairs": {f"{a}/{b}": _pair_block(a, b) for a, b in HARD_PAIRS},
+        "tau": tau_res,
+        "unsicher_abstention": (unsicher_abstention(p_max[~confident], tau_res["tau"])
+                                if (~confident).any() else None),
+        "unknown_rate_per_match": unknown_rate_per_match(p_max, video_ids.tolist(),
+                                                         tau_res["tau"]),
+        "gate_passed": bool(mean_acc >= GATE_MEAN_ACCURACY),
+        "device": device,
+        "config": dict(cfg),
+    }
+    oof_cols: dict = {c: meta[c] for c in
+                      ("event_id", "video_id", "t_s", "shot_type", "is_calibration")
+                      if c in meta.columns}
+    oof_cols["fold"] = fold_of_row
+    for i, c in enumerate(CLASSES):
+        oof_cols[f"prob_{c}"] = probs[:, i]
+    oof_cols["pred"] = [CLASSES[i] for i in pred]
+    oof_cols["p_max"] = p_max
+    return pl.DataFrame(oof_cols), report

@@ -1,4 +1,4 @@
-"""stroke.model — BST4 (4-slot BST_CG_AP generalization) + collision-safe vendor import.
+"""stroke.model + stroke.train torch section — BST4, vendor import, LOGO-CV loop.
 
 NEW PRECEDENT, deliberately: these tests import torch (no other test does). They self-skip
 unless torch + positional-encodings are installed AND the vendored BST checkout exists, so the
@@ -197,6 +197,92 @@ class TestOverfitSmoke(unittest.TestCase):
         with torch.no_grad():
             acc = (model(joints, shuttle, pos).argmax(1) == y).float().mean().item()
         self.assertGreaterEqual(acc, 0.9)
+
+
+@unittest.skipUnless(_READY, _SKIP)
+class TestPredictProbs(unittest.TestCase):
+    def test_batch_independent_softmax(self):
+        """predict_probs must run in eval mode — train-mode BatchNorm would make the OOF
+        probabilities depend on batch composition."""
+        import numpy as np
+        import torch
+
+        from worker.stroke.model import BST4
+        from worker.stroke.train import predict_probs
+
+        torch.manual_seed(3)
+        model = BST4(in_dim=34, drop_p=0.0)
+        model.train()  # deliberately wrong incoming mode; predict_probs must switch to eval
+        rng = np.random.default_rng(3)
+        J = rng.normal(size=(8, 16, 4, 34)).astype(np.float32)
+        S = rng.normal(size=(8, 16, 2)).astype(np.float32)
+        P = rng.random(size=(8, 16, 4, 2)).astype(np.float32)
+        all_at_once = predict_probs(model, J, S, P, device="cpu", batch=8)
+        one_by_one = predict_probs(model, J, S, P, device="cpu", batch=1)
+        self.assertEqual(all_at_once.shape, (8, 7))
+        np.testing.assert_allclose(all_at_once, one_by_one, atol=1e-5)
+        np.testing.assert_allclose(all_at_once.sum(axis=1), np.ones(8), atol=1e-5)
+
+
+@unittest.skipUnless(_READY, _SKIP)
+class TestRunLogoCV(unittest.TestCase):
+    """Synthetic 3-video / 45-row dataset, 2 CPU epochs: protocol correctness, not accuracy."""
+
+    @staticmethod
+    def _dataset():
+        import numpy as np
+        import polars as pl
+
+        rng = np.random.default_rng(11)
+        n = 45
+        joints = rng.normal(size=(n, 4, 16, 17, 2)).astype(np.float32)
+        shuttle = rng.random(size=(n, 16, 2)).astype(np.float32)
+        positions = rng.random(size=(n, 4, 16, 2)).astype(np.float32)
+        shot_types = (["clear", "smash", "drop", "net", "drive", "lift", "serve"] * 7)[:n]
+        is_cal = [i % 9 == 0 for i in range(n)]  # 5 calibration rows
+        shot_types = ["unknown" if c else s for s, c in zip(shot_types, is_cal)]
+        meta = pl.DataFrame({
+            "event_id": [f"e{i}" for i in range(n)],
+            "video_id": [f"g{i % 3}" for i in range(n)],
+            "t_s": [float(i) for i in range(n)],
+            "shot_type": shot_types,
+            "is_calibration": is_cal,
+        })
+        return {"joints": joints, "shuttle": shuttle, "positions": positions}, meta
+
+    def test_oof_complete_and_report_consistent(self):
+        import numpy as np
+
+        from worker.stroke.train import GATE_MEAN_ACCURACY, run_logo_cv
+
+        data, meta = self._dataset()
+        cfg = {"variant": "cg_ap", "pose_style": "J_only", "lr": 1e-3,
+               "epochs": 2, "batch_size": 8, "seed": 1, "device": "cpu"}
+        oof, report = run_logo_cv(data, meta, cfg)
+
+        # every row — confident AND calibration — gets exactly one OOF prediction
+        self.assertEqual(oof.height, 45)
+        probs = oof.select([f"prob_{c}" for c in
+                            ("clear", "smash", "drop", "net", "drive", "lift", "serve")])
+        np.testing.assert_allclose(probs.to_numpy().sum(axis=1), np.ones(45), atol=1e-5)
+        self.assertEqual(sorted(oof["fold"].unique().to_list()), [0, 1, 2])
+        # fold assignment matches video_id (holdout game = the fold's videos)
+        for vid, fold in zip(oof["video_id"], oof["fold"]):
+            self.assertEqual(f"g{fold}", vid)
+
+        for key in ("classes", "folds", "mean_accuracy", "std_accuracy", "pooled_accuracy",
+                    "per_class_recall", "confusion", "hard_pairs", "tau",
+                    "unsicher_abstention", "unknown_rate_per_match", "gate_passed", "device"):
+            self.assertIn(key, report)
+        self.assertEqual(len(report["folds"]), 3)
+        # per-fold n counts only confident rows (45 - 5 calibration = 40 across 3 games)
+        self.assertEqual(sum(f["n"] for f in report["folds"]), 40)
+        want_mean = float(np.mean([f["accuracy"] for f in report["folds"]]))
+        self.assertAlmostEqual(report["mean_accuracy"], want_mean, places=9)
+        self.assertEqual(report["gate_passed"], want_mean >= GATE_MEAN_ACCURACY)
+        # abstention/unknown rates live in [0, 1]
+        self.assertTrue(0.0 <= report["unsicher_abstention"] <= 1.0)
+        self.assertEqual(len(report["unknown_rate_per_match"]), 3)
 
 
 if __name__ == "__main__":
