@@ -20,7 +20,8 @@ can't confidently call bucketed as **`unknown`** and surfaced in the UI, never h
 - **Labels are BUILT and imported** (see `features/stroke-labeling.md`): 695 training rows in
   `worker/worker/.labeling/stroke_labels.parquet` (drop 165, lift 153, unknown 141, clear 78,
   smash 61, serve 55, drive 22, net 20) + 43 `no_hit` rows in `hit_detection_eval.parquet`.
-  All 5 Session-2 games, all doubles, one session/lighting, 30 fps.
+  All 5 Session-2 games, all doubles, one session/lighting; source video 30 fps, but the frame
+  cache all stages read is the **12 fps analysis cadence** (`ingest.DEFAULT_ANALYSIS_FPS`).
 
 ## Model
 **BST** — Chang et al., *BST: Badminton Stroke-type Transformer for Skeleton-based Action Recognition
@@ -51,28 +52,58 @@ taxonomy.
 
 ## Design
 
-### Player-stream selection (doubles-safe, one code path)
-BST's native two player streams are kept; per hit window we feed the **nearest-to-shuttle track per
-court half** at the anchor frame (image-space distance, shuttle `px,py` vs skeleton centroid; if the
-shuttle is undetected at the anchor, nearest detection within ±3 frames). Half membership from
-`tracks.role` prefix (`near_*`/`far_*`). The selector uses only pipeline artifacts → train and
-inference are consistent by construction; in singles it degenerates to "the only player per half".
-The 513 hitter-labeled rows **measure** the selector, never train it: Phase-1 go/no-go gate ≥ ~85 %
-(nearest-per-half == labeled hitter on the hitting half).
-**Hitting half** is inferred from the shuttle's vertical-direction flip at the anchor (robust slopes
-over ~5 frames each side; `null` if under-determined), stored in the payload, validated against the
-hitter labels' half. It drives singles attribution only — never doubles guessing.
-Fallbacks, in order: median-distance selection over the central 11 frames; then 4 padded player
-streams with shared TCN weights.
+### Player streams: 4 fixed quadrant slots + pose recovery (REVISED 2026-07-05)
+The original two-stream nearest-per-half selector was **measured and rejected** at the Phase-1 gate
+(all 554 hitter-labeled hits, all 5 games):
+- the hitter's role track exists at the anchor for only **54.9 %** of hits (far half absent 40 % —
+  `gate_track` loses the far pair for long stretches; ±1.0 s tolerance recovers < 3 pp);
+- nearest-per-half picks the labeled hitter **76.6 %** when the track exists (time-aware eval —
+  an earlier 6 % readout was an eval bug: track ids churn, role↔id lookups must be time-aware);
+- every "which half hit" signal fails on this footage: trajectory vertical-flip **48 %**,
+  shuttle-py vs image midline **49 %** (near/far centroids overlap in image y on 3 of 5 games).
+  The `half` payload field is dropped from v1; singles attribution later comes from role tracks.
+
+**Revised design (user-locked 2026-07-05):** one stream per court quadrant —
+`near_left, near_right, far_left, far_right` — no hitter-picking logic at all. Slot membership is
+the gate_track role (time-aware: the role segment with rows nearest the anchor), singles roles map
+`near→near_left`, `far→far_left`. An absent player is an all-zeros stream. **Pose recovery** fills
+slots that role tracks leave empty: pose.parquet sees everyone (incl. the lost far pair — only the
+court-track bookkeeping drops them), so unassigned pose tracks whose precomputed feet
+(`foot_x/foot_y`, `foot_conf`) project through the calibration homography into the court
+(±margin, reusing `geometry.apply_homography`; quadrant = `v>0.5 → near`, `u<0.5 → left`, the
+absolute form of `geometry.role_assign`'s sort) are slotted in; their position stream is the
+per-frame foot projection. The 513 hitter labels **measure** slot coverage, never feed features:
+Phase-1 gate = labeled hitter's slot filled ≥ ~85 % (reported split by source: track vs recovery).
+
+**Phase-1 gate results (measured 2026-07-05, `export-stroke-dataset`, 695 samples, 554 labeled):**
+- hitter's slot filled (strict slot name): **83.6 %** (463/554; 308 via track, **155 via recovery**
+  — recovery is a third of all fills and lifted the far half from its 60 % track coverage).
+- hitting half shows **≥ 1 player: near 94.0 % / far 100 %**; **both players: near 52.3 % /
+  far 82.9 %** → the hitter's skeleton reaches the model in ≥ 67.1 % (guaranteed) to ~96.9 %
+  (upper bound) of samples. The residual hole is mostly the near-half **partner** (mutual
+  occlusion / feet at the frame edge), not the hitter.
+- shuttle stream: median window coverage **1.00** (16-frame window), min 0.12, zero-coverage 0.
+- Caveat for P3 attribution (not shot_type training): the labels' „links/rechts" are
+  viewer-relative, slots are court-u-relative — the axis orientation per half must be verified
+  before hitter labels are used as track-level ground truth (misses cluster as cross-half-only
+  candidates, consistent with a left/right mirror on one half).
+- Verdict: gate intent met (hitting half visible 94–100 %, dense shuttle stream); proceed to
+  training with the LOGO-CV ≥ 70 % gate as arbiter. First lever if it fails: near-half
+  recovery v2 for the missing partner.
 
 ### Skeleton + training init
 Body26 (Halpe) indices 0–16 are exactly **COCO-17** → the stroke input is `kp[:17]`/`kp_score[:17]`.
 **Train from scratch as v1** — the model is tiny (minutes–hours on MPS) and the broadcast-singles
-pretrain transfers poorly to our steeper camera, doubles selection, and sparse shuttle coverage.
-The ShuttleSet-pretrained trunk (`--init_ckpt`, `strict=False`, fresh 7-way head) is a pure
-init-switch fallback if scratch stalls below the gate. Variant **BST_CG_AP**, `seq_len=30`
-(≈ ±0.5 s @ 30 fps), `pose_style=J_only` first. Sanctioned hyperparameter space only:
-{BST_0 vs BST_CG_AP, J_only vs JnB_bone, LR, epochs, class-weighted CE}.
+pretrain transfers poorly to our steeper camera, 4-slot input, and sparse shuttle coverage (the
+4-slot revision also breaks the pretrained 2-player input shape — from-scratch is now structural;
+a pretrained-trunk fallback would need stream surgery and is correspondingly weaker). Variant
+**BST_CG_AP** adapted to 4 player streams with shared TCN weights, **`seq_len=16`** ≈ ±0.67 s at
+the pipeline's real **12 fps analysis cadence** (`ingest.DEFAULT_ANALYSIS_FPS = 12`, discovered at
+the Phase-1 gate — the earlier "30 frames ≈ ±0.5 s @ 30 fps" actually spans 2.5 s and neighboring
+hits). `pose_style=J_only` first. Sanctioned hyperparameter space only:
+{BST_0 vs BST_CG_AP, J_only vs JnB_bone, LR, epochs, class-weighted CE}. 30-fps re-ingest
+(`analysis_fps` job param) stays a separately measured later experiment if smash/drive recall
+disappoints — it would not fix track coverage (user-locked 2026-07-05).
 
 ### Vendoring
 Upstream BST cloned to `worker/.cache/_vendor/BST` (git-ignored; SHA pinned in
@@ -83,20 +114,22 @@ not used. Dataset builder, training loop, eval, and threshold logic live in-tree
 
 ### Windows + normalization (train == inference)
 One pure `build_sample()` shared by the dataset exporter and the pipeline stage:
-- **Window**: 30 frames centered on the anchor (nearest cached frame to `t_s` via `frames.json`);
+- **Window**: 16 frames centered on the anchor (nearest cached frame to `t_s` via `frames.json`);
   zero-pad at clip edges, pad count recorded.
-- **Shuttle stream** `(30, 2)`: `(px/W, py/H)`; gaps ≤ 6 frames linearly interpolated **within an
+- **Shuttle stream** `(16, 2)`: `(px/W, py/H)`; gaps ≤ 6 frames linearly interpolated **within an
   arc, never across the anchor** (the contact breaks the arc); undetected → `(0,0)`.
-- **Joints** 2×`(30, 17, 2)`: bbox-relative, center-aligned, normalized by bbox diagonal (BST
-  convention); bbox = envelope of confident keypoints (pose.parquet stores no bbox); missing pose
-  frames → zeros.
-- **Positions** 2×`(30, 2)`: `tracks.parquet` `(u,v)` joined nearest-t; missing → zeros.
-- fps guard: warn loudly if median frame dt deviates > 20 % from 1/30 (30 fps ingest is a stage-7
-  requirement). Train-time temporal jitter ±3 frames absorbs the observed ±0.2 s stage-6 anchor drift.
+- **Joints** 4×`(16, 17, 2)` (slot order `near_left, near_right, far_left, far_right`):
+  bbox-relative, center-aligned, normalized by bbox diagonal (BST convention); bbox = envelope of
+  confident keypoints (pose.parquet stores no bbox); missing pose frames / empty slots → zeros.
+- **Positions** 4×`(16, 2)`: `tracks.parquet` `(u,v)` joined nearest-t for role-track slots;
+  per-frame homography-projected feet for pose-recovered slots; missing → zeros.
+- fps guard: warn loudly if median frame dt deviates > 20 % from 1/12 (the 12 fps analysis cadence
+  is a stage-7 input assumption). Train-time temporal jitter ±1 frame absorbs the observed ±0.2 s
+  stage-6 anchor drift.
 
 ### Events write-back + stats plumbing
 - `pipeline/stroke.py` (runs after `rally_hit`, before `aggregate`) enriches every `type='hit'` row
-  in `events.parquet`: payload `{shot_type, confidence, hit_disputed, half, model_version}` replaces
+  in `events.parquet`: payload `{shot_type, confidence, hit_disputed, model_version}` replaces
   `{provisional: true}`; event `confidence` = model confidence. Re-uploads the artifact and calls the
   existing `store.replace_rallies(match_id, rallies, events)` once (events have no upsert key by
   design; consumers join `video_id + t_s` — ids regenerate, which is the documented contract).
@@ -139,7 +172,8 @@ gate is cleared. **Training joins labels → parquets via `video_id + t_s`, neve
 
 ## Acceptance
 - Coarse accuracy **≥ 70 %** as the **LOGO-CV mean** on held-out own-footage games (literature
-  ceiling 77–85 % on clean broadcast data; ours is harder: 30 fps, overhead angle, no netzoom).
+  ceiling 77–85 % on clean broadcast data; ours is harder: 12 fps analysis cadence, overhead
+  angle, no netzoom).
   The model gate blocks pipeline wiring: no stage registration until the mean clears 70 %.
 - `unknown`-rate reported per match in the eval output — an honest "couldn't call it" is required
   behaviour, not a failure mode to minimise at accuracy's expense.
@@ -153,8 +187,9 @@ gate is cleared. **Training joins labels → parquets via `video_id + t_s`, neve
   and who-of-the-pair attribution (the banked 4-way hitter label) is P3+.
 - **One session, one lighting, 5 games**: LOGO-CV measures cross-game, not cross-session
   generalization. A Session-3 re-eval is the real test (fix-later note).
-- **Smash frames are sparse at 30 fps** — the fastest strokes have the fewest usable frames; expect
-  smash recall to lag until 60 fps re-ingest is exercised.
+- **Smash frames are sparse at the 12 fps analysis cadence** — the fastest strokes have the fewest
+  usable frames; expect smash recall to lag until a higher-fps re-ingest (`analysis_fps` job param)
+  is exercised.
 - **Net-play attribution is occlusion-limited** — both players converge on the net; the overhead angle
   stacks them. `unknown` is the correct output there, not a guess.
 - **Shuttle coverage is 21–27 %** per window on our footage — within-arc interpolation helps, but
