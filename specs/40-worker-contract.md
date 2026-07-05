@@ -35,7 +35,7 @@ A job's `stage` selects the **slice** the worker runs (`__main__.py`):
 | Job stage | Runs | Match status after |
 |---|---|---|
 | `ingest` | `[ingest, proxy]` (proxy = 720p playback artifact, never raises) | `calibrating` |
-| `calibrate` | `RESUME_STAGES` = `[calibrate, detect, pose, gate_track, shuttle, rally_hit, aggregate, overlay]` | `review` |
+| `calibrate` | `RESUME_STAGES` = `[calibrate, detect, pose, gate_track, shuttle, rally_hit, stroke*, aggregate, overlay]` (*stroke lands here in the stage-7 build — `features/stroke-classification.md`; until then it is not in `RESUME_STAGES`) | `review` |
 | `remap` | `[remap, rally_sync, aggregate, overlay]` (FR-35 — reuses cached `tracks.parquet`, no re-detect; `rally_sync` keeps DB rally spans/trainer edits) | `done` |
 | `rally_review` | `[remap, rally_sync, aggregate]` (FR-35 — trainer dropped/merged rallies; no overlay, it never reads rallies) | `params.return_status` (default `done`) |
 | `proxy` | `[proxy]` standalone (backfill; `features/video-proxy.md`) | unchanged |
@@ -52,8 +52,8 @@ must not skip the PlayerReview confirmation; editing at `done` stays `done`.
 | gate_track | detections, pose, homography | tracks.parquet `(t,track_id,u,v,role,source)` (in-court only) |
 | shuttle | frames, calibration (H + `mask_polygon_px`) | shuttle.parquet `(t,u,v,visibility[,frame,px,py,conf,tracker])` |
 | rally_hit | shuttle, tracks, match_players (side binding) | `rallies` (+ `winner_side` from out landings) + `events`(serve/hit/rally_end/landing); debug `rallies.parquet`/`events.parquet` |
-| stroke | pose, shuttle, court xy | `events`(hit shot_type), `player_shot_stats` |
-| aggregate | tracks, **rallies** (in-rally gating), shots | `player_match_stats`, `pair_match_stats`, `match_rally_stats` inputs |
+| stroke | pose, shuttle, tracks, events (stage-6 hit anchors), match discipline | enriched `events` hit payloads `{shot_type, confidence, hit_disputed, half, model_version}` via `replace_rallies`; debug `events.parquet` rewrite. **Not** `player_shot_stats` — counts are derived in `aggregate` (singles-gated) so `remap`/`rally_review` re-attribute without re-classification; `stroke` stays out of those slices |
+| aggregate | tracks, **rallies** (in-rally gating), enriched events (shot counts) | `player_match_stats`, `player_shot_stats` (`count`+`share_pct` via `upsert_player_shot_stats`; `errors` column stays the landing writer's), `pair_match_stats`, `match_rally_stats` inputs |
 | overlay | tracks, shuttle, hits | `track_keyframes` (~10 Hz), hit markers |
 | rally_sync | DB `rallies` + `events` (authoritative, incl. trainer edits) | cache `rallies.parquet`/`events.parquet` + re-uploaded artifacts, `ctx[rallies_path/events_path]`; `rally_corrections` rows when `job.params.corrections` is present (FR-35 eval corpus, `features/rally-shot-review.md`) |
 | proxy | source video (local `videos/` or bucket) | `analysis-artifacts/<video_id>/proxy_720p.mp4` (TUS chunked — Kong kills single requests at ~60 s), `match_videos.proxy_path`. ffmpeg host dep; **never raises** (`features/video-proxy.md`) |
@@ -110,6 +110,10 @@ was trained on that crop, see `specs/fix-later.md`), `SHUTTLE_BBOX_MARGIN`, `SHU
 (0.3, overlay gap cap), `SHUTTLE_CHUNK_FRAMES` (240 — bounded-memory chunked prediction, see
 features/shuttle-tracking.md; 0 = legacy single pass), `WASB_REPO`/`WASB_MODEL`,
 `TRACKNETV3_REPO`/`TRACKNETV3_MODEL` (vendored repo + weights, git-ignored).
+Stroke (stage 7, `features/stroke-classification.md`): `BST_REPO` (vendored BST clone, default
+`worker/.cache/_vendor/BST`), `STROKE_MODEL` (default `models/weights/stroke/bst_best.pt`; sidecar
+`bst_best.json` carries model_version/classes/variant/seq_len/τ/git SHA — same promoted-weights
+convention as shuttle below).
 Landing/in-out (stage-6 sub-step, `features/shuttle-landing-inout.md` — **all defaults untuned until a
 real-footage run**): `LANDING_WINDOW_S` (0.5), `LANDING_MAX_WINDOW_DETS` (8), `LANDING_MIN_DETS` (4),
 `LANDING_MAX_END_GAP_FRAMES` (2), `LANDING_EDGE_MARGIN` (0.04 → located=false),

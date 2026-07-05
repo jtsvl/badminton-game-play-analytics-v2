@@ -166,9 +166,13 @@ thresholds are untuned until a real-footage re-run; no located-rate/precision cl
 answer key exists.
 
 ## Stage 7 — Stroke classification (FR-21/22/23)
-**BST (MIT, public weights)** — consumes player skeleton + shuttle xy + court xy (tiny transformer; hours to train
-on MPS). Adopt **ShuttleSet 18-class BWF taxonomy collapsed to 6–8 coarse classes** first. Low-confidence → `unknown`.
-*Fine-tune:* yes — ~300–1k own labeled strokes; iterate hard pairs (drop/net, clear/lift).
+**BST (MIT, public weights)** — Chang et al., *BST: Badminton Stroke-type Transformer for Skeleton-based Action
+Recognition in Racket Sports*, CVPRW 2026, arXiv:2502.21085, github.com/Va6lue/BST-Badminton-Stroke-type-Transformer —
+consumes player skeleton + shuttle xy + court xy (tiny transformer; hours to train on MPS). Adopt the **BWF-derived
+stroke taxonomy collapsed to 6–8 coarse classes** first (ShuttleSet is 35 classes / 25 merged; BadmintonDB is 18 —
+an earlier revision of this line mislabeled ShuttleSet as 18-class). Low-confidence → `unknown`.
+*Train:* from scratch on own labels first (~300–1k strokes); ShuttleSet-pretrained trunk as init fallback;
+iterate hard pairs (drop/net, clear/lift).
 *Accept:* coarse-class accuracy **≥ 70 %** on held-out own-footage strokes to ship, `unknown`-rate surfaced not
 hidden (lit ceiling 77–85 % on clean data) *(initial target — revise once own labels exist; see
 `features/stroke-classification.md`)*.
