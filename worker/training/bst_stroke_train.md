@@ -62,11 +62,32 @@ subject to coverage ≥ 0.70, else the accuracy+coverage knee, flagged. Run arti
 ## 4. Sanctioned sweep (only these knobs — locked)
 
 `{cg_ap vs bst0, J_only vs JnB_bone, --lr, --epochs, class-weighted CE (always on)}`.
-Every run gets a row here — command + seed + result, no exceptions:
+Every run gets a row here — command + seed + result, no exceptions.
 
-| run | command | mean LOGO acc | note |
-|---|---|---|---|
-| _baseline_ | _(fill after the run)_ | | |
+**Sweep of 2026-07-05** (dataset export of 2026-07-05, 554 confident rows; all commands
+prefixed `PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m worker train-stroke --seed 42`,
+device mps, worker git `4aa65f3`+f64-fix; ~4.5 min/run):
+
+| run | extra args | mean LOGO acc | pooled | note |
+|---|---|---|---|---|
+| baseline | — | 0.376 ± 0.039 | 0.388 | folds 0.31–0.43 |
+| lr | `--lr 3e-4` | **0.400 ± 0.056** | 0.403 | best |
+| epochs+ | `--epochs 300` | 0.390 ± 0.049 | 0.397 | |
+| epochs− | `--epochs 75` | 0.377 ± 0.024 | 0.384 | |
+| bones | `--pose-style JnB_bone` | 0.349 ± 0.023 | 0.356 | bones hurt |
+| ablation | `--variant bst0` | 0.353 ± 0.026 | 0.354 | CG+AP worth ≈ +0.02 |
+
+**Result: GATE FAILED on every run** (best 0.400 vs the 0.70 bar); the FR-22 τ targets were
+unsatisfiable everywhere (knee fallback at τ = 0, i.e. no useful confidence separation).
+Best-run per-class recall (pooled OOF): clear .53, lift .54, serve .40, drop .36, smash .30,
+**net .00, drive .00**; predictions collapse toward the majority classes (drop/lift).
+
+**Diagnosis — generalization gap, not underfit** (fold ff0d8099, lr 3e-4 config, seed 42, via
+the snippet in the session log / re-runnable with `train_fold` + `predict_probs` on the train
+split): train accuracy **0.945** vs held-out **0.402**. The model memorizes 385 training rows
+and does not transfer across games — more epochs/LR cannot close this; the levers are data
+volume (more sessions), input signal (near-half recovery v2 — the spec's named first lever —
+and shuttle coverage), not hyperparameters. No promotion, no pipeline wiring (spec gate).
 
 ## 5. Gate + promote (only on a measured win)
 

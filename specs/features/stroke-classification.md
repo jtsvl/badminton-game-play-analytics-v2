@@ -10,6 +10,18 @@ hitting player → per-player `shots: [[type, count]]` in the report (FR-21), wi
 can't confidently call bucketed as **`unknown`** and surfaced in the UI, never hidden (FR-22).
 
 ## Current state (verified 2026-07-05)
+- **Phase 2 (training + LOGO-CV eval) is BUILT and run — the acceptance gate FAILED, so the
+  pipeline stays unwired.** In-tree, TDD'd: `stroke/model.py` (BST4 — the vendored BST_CG_AP
+  generalized to the 4 quadrant slots with presence-masked AimPlayer/CleanGate; collision-safe
+  vendor import), `stroke/train.py` (LOGO loop, τ sweep, `worker train-stroke` CLI), runbook
+  `worker/training/bst_stroke_train.md` (vendored SHA + every command).
+- **Measured 2026-07-05** (`PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m worker train-stroke
+  --seed 42 [--lr 3e-4]`, full sanctioned sweep in the runbook): best mean LOGO-CV accuracy
+  **0.400 ± 0.056** (pooled 0.403) vs the ≥ 0.70 gate; τ targets unsatisfiable (knee at 0 —
+  no confidence separation); net + drive recall 0.00; Unsicher abstention 0.00. Diagnosis:
+  train acc 0.945 vs held-out 0.402 — a **cross-game generalization gap**, not underfit; the
+  sanctioned hyperparameter space is exhausted. First levers: near-half recovery v2 (below)
+  and more labeled sessions — user decision before any further build.
 - `stroke` is in `STAGE_ORDER` and `SIDE_ANGLE_STAGES` (`pipeline/__init__.py`) but **not** in `_REAL` —
   it resolves to the `_todo` no-op stub — and **not** in `RESUME_STAGES` (`__main__.py`). No
   `pipeline/stroke.py` exists.
