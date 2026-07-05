@@ -306,7 +306,8 @@ def predict_probs(model, J, S, P, device: str, batch: int = 256):
         for i in range(0, len(J), batch):
             jb, sb, pb = (torch.from_numpy(np.ascontiguousarray(a[i:i + batch]))
                           .float().to(device) for a in (J, S, P))
-            out.append(torch.softmax(model(jb, sb, pb), dim=1).double().cpu().numpy())
+            # .cpu() before .double(): MPS has no float64
+            out.append(torch.softmax(model(jb, sb, pb), dim=1).cpu().double().numpy())
     return np.concatenate(out, axis=0)
 
 
