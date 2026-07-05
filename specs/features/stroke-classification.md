@@ -8,13 +8,16 @@ Classify each detected hit into a shot type from the coarse BWF-derived taxonomy
 hitting player → per-player `shots: [[type, count]]` in the report (FR-21), with everything the model
 can't confidently call bucketed as **`unknown`** and surfaced in the UI, never hidden (FR-22).
 
-## Current state (verified 2026-07-02)
+## Current state (verified 2026-07-03)
 - `stroke` is in `STAGE_ORDER` and `SIDE_ANGLE_STAGES` (`pipeline/__init__.py`) but **not** in `_REAL` —
   it resolves to the `_todo` no-op stub — and **not** in `RESUME_STAGES` (`__main__.py`). No
   `pipeline/stroke.py` exists.
 - `player_shot_stats` rows are populated **only by `seed.sql`** today; the demo report renders those.
 - Provisional hit counting already exists upstream: `rally_hit`'s `count_hits` (image-space vertical
   reversals) writes `events` `hit` rows with `payload {provisional: true}`, confidence 0.3.
+- **Labeling tooling is BUILT** (`features/stroke-labeling.md`, 2026-07-03): `worker
+  export-stroke-clips` cut all 738 Session-2 hits as real-video+audio clips; Label Studio 1.23
+  runs self-hosted on the Mac. Labeling can start; the model below waits for labels.
 
 ## Inputs (all already produced by earlier stages)
 - **`pose.parquet`** — full body26 `kp[]` / `kp_score[]` per track per frame (kept for exactly this
@@ -42,9 +45,12 @@ Iterate the hard pairs (drop/net, clear/lift) before growing the taxonomy.
    correction must also re-attribute shots (cheap: re-map track→player labels, no re-classification).
 
 ## Labels
-~300–1k own-footage strokes via **Label Studio** (see the datasets section in `30-ml-pipeline.md`):
-clip the ±0.5 s around each stage-6 hit event, label the shot type, iterate the hard pairs. Session-2
-footage is available and processed — labeling effort is the only gate.
+~300–1k own-footage strokes via **Label Studio** — tooling built, see
+`features/stroke-labeling.md` for the schema (coarse 7 + Unsicher/Kein Schlag + who-hit), the
+±0.7 s clip window (wider than the ±0.5 s here, which was a swing-*search* margin, not a
+viewing window), export CLI usage and the built import CLI. All 738 Session-2 hit events are
+labeled and imported (2026-07-05): 695 training rows in `stroke_labels.parquet` (141 `unknown`)
++ 43 `no_hit` in `hit_detection_eval.parquet` — the labeling gate is cleared.
 
 ## Acceptance (initial targets — revise once own labels exist)
 - Coarse accuracy **≥ 70 %** on held-out own-footage strokes to ship (literature ceiling 77–85 % on

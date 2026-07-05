@@ -41,6 +41,7 @@ models/weights/
 # --- Pipeline intermediate caches ---
 worker/.cache/
 **/.cache/
+**/.labeling/
 *.parquet
 frames_cache/
 worker/renders/

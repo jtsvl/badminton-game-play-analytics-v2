@@ -114,6 +114,18 @@ def main() -> None:
         export_cli(sys.argv[2:])
         return
 
+    if len(sys.argv) > 1 and sys.argv[1] == "export-stroke-clips":
+        from .stroke_clips import export_cli
+
+        export_cli(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "import-stroke-labels":
+        from .import_stroke_labels import import_cli
+
+        import_cli(sys.argv[2:])
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "backfill-calib-frames":
         from .backfill_calib_frames import backfill_cli
 
