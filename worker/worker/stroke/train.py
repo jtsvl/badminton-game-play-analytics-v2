@@ -392,3 +392,134 @@ def run_logo_cv(data: dict, meta, cfg: dict):
     oof_cols["pred"] = [CLASSES[i] for i in pred]
     oof_cols["p_max"] = p_max
     return pl.DataFrame(oof_cols), report
+
+
+def train_cli(argv: Sequence[str] | None = None) -> int:
+    """`worker train-stroke` — LOGO-CV eval + FR-22 τ sweep; final all-data train and
+    (gated) promotion to models/weights/stroke/. Every metric ships with command + seed."""
+    import argparse
+    import hashlib
+    import json
+    import shlex
+    import shutil
+    import subprocess
+    from datetime import datetime, timezone
+
+    import numpy as np
+
+    from ..config import load_config
+
+    ap = argparse.ArgumentParser(
+        prog="worker train-stroke",
+        description="Train + LOGO-CV-evaluate the BST4 stroke classifier on the exported "
+                    "stroke dataset (specs/features/stroke-classification.md).")
+    ap.add_argument("--dataset", help="stroke_dataset dir (default: worker/.labeling/stroke_dataset)")
+    ap.add_argument("--variant", choices=["cg_ap", "bst0"], default="cg_ap")
+    ap.add_argument("--pose-style", choices=["J_only", "JnB_bone"], default="J_only")
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--epochs", type=int, default=150)
+    ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--device", choices=["auto", "cpu", "mps"], default="auto")
+    ap.add_argument("--out", help="run dir (default: <labeling>/stroke_runs/<UTC>_<variant>_<pose-style>)")
+    ap.add_argument("--promote", action="store_true",
+                    help="copy the final checkpoint to models/weights/stroke/ + sidecar "
+                         "(refused unless the LOGO gate passed)")
+    args = ap.parse_args(argv)
+
+    cfg_env = load_config()
+    labeling = Path(cfg_env.frame_cache_dir).expanduser().parent / ".labeling"
+    dataset_dir = Path(args.dataset).expanduser() if args.dataset else labeling / "stroke_dataset"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = (Path(args.out).expanduser() if args.out
+               else labeling / "stroke_runs" / f"{stamp}_{args.variant}_{args.pose_style}")
+
+    data, meta = load_dataset(dataset_dir)
+    cfg = {"variant": args.variant, "pose_style": args.pose_style, "lr": args.lr,
+           "epochs": args.epochs, "batch_size": args.batch_size, "seed": args.seed,
+           "device": args.device}
+    oof, report = run_logo_cv(data, meta, cfg)
+
+    try:
+        git_sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                                 cwd=Path(__file__).parent, timeout=5).stdout.strip() or None
+    except Exception:  # noqa: BLE001 — provenance is best-effort
+        git_sha = None
+    import torch
+
+    report.update({
+        "command": shlex.join(["python", "-m", "worker", "train-stroke", *(argv or [])]),
+        "date": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "git_sha": git_sha,
+        "torch_version": torch.__version__,
+        "dataset": {
+            "path": str(dataset_dir),
+            "sha256": {f: hashlib.sha256((dataset_dir / f).read_bytes()).hexdigest()
+                       for f in ("stroke_dataset.npz", "meta.parquet")},
+        },
+        "caveats": [
+            "one session / one lighting: LOGO-CV measures cross-game, not cross-session generalization",
+            "MPS is not bit-deterministic — the CPU command in the runbook is the reproducibility reference",
+            "tau is calibrated on the fold models' OOF confidences but shipped with the all-data model",
+        ],
+    })
+    out_dir.mkdir(parents=True, exist_ok=True)
+    oof.write_parquet(out_dir / "oof_predictions.parquet")
+    (out_dir / "report.json").write_text(json.dumps(report, indent=2))
+
+    for f in report["folds"]:
+        print(f"fold {f['fold']} ({f['video_id'][:8]}): n={f['n']} acc={f['accuracy']:.3f}")
+    print(f"LOGO mean accuracy: {report['mean_accuracy']:.3f} ± {report['std_accuracy']:.3f} "
+          f"(pooled {report['pooled_accuracy']:.3f}, device {report['device']}, seed {args.seed})")
+    tau = report["tau"]
+    print(f"tau* = {tau['tau']:.3f}: covered-acc {tau['covered_accuracy']:.3f}, "
+          f"coverage {tau['coverage']:.3f}"
+          + (" [KNEE FALLBACK — FR-22 targets unsatisfiable]" if tau["knee_fallback"] else ""))
+    print(f"Unsicher abstention at tau*: {report['unsicher_abstention']:.3f}" if
+          report["unsicher_abstention"] is not None else "no calibration rows")
+    gate = report["gate_passed"]
+    print(f"GATE (mean >= {GATE_MEAN_ACCURACY:.2f}): {'PASSED' if gate else 'FAILED'} -> {out_dir}")
+
+    if not gate:
+        if args.promote:
+            print("PROMOTE REFUSED: gate not passed — no checkpoint written")
+            return 1
+        return 0
+
+    # final all-confident-rows train, same fixed budget (well-defined: no early stopping)
+    J, P = to_model_arrays(data["joints"], data["positions"], args.pose_style)
+    confident = ~meta["is_calibration"].to_numpy()
+    y = encode_labels([s for s, keep in zip(meta["shot_type"].to_list(), confident) if keep])
+    device = resolve_device(args.device)
+    rng = np.random.default_rng([args.seed, len(report["folds"])])
+    final = train_fold(J[confident], data["shuttle"][confident], P[confident], y,
+                       cfg, device, rng)
+    from .model import BST_SHA, STROKE_MODEL, save_checkpoint
+
+    model_cfg = {"in_dim": int(J.shape[-1]), "seq_len": int(J.shape[1]),
+                 "n_class": len(CLASSES), "variant": args.variant}
+    save_checkpoint(out_dir / "bst_final.pt", final, model_cfg)
+    print(f"final model (n={len(y)}) -> {out_dir / 'bst_final.pt'}")
+
+    if args.promote:
+        target = Path(STROKE_MODEL)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(out_dir / "bst_final.pt", target)
+        sidecar = {
+            "model_version": f"bst4-{args.variant}-{args.pose_style}-v1",
+            "classes": list(CLASSES),
+            "variant": args.variant,
+            "pose_style": args.pose_style,
+            "in_dim": model_cfg["in_dim"],
+            "seq_len": model_cfg["seq_len"],
+            "tau": tau["tau"],
+            "mean_logo_accuracy": report["mean_accuracy"],
+            "git_sha": git_sha,
+            "bst_vendor_sha": BST_SHA,
+            "date": report["date"],
+            "train_run": str(out_dir),
+            "caveats": report["caveats"],
+        }
+        target.with_name("bst_best.json").write_text(json.dumps(sidecar, indent=2))
+        print(f"promoted -> {target} (+ sidecar bst_best.json, tau {tau['tau']:.3f})")
+    return 0
