@@ -26,6 +26,9 @@ log = logging.getLogger("worker.import_stroke_labels")
 SHOT_TYPE = {"Clear": "clear", "Smash": "smash", "Drop": "drop", "Netzschlag": "net",
              "Drive": "drive", "Lift": "lift", "Aufschlag": "serve",
              "Unsicher": "unknown", "Kein Schlag": "no_hit"}
+# canonical → German for anything that writes back INTO Label Studio (pre-labels, review
+# queues). Derived, never hand-written: a rename on one side must break loudly on both.
+GERMAN_BY_CANONICAL = {v: k for k, v in SHOT_TYPE.items()}
 HITTER = {"vorne-links": "near_left", "vorne-rechts": "near_right",
           "hinten-links": "far_left", "hinten-rechts": "far_right"}
 

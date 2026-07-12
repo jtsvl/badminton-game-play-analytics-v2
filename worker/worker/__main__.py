@@ -150,6 +150,12 @@ def main() -> None:
         train_cli(sys.argv[2:])
         return
 
+    if len(sys.argv) > 1 and sys.argv[1] == "stroke-assist-report":
+        from .stroke.assist_report import report_cli
+
+        report_cli(sys.argv[2:])
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "backfill-calib-frames":
         from .backfill_calib_frames import backfill_cli
 
