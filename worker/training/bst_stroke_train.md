@@ -108,3 +108,47 @@ weights via `STROKE_MODEL` (defaults to that path), mirroring the stage-5 shuttl
   model; the confidence distributions differ. Documented in the sidecar, not re-tuned
   (the spec locks OOF-only τ).
 - Unsicher abstention is a reported honesty differential, never a tuning target.
+
+## 7. Trajectory-geometry XGBoost spike (2026-07-12)
+
+Alternative candidate after the §4 gate failure (spec section "Alternative candidate:
+trajectory-geometry GBDT" — eval only, no wiring/promotion either way). Torch-free path:
+hit-to-hit geometry features + XGBoost, same LOGO protocol and report shape.
+
+```bash
+uv sync --extra ml            # xgboost 3.2.0; macOS needs: brew install libomp
+uv run python -m worker export-stroke-traj      # -> worker/.labeling/stroke_traj/features.parquet
+uv run python -m worker train-stroke-gbdt --seed 42 [--ppos] [--max-depth 4 --eta 0.1 ...]
+```
+
+**Sweep of 2026-07-12** (features export 2026-07-12: 695 rows / 554 confident, 28 core
+features + 3 `ppos_` ablation; all commands prefixed `uv run python -m worker
+train-stroke-gbdt --seed 42`, device cpu `nthread=1` — **bit-deterministic, replicate
+verified identical** — worker git `8410897`, xgboost 3.2.0, ~3 s/run):
+
+| run | extra args | mean LOGO acc | pooled | note |
+|---|---|---|---|---|
+| baseline | — | 0.523 ± 0.042 | 0.525 | |
+| shallow | `--max-depth 3` | 0.519 ± 0.038 | 0.522 | |
+| trees+ | `--n-estimators 400` | 0.519 ± 0.037 | 0.518 | |
+| slow | `--eta 0.05 --n-estimators 400` | 0.524 ± 0.027 | 0.529 | best core |
+| shallow+slow | `--max-depth 3 --eta 0.05 --n-estimators 400` | 0.519 ± 0.025 | 0.523 | |
+| no-bagging | `--subsample 1.0 --colsample-bytree 1.0` | 0.504 ± 0.037 | 0.504 | bagging helps |
+| +player | `--eta 0.05 --n-estimators 400 --ppos` | **0.536 ± 0.023** | 0.534 | best; seeds 43/44 → 0.526 / 0.523 |
+
+**Result: GATE FAILED (best 0.536 vs the 0.70 bar) — but decisively above BST4** (best
+0.400 ± 0.056): +12–14 pp, well beyond the ~5–8 pp fold-noise band, with tighter fold spread
+(folds 0.50–0.56) and a fraction of the training cost. Per-class recall (best run, pooled
+OOF): serve .65, lift .61, clear .60, drop .59, **net .30, drive .14** (recovered from BST4's
+0.00 / 0.00), smash .21 (lags — 12 fps sampling + rally_end flight-time inflation on
+rally-ending smashes). Hard pairs: net→drop confusion persists (7/13 pooled net rows → drop);
+clear/lift largely separated (10/103 lift → clear). τ per FR-22 stays **unsatisfiable** (knee
+fallback at τ = 0, Unsicher abstention 0.00) — like BST4, no usable confidence separation.
+Top gain features: `first_of_rally`, `out_du_abs`, `out_end_is_rally_end`, `out_end_dist_net`,
+`out_apex_rise`; the sparse court-projection features still earn mid-table gain (the ~37 %
+where the floor projection is valid — see the spec's D′/E′ amendment — carry real signal).
+
+**Decision (user rules, spec section):** 0.5–0.7 → stopped for discussion; no pipeline
+wiring, no promotion. The measured levers on the table: more labeled sessions (every
+comparable system trains on ≥ 10× our rows), net/drive mining from unlabeled hits, near-half
+recovery v2, and a 30 fps re-ingest for the smash/drive time resolution.

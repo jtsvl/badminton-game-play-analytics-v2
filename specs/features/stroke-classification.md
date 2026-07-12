@@ -35,7 +35,18 @@ can't confidently call bucketed as **`unknown`** and surfaced in the UI, never h
   All 5 Session-2 games, all doubles, one session/lighting; source video 30 fps, but the frame
   cache all stages read is the **12 fps analysis cadence** (`ingest.DEFAULT_ANALYSIS_FPS`).
 
-## Alternative candidate: trajectory-geometry GBDT (spike — DESIGN, 2026-07-12)
+## Alternative candidate: trajectory-geometry GBDT (spike — MEASURED 2026-07-12)
+
+**Measured 2026-07-12 (full sanctioned sweep in the runbook §7, `uv run python -m worker
+train-stroke-gbdt --seed 42 [--eta 0.05 --n-estimators 400 --ppos]`, worker git `8410897`):
+best mean LOGO-CV accuracy 0.536 ± 0.023 (pooled 0.534; seed 43/44 replicates 0.526/0.523;
+bit-deterministic on CPU) — GATE FAILED vs ≥ 0.70, but decisively above BST4's 0.400 ± 0.056
+(+12–14 pp, beyond the ~5–8 pp fold-noise band) at a fraction of the cost. net/drive recall
+recovered from 0.00/0.00 to 0.30/0.14; smash lags at 0.21; τ per FR-22 still unsatisfiable
+(knee at 0 — no confidence separation). Per the locked decision rules (0.5–0.7 → stop and
+discuss): stopped — no pipeline wiring, no promotion. Next levers on the table: more labeled
+sessions, net/drive mining from unlabeled hits, near-half recovery v2, 30 fps re-ingest for
+smash time-resolution.**
 
 **Status: DESIGN, approved spike — eval only.** No pipeline wiring and no promotion path in this
 spike regardless of outcome; a gate pass triggers a user decision on the model family, nothing
