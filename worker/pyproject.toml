@@ -31,6 +31,7 @@ ml = [
   "pycocotools>=2.0.11", # TrackNetV3 fine-tune dep (training/eval)
   "positional-encodings>=6.0", # BST vendored model dep (stroke stage 7, worker/training/)
   "torchinfo>=1.8",     # BST vendored model dep (stroke stage 7); imported at bst.py module top
+  "xgboost>=3.2.0",
 ]
 dev = [
   "pytest>=8.3",
