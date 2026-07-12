@@ -172,7 +172,9 @@ singles vs steep-camera amateur doubles.
   Serial choice per `results_and_images/result_table.xlsx`, sheet "ShuttleSet_merged (30)":
   **`bst_CG_AP_JnB_bone_merged.pt` = serial_1** (accuracy 0.826, macro-F1 0.803 — best
   macro-F1 of the ten 2D serials; Drive file id `1PhnbUAyqq-sfsj0cI6sSIYHkQcRxV8qb`).
-- Store at `worker/.cache/_vendor/BST_weights/shuttleset/` (git-ignored). sha256: (fill on download)
+- Store at `worker/.cache/_vendor/BST_weights/shuttleset/` (git-ignored). sha256:
+  `10fb0d6c049602e29c690a9eaf5babda606a92fe5e4f74d84a4c251546f4f48e` (downloaded 2026-07-12;
+  gdown by file id — the folder download rate-limits after ~47 files).
 - Verify before first use (shapes prove it is the 25-class seq-30 JnB_bone variant):
   `tcn_pose.net.0.weight (100,72,5)` · `embedding_tem (1,31,100)` · `mlp_head.mlp.mlp.3.weight (25,400)`.
   The rung-1 audit must report exactly 86 matched / 8 shape-skipped / 0 missing / 0 unexpected.
@@ -205,4 +207,4 @@ measured fact, and the frozen-probe number prices every future pretraining path 
 ### Results
 | rung | config | mean LOGO acc | pooled | notes |
 |---|---|---|---|---|
-| 2 | JnB_bone scratch lr 3e-4 | (running) | | |
+| 2 | JnB_bone scratch lr 3e-4 | 0.374 ± 0.052 | 0.384 | lr-matched control, run `20260712T204812Z` (MPS). Confirms bones hurt from scratch (J_only lr 3e-4 = 0.400) — the checkpoint must first buy back that deficit |

@@ -156,8 +156,7 @@ def main() -> int:
     args = ap.parse_args()
 
     import polars as pl
-    from mlx_vlm import generate, load
-    from mlx_vlm.prompt_utils import apply_chat_template
+    from mlx_vlm import generate, load  # applies the chat template internally (0.6.x)
 
     labeling = Path(args.labeling_dir).expanduser()
     out_path = (Path(args.out).expanduser() if args.out
@@ -173,7 +172,6 @@ def main() -> int:
 
     print(f"loading {args.model} …")
     model, processor = load(args.model)
-    config = model.config
 
     rows, skipped, t_start = [], 0, time.monotonic()
     for i, lab in enumerate(sample):
@@ -188,18 +186,17 @@ def main() -> int:
                 continue
             prompt = PROMPT.format(n=len(frames),
                                    serve_hint=SERVE_HINT if info["first_of_rally"] else "")
-            formatted = apply_chat_template(processor, config, prompt,
-                                            num_images=len(frames))
-            reply = generate(model, processor, formatted,
+            reply = generate(model, processor, prompt,
                              [str(f) for f in frames], max_tokens=80, verbose=False)
         parsed = parse_vlm_answer(reply.text if hasattr(reply, "text") else str(reply))
-        pred, conf = parsed if parsed else ("unknown", 0.0)
-        pred_col = pred if pred in CLASSES else CLASSES[0]  # OOF shape needs a class token
+        # honesty: an unparsable or non-class answer ("Unsicher"/"Kein Schlag") stays what
+        # it is — pred never equals the 7-class truth, so it counts as a miss everywhere
+        pred, conf = parsed if parsed else ("unparsed", 0.0)
         rows.append({
             "event_id": lab["event_id"], "video_id": lab["video_id"], "t_s": lab["t_s"],
             "shot_type": lab["shot_type"], "is_calibration": False, "fold": -1,
             **uniform_probs(pred, conf),
-            "pred": pred if pred in CLASSES else pred_col,
+            "pred": pred,
             "p_max": conf if pred in CLASSES else 0.0,
             "vlm_raw_label": pred,
         })
@@ -213,8 +210,11 @@ def main() -> int:
         return 1
     pl.DataFrame(rows).write_parquet(out_path)
     n_hit = sum(1 for r in rows if r["pred"] == r["shot_type"])
-    print(f"\n{len(rows)} clips scored ({skipped} skipped), "
-          f"raw top-1 agreement {n_hit / len(rows):.3f} -> {out_path}")
+    n_class = sum(1 for r in rows if r["pred"] in CLASSES)
+    print(f"\n{len(rows)} clips scored ({skipped} skipped): "
+          f"{n_class} class answers, {len(rows) - n_class} abstained/unparsed; "
+          f"top-1 agreement {n_hit / len(rows):.3f} (misses include abstentions) "
+          f"-> {out_path}")
     print("full report: python -m worker stroke-assist-report --oof", out_path)
     print("adoption gate: beats GBDT 0.534 overall AND materially on net(0.30)/smash(0.21)")
     return 0
