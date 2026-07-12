@@ -127,8 +127,14 @@ def sample_evenly(items: Sequence, n: int) -> list:
 # --- export shell (DB + ffmpeg I/O; smoke-tested on the real proxies) ------------------------------
 
 def export_video(*, store, cfg, video_id: str, out_dir, pre: float, post: float,
-                 sample: Optional[int] = None, limit: Optional[int] = None) -> dict:
-    """Cut one game's hit clips into {out}/stroke/<game>/ and write {out}/tasks_<game>.json."""
+                 sample: Optional[int] = None, limit: Optional[int] = None,
+                 assist=None, homography=None, prelabel_min_score: float = 0.8,
+                 skip_first: bool = False) -> dict:
+    """Cut one game's hit clips into {out}/stroke/<game>/ and write {out}/tasks_<game>.json.
+
+    With `assist` (a prelabel.AssistModel), every task additionally carries the model's
+    guess as sortable data columns, pre-selected above prelabel_min_score — requires the
+    pipeline stage artifacts (frames.json + shuttle.parquet) in the video's cache dir."""
     video = store.get_video(video_id)
     if not video:
         raise SystemExit(f"no match_videos row for video_id={video_id}")
@@ -175,11 +181,30 @@ def export_video(*, store, cfg, video_id: str, out_dir, pre: float, post: float,
         tasks.append(task_dict(hit, game=game, clip_relpath=f"stroke/{game}/{fname}",
                                video_id=str(video_id), match_id=str(match_id)))
 
+    prelabel_counts = None
+    if assist is not None:
+        cache = Path(cfg.frame_cache_dir).expanduser() / str(video_id)
+        for req in ("frames.json", "shuttle.parquet"):
+            if not (cache / req).exists():
+                raise SystemExit(f"--prelabel needs {cache / req} — run the pipeline "
+                                 "stages for this video first")
+        from .stroke.prelabel import attach_predictions, predict_rows, pseudo_labels
+        from .stroke.traj import build_video_rows
+
+        labels = pseudo_labels(hits, video_id=str(video_id), match_id=str(match_id))
+        feature_rows = build_video_rows(cache, labels, homography=homography)
+        preds = predict_rows(assist, feature_rows)
+        prelabel_counts = attach_predictions(
+            tasks, preds, model_version=assist.model_version,
+            min_score=prelabel_min_score, skip_first_of_rally=skip_first)
+        log.info("%s: prelabel %s (model %s)", game, prelabel_counts, assist.model_version)
+
     tasks_path = Path(out_dir) / f"tasks_{game}.json"
     tasks_path.write_text(json.dumps(tasks, indent=2), encoding="utf-8")
     summary = {"game": game, "clips": len(tasks), "failed": failed,
                "skipped_outside_rallies": skipped,
-               "clip_dir": str(game_dir), "tasks_json": str(tasks_path)}
+               "clip_dir": str(game_dir), "tasks_json": str(tasks_path),
+               "prelabel": prelabel_counts}
     log.info("exported %d clips (%d failed) → %s", len(tasks), failed, game_dir)
     return summary
 
@@ -201,10 +226,28 @@ def export_cli(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--post", type=float, default=DEFAULT_POST_S, help="seconds after the hit")
     ap.add_argument("--sample", type=int, help="cut only N evenly spread hits (pilot batches)")
     ap.add_argument("--limit", type=int, help="cut at most N hits")
+    ap.add_argument("--prelabel", metavar="RUN_DIR",
+                    help="labeling-assist run dir (assist_model.ubj from "
+                         "`train-stroke-gbdt --fit-full`): adds model_pred/model_score/"
+                         "rare_score columns and pre-selects answers above the threshold")
+    ap.add_argument("--prelabel-min-score", type=float, default=0.8,
+                    help="pre-select only at/above this confidence; below it the guess is a "
+                         "display-only hint (default 0.8 — measured 71%% pre-correct)")
+    ap.add_argument("--no-prelabel-first", action="store_true",
+                    help="never pre-select on the first hit of a rally (serve-bias guard)")
     args = ap.parse_args(argv)
 
     cfg = load_config()
     out_dir = Path(args.out) if args.out else Path(cfg.frame_cache_dir).expanduser().parent / ".labeling"
+
+    assist = None
+    homographies: dict = {}
+    if args.prelabel:
+        from .stroke.dataset import _fetch_homographies
+        from .stroke.prelabel import load_assist
+
+        assist = load_assist(Path(args.prelabel).expanduser())
+        homographies = _fetch_homographies([str(v) for v in args.video_id])
 
     from .__main__ import _make_store
 
@@ -212,9 +255,17 @@ def export_cli(argv: Sequence[str] | None = None) -> int:
     total = 0
     for vid in args.video_id:
         s = export_video(store=store, cfg=cfg, video_id=vid, out_dir=out_dir,
-                         pre=args.pre, post=args.post, sample=args.sample, limit=args.limit)
+                         pre=args.pre, post=args.post, sample=args.sample, limit=args.limit,
+                         assist=assist, homography=homographies.get(str(vid)),
+                         prelabel_min_score=args.prelabel_min_score,
+                         skip_first=args.no_prelabel_first)
         print(f"{s['game']}: {s['clips']} clips ({s['failed']} failed) → {s['clip_dir']}")
         print(f"  tasks: {s['tasks_json']}")
+        if s["prelabel"] is not None:
+            p = s["prelabel"]
+            print(f"  prelabel: {p['prelabeled']} pre-selected, "
+                  f"{p['skipped_low_score']} hint-only, {p['skipped_first']} first-skipped, "
+                  f"{p['no_features']} without features")
         total += s["clips"]
     print(f"total: {total} clips under {out_dir}")
     return 0

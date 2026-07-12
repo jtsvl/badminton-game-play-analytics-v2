@@ -167,6 +167,53 @@ shot_type: drop 165, lift 153, unknown 141, clear 78, smash 61, serve 55, drive 
 184 rows without hitter (43 = all `no_hit` + 141 mostly-`Unsicher` — the hitter question was
 shown for `Unsicher` but not required, and was mostly skipped there; known label-data gap).
 
+## AI-assisted pre-labeling (Session 3+) — BUILT 2026-07-12
+
+Simulated first, then built (user decisions 2026-07-12: pre-fill only when confident ≥ 0.8;
+labeling-assist artifact carve-out approved in features/stroke-classification.md). The
+simulation replayed the best GBDT's out-of-fold predictions against the 554 confident
+Session-2 labels — **`worker stroke-assist-report`** reproduces it anytime: top-1 agreement
+0.534 / top-2 0.729; at confidence ≥ 0.8 → 41 % coverage at 71 % pre-correct; sorting by
+`prob_net` puts 7 true net in the top-20 (~10× the 3.6 % base rate), `prob_drive` ~5×.
+Honest expectation: **15–25 % faster labeling, not 2×** — the real wins are rare-class
+mining and the one-time label cleanup below.
+
+**Flow per Session-3+ video** (after pipeline stages + rally review):
+1. Once per dataset refresh: `python -m worker train-stroke-gbdt --seed 42 --eta 0.05
+   --n-estimators 400 --ppos --fit-full` → run dir now also holds
+   `assist_model.ubj`/`assist_meta.json` (labeling-assist only, never the pipeline).
+2. `python -m worker export-stroke-clips --video-id <uuid> --prelabel <run-dir>
+   [--prelabel-min-score 0.8] [--no-prelabel-first]` — every task gets sortable
+   `data.model_pred` (German) / `model_score` / `rare_score` (= max(prob net, drive));
+   at/above the threshold the answer is additionally pre-selected via a Label Studio
+   `predictions` entry (`model_version` = run-dir name, so accept rates stay attributable).
+   Requires the video's `frames.json` + `shuttle.parquet` (hard error otherwise); features
+   come from the SAME builder as training (`stroke/traj.py`) — train == inference.
+3. **Label Studio setting (required once per project):** Settings → Machine Learning →
+   enable "Show predictions to annotators" — without it predictions import but never
+   pre-fill the form.
+4. Data-Manager sort workflows (no extra tooling): **mine-rare** — sort `rare_score` desc,
+   label the top ~30–50 first (attacks net=20/drive=22 starvation at ~5–10× enrichment);
+   **verify-fast** — sort prediction score desc, blast the ≥ 0.8 block; **think-harder** —
+   ascending for the rest.
+
+**Anchoring stance** (extends the serve-hint decision above): a wrong pre-selection anchors
+the labeler, so pre-fill happens only where the model is right ~71 % of the time; below the
+threshold the guess is display-only text, exactly like the serve hint. `--no-prelabel-first`
+additionally keeps rally-first clips hint-only (serve-bias guard). Session-3 accept rates
+tell us whether 0.8 stays the right threshold.
+
+**Label-error mining (one-time Session-2 cleanup, queue generated 2026-07-12):**
+`worker stroke-assist-report --relabel-queue relabel_session2.json --tasks
+'<labeling>/tasks_Session2_*.json'` found **65 high-confidence disagreements** (p ≥ 0.8;
+top confusions smash→drop 9, lift↔drop 12) → import the queue JSON into a new LS review
+project („Schlagarten Session 2 – Review", same labeling config; ~15 min), export, then
+`worker import-stroke-labels <review.json> --merge-into <labeling-dir>` and re-run
+`export-stroke-traj` + `train-stroke-gbdt --fit-full`. The review tasks show
+`prior_label`/`model_pred` as display-only text — deliberately NO pre-selection where model
+and human already disagree. The 141 hitter-null rows stay deferred (nothing consumes hitter
+before P3).
+
 ## Honest limits
 
 - Clips inherit stage 6's provisional hit timing (±0.2 s drift observed) — the window absorbs it,
