@@ -107,5 +107,71 @@ class TestSplitRows(unittest.TestCase):
         self.assertEqual([r["shot_type"] for r in eval_rows], ["no_hit"])
 
 
+class TestMergeRows(unittest.TestCase):
+    @staticmethod
+    def _row(event_id, shot_type, hitter=None):
+        return {"event_id": event_id, "match_id": "m-1", "video_id": "v-1", "t_s": 1.0,
+                "shot_type": shot_type, "hitter": hitter, "rally_idx": 1, "hit_idx": 1}
+
+    def test_fixes_win_by_event_id_order_stable(self):
+        base = [self._row("a", "drop"), self._row("b", "lift"), self._row("c", "net")]
+        fixes = [self._row("b", "clear")]
+        merged = isl.merge_rows(base, fixes)
+        self.assertEqual([(r["event_id"], r["shot_type"]) for r in merged],
+                         [("a", "drop"), ("b", "clear"), ("c", "net")])
+
+    def test_novel_fixes_appended_in_order(self):
+        base = [self._row("a", "drop")]
+        fixes = [self._row("z", "serve"), self._row("a", "smash")]
+        merged = isl.merge_rows(base, fixes)
+        self.assertEqual([(r["event_id"], r["shot_type"]) for r in merged],
+                         [("a", "smash"), ("z", "serve")])
+
+
+class TestMergeIntoCli(unittest.TestCase):
+    def test_relabel_flips_cross_the_training_no_hit_split(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            base_dir = Path(d)
+            # existing labeling dir: e-1 drop + e-3 lift (training), e-2 no_hit (eval)
+            isl.write_labels_parquet(
+                [TestMergeRows._row("e-1", "drop"), TestMergeRows._row("e-3", "lift")],
+                base_dir / "stroke_labels.parquet")
+            isl.write_labels_parquet([TestMergeRows._row("e-2", "no_hit")],
+                                     base_dir / "hit_detection_eval.parquet")
+            # review export flips e-1 -> Kein Schlag and e-2 -> Drop
+            export = base_dir / "review.json"
+            export.write_text(json.dumps([
+                _task("Kein Schlag", None, event_id="e-1"),
+                _task("Drop", "vorne-links", event_id="e-2"),
+            ]), encoding="utf-8")
+
+            rc = isl.import_cli([str(export), "--merge-into", str(base_dir)])
+            self.assertEqual(rc, 0)
+
+            import polars as pl
+
+            training = pl.read_parquet(base_dir / "stroke_labels.parquet")
+            eval_rows = pl.read_parquet(base_dir / "hit_detection_eval.parquet")
+            got_train = dict(zip(training["event_id"], training["shot_type"]))
+            self.assertEqual(got_train, {"e-3": "lift", "e-2": "drop"})
+            self.assertEqual(dict(zip(eval_rows["event_id"], eval_rows["shot_type"])),
+                             {"e-1": "no_hit"})
+
+    def test_merge_into_missing_parquet_fails_loudly(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            export = Path(d) / "review.json"
+            export.write_text(json.dumps([_task("Drop", None)]), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                isl.import_cli([str(export), "--merge-into", str(Path(d) / "nope")])
+
+
 if __name__ == "__main__":
     unittest.main()

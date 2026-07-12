@@ -93,6 +93,16 @@ def split_rows(rows: Sequence[dict]) -> Tuple[List[dict], List[dict]]:
     return training, eval_rows
 
 
+def merge_rows(base: Sequence[dict], fixes: Sequence[dict]) -> List[dict]:
+    """Relabel merge: fixes win by event_id, base order stays stable, unseen fixes append
+    at the end. Operates on the COMBINED row set (training + no_hit) so a relabel can flip
+    a row across the split — the caller re-splits afterwards."""
+    pending = {r["event_id"]: r for r in fixes}
+    merged = [pending.pop(r["event_id"], None) or dict(r) for r in base]
+    merged.extend(f for f in fixes if f["event_id"] in pending)
+    return merged
+
+
 def write_labels_parquet(rows: Sequence[dict], path: Path) -> None:
     import polars as pl  # lazy
 
@@ -110,6 +120,10 @@ def import_cli(argv: Sequence[str] | None = None) -> int:
                                  description="Import a Label Studio stroke-label export into training parquets.")
     ap.add_argument("export", help="Label Studio JSON export (list of tasks with annotations)")
     ap.add_argument("--out", help="output directory (default: next to the export file)")
+    ap.add_argument("--merge-into", metavar="DIR",
+                    help="merge this export into an existing labeling dir instead of "
+                         "writing fresh parquets: fixes win by event_id, rows re-split "
+                         "(a relabel can flip training <-> no_hit)")
     args = ap.parse_args(argv)
 
     export_path = Path(args.export).expanduser()
@@ -118,6 +132,24 @@ def import_cli(argv: Sequence[str] | None = None) -> int:
 
     tasks = json.loads(export_path.read_text(encoding="utf-8"))
     rows = rows_from_export(tasks)
+    n_labeled = len(rows)
+    n_changed = None
+    if args.merge_into:
+        import polars as pl  # lazy
+
+        base_dir = Path(args.merge_into).expanduser()
+        base: List[dict] = []
+        for fname in ("stroke_labels.parquet", "hit_detection_eval.parquet"):
+            p = base_dir / fname
+            if not p.exists():
+                raise SystemExit(f"--merge-into: {p} not found — point at the labeling dir "
+                                 "holding both parquets")
+            base.extend(pl.read_parquet(p).to_dicts())
+        prior = {r["event_id"]: r["shot_type"] for r in base}
+        n_changed = sum(1 for r in rows
+                        if r["event_id"] in prior and prior[r["event_id"]] != r["shot_type"])
+        rows = merge_rows(base, rows)
+        out_dir = base_dir
     training, eval_rows = split_rows(rows)
 
     train_path = out_dir / "stroke_labels.parquet"
@@ -127,8 +159,11 @@ def import_cli(argv: Sequence[str] | None = None) -> int:
 
     counts = Counter(r["shot_type"] for r in rows)
     no_hitter = sum(1 for r in rows if r["hitter"] is None)
-    summary = (f"imported {len(rows)}/{len(tasks)} labeled tasks "
-               f"({len(tasks) - len(rows)} unlabeled skipped): "
+    merged_note = (f"merged {n_labeled} relabels into {out_dir} "
+                   f"({n_changed} rows changed class); "
+                   if n_changed is not None else "")
+    summary = (f"{merged_note}imported {n_labeled}/{len(tasks)} labeled tasks "
+               f"({len(tasks) - n_labeled} unlabeled skipped): "
                f"{len(training)} training rows -> {train_path}, "
                f"{len(eval_rows)} no_hit rows -> {eval_path}; "
                f"{no_hitter} without hitter; shot_type counts: {dict(counts)}")
