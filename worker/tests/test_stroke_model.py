@@ -285,5 +285,207 @@ class TestRunLogoCV(unittest.TestCase):
         self.assertEqual(len(report["unknown_rate_per_match"]), 3)
 
 
+_SKIPPED_CG_AP_DONOR = {
+    # seq-len-shaped learned positional embeddings + the class-count/width-shaped head;
+    # everything else in the released BST_CG_AP checkpoint transfers key-for-key
+    "embedding_tem", "embedding_cross", "embedding_inter",
+    "mlp_head.layer_norm.weight", "mlp_head.layer_norm.bias",
+    "mlp_head.mlp.mlp.0.weight", "mlp_head.mlp.mlp.3.weight", "mlp_head.mlp.mlp.3.bias",
+}
+
+
+@unittest.skipUnless(_READY, _SKIP)
+class TestLoadPretrained(unittest.TestCase):
+    """Shape-filtered transfer from the upstream checkpoint format. The synthetic donor
+    BST4(in_dim=72, seq_len=30, n_class=25, n_slots=2, variant='cg_ap') is key-for-key and
+    shape-for-shape identical to the released ShuttleSet BST_CG_AP state_dict (slot weights
+    are shared, so n_slots never appears in tensor shapes)."""
+
+    @staticmethod
+    def _donor(**over):
+        from worker.stroke.model import BST4
+
+        cfg = dict(in_dim=72, seq_len=30, n_class=25, n_slots=2, variant="cg_ap")
+        cfg.update(over)
+        return BST4(**cfg)
+
+    def test_transfers_shape_compatible_tensors_and_reinits_the_rest(self):
+        import torch
+
+        from worker.stroke.model import BST4, load_pretrained
+
+        donor = self._donor()
+        recipient = BST4(in_dim=72, seq_len=16, n_class=7, n_slots=4, variant="cg_ap")
+        emb_before = recipient.embedding_tem.detach().clone()
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "upstream.pt"
+            torch.save(donor.state_dict(), path)  # upstream saves a BARE state_dict
+            report = load_pretrained(recipient, path)
+
+        self.assertTrue(torch.equal(recipient.state_dict()["tcn_pose.net.0.weight"],
+                                    donor.state_dict()["tcn_pose.net.0.weight"]))
+        # embeddings stay at OUR sinusoidal init — donor rows encode different window semantics
+        self.assertTrue(torch.equal(recipient.embedding_tem, emb_before))
+        self.assertEqual(set(report["skipped_shape"]), _SKIPPED_CG_AP_DONOR)
+        # the head's first bias (width d_model*mlp_d_scale) transfers next to its re-init
+        # weight — harmless, but the report must show it as matched, not hide it
+        self.assertIn("mlp_head.mlp.mlp.0.bias", report["matched"])
+        self.assertEqual(report["missing"], [])
+        self.assertEqual(report["unexpected"], [])
+        self.assertGreater(report["matched_params"] / report["total_params"], 0.85)
+
+    def test_accepts_our_checkpoint_format(self):
+        import torch
+
+        from worker.stroke.model import BST4, load_pretrained, save_checkpoint
+
+        donor = self._donor()
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "ours.pt"
+            save_checkpoint(path, donor, {"in_dim": 72, "seq_len": 30, "n_class": 25,
+                                          "n_slots": 2, "variant": "cg_ap"})
+            recipient = BST4(in_dim=72, seq_len=16, n_class=7, n_slots=4, variant="cg_ap")
+            report = load_pretrained(recipient, path)
+        self.assertTrue(torch.equal(recipient.state_dict()["tcn_shuttle.net.0.weight"],
+                                    donor.state_dict()["tcn_shuttle.net.0.weight"]))
+        self.assertEqual(set(report["skipped_shape"]), _SKIPPED_CG_AP_DONOR)
+
+    def test_j_only_recipient_skips_first_conv_weight_but_transfers_its_bias(self):
+        import torch
+
+        from worker.stroke.model import BST4, load_pretrained
+
+        donor = self._donor()  # JnB_bone checkpoint, in_dim 72
+        recipient = BST4(in_dim=34, seq_len=16, n_class=7, n_slots=4, variant="cg_ap")
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "upstream.pt"
+            torch.save(donor.state_dict(), path)
+            report = load_pretrained(recipient, path)
+        want_extra = {"tcn_pose.net.0.weight",
+                      "mlp_positions.mlp.3.weight", "mlp_positions.mlp.3.bias"}
+        self.assertEqual(set(report["skipped_shape"]), _SKIPPED_CG_AP_DONOR | want_extra)
+        self.assertIn("tcn_pose.net.0.bias", report["matched"])  # documented behavior
+        self.assertTrue(torch.equal(recipient.state_dict()["tcn_pose.net.0.bias"],
+                                    donor.state_dict()["tcn_pose.net.0.bias"]))
+
+    def test_report_partitions_all_keys_and_flags_missing(self):
+        import torch
+
+        from worker.stroke.model import BST4, load_pretrained
+
+        # bst0 donor lacks PPF/CleanGate -> those recipient keys must surface as `missing`
+        donor = self._donor(variant="bst0")
+        recipient = BST4(in_dim=72, seq_len=16, n_class=7, n_slots=4, variant="cg_ap")
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "upstream.pt"
+            torch.save(donor.state_dict(), path)
+            report = load_pretrained(recipient, path)
+        donor_keys = set(donor.state_dict())
+        recipient_keys = set(recipient.state_dict())
+        self.assertEqual(set(report["matched"]) | set(report["skipped_shape"])
+                         | set(report["unexpected"]), donor_keys)
+        self.assertEqual(set(report["matched"]) | set(report["skipped_shape"])
+                         | set(report["missing"]), recipient_keys)
+        self.assertTrue(all(k.startswith(("mlp_positions.", "mlp_clean."))
+                            for k in report["missing"]))
+        self.assertNotEqual(report["missing"], [])
+
+    def test_missing_file_raises(self):
+        from worker.stroke.model import BST4, load_pretrained
+
+        with self.assertRaises((FileNotFoundError, RuntimeError)):
+            load_pretrained(BST4(), Path("/nonexistent/weights.pt"))
+
+
+@unittest.skipUnless(_READY, _SKIP)
+class TestTrainFoldInitWeights(unittest.TestCase):
+    """train_fold with cfg init_weights/freeze_epochs: frozen == exactly the matched tensors,
+    unfreeze at epoch N, and the guard against freezing random init."""
+
+    @staticmethod
+    def _tiny(n=8, in_dim=34, seed=5):
+        import numpy as np
+
+        rng = np.random.default_rng(seed)
+        return (rng.normal(size=(n, 16, 4, in_dim)).astype(np.float32),
+                rng.random(size=(n, 16, 2)).astype(np.float32),
+                rng.random(size=(n, 16, 4, 2)).astype(np.float32),
+                (np.arange(n) % 7).astype(np.int64))
+
+    @classmethod
+    def _donor_path(cls, d):
+        import torch
+
+        from worker.stroke.model import BST4
+
+        donor = BST4(in_dim=34, seq_len=30, n_class=25, n_slots=2, variant="cg_ap")
+        path = Path(d) / "donor.pt"
+        torch.save(donor.state_dict(), path)
+        return donor, path
+
+    def _run(self, d, **cfg_over):
+        import numpy as np
+
+        from worker.stroke.train import train_fold
+
+        J, S, P, y = self._tiny()
+        cfg = {"variant": "cg_ap", "lr": 1e-2, "epochs": 2, "batch_size": 4, "seed": 1}
+        cfg.update(cfg_over)
+        return train_fold(J, S, P, y, cfg, "cpu", np.random.default_rng(1))
+
+    def test_full_freeze_keeps_matched_tensors_at_donor_values(self):
+        import torch
+
+        with tempfile.TemporaryDirectory() as d:
+            donor, path = self._donor_path(d)
+            model = self._run(d, init_weights=str(path), freeze_epochs=2)
+        self.assertTrue(torch.equal(model.state_dict()["tcn_pose.net.0.weight"],
+                                    donor.state_dict()["tcn_pose.net.0.weight"]))
+        frozen = [n for n, p in model.named_parameters() if not p.requires_grad]
+        self.assertIn("tcn_pose.net.0.weight", frozen)
+        self.assertNotIn("mlp_head.mlp.mlp.3.weight", frozen)  # head trained throughout
+
+    def test_no_freeze_trains_matched_tensors_away_from_donor(self):
+        import torch
+
+        with tempfile.TemporaryDirectory() as d:
+            donor, path = self._donor_path(d)
+            model = self._run(d, init_weights=str(path), freeze_epochs=0)
+        self.assertFalse(torch.equal(model.state_dict()["tcn_pose.net.0.weight"],
+                                     donor.state_dict()["tcn_pose.net.0.weight"]))
+
+    def test_unfreezes_after_n_epochs(self):
+        import torch
+
+        with tempfile.TemporaryDirectory() as d:
+            donor, path = self._donor_path(d)
+            model = self._run(d, init_weights=str(path), freeze_epochs=1, epochs=3)
+        self.assertFalse(torch.equal(model.state_dict()["tcn_pose.net.0.weight"],
+                                     donor.state_dict()["tcn_pose.net.0.weight"]))
+        # everything trainable again after the unfreeze epoch
+        self.assertTrue(all(p.requires_grad for _, p in model.named_parameters()))
+
+    def test_freeze_without_init_raises(self):
+        with self.assertRaises(ValueError):
+            self._run(tempfile.gettempdir(), freeze_epochs=1)
+
+    def test_run_logo_cv_reports_init_audit(self):
+        from worker.stroke.train import run_logo_cv
+
+        data, meta = TestRunLogoCV._dataset()
+        with tempfile.TemporaryDirectory() as d:
+            _, path = self._donor_path(d)
+            cfg = {"variant": "cg_ap", "pose_style": "J_only", "lr": 1e-3, "epochs": 1,
+                   "batch_size": 8, "seed": 1, "device": "cpu",
+                   "init_weights": str(path), "freeze_epochs": 0}
+            oof, report = run_logo_cv(data, meta, cfg)
+        audit = report["init_weights_report"]
+        self.assertEqual(audit["path"], str(path))
+        self.assertGreater(audit["n_matched"], 0)
+        self.assertIn("embedding_tem", audit["skipped_shape"])
+        self.assertGreater(audit["matched_params"] / audit["total_params"], 0.5)
+        self.assertEqual(oof.height, 45)
+
+
 if __name__ == "__main__":
     unittest.main()

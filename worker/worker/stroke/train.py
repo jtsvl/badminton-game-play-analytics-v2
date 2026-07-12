@@ -251,17 +251,34 @@ def train_fold(J, S, P, y, cfg: dict, device: str, rng) -> "BST4":  # noqa: F821
     """Fixed-budget training (no early stopping — there is no honest val set inside a
     fold, and a fixed budget keeps the final all-data train well-defined): AdamW, 5-epoch
     linear warmup then cosine to 0, class-weighted CE from THIS split's rows, fresh ±1
-    temporal jitter each epoch, drop_last batches (keeps BatchNorm batches full)."""
+    temporal jitter each epoch, drop_last batches (keeps BatchNorm batches full).
+
+    cfg init_weights: transfer shape-compatible tensors first (model.load_pretrained).
+    cfg freeze_epochs=N: exactly the transferred tensors get requires_grad=False for the
+    first N epochs (N >= epochs = frozen-trunk probe). BatchNorm running stats keep
+    updating during the freeze — deliberate AdaBN-style adaptation to our footage."""
     import math
 
     import numpy as np
     import torch
 
-    from .model import BST4
+    from .model import BST4, load_pretrained
 
     torch.manual_seed(int(cfg.get("seed", 42)))
     model = BST4(in_dim=int(J.shape[-1]), seq_len=int(J.shape[1]), n_class=len(CLASSES),
                  variant=cfg.get("variant", "cg_ap")).to(device)
+    freeze_epochs = int(cfg.get("freeze_epochs", 0) or 0)
+    if freeze_epochs and not cfg.get("init_weights"):
+        raise ValueError("freeze_epochs requires init_weights — freezing random init "
+                         "would train nothing worth keeping")
+    frozen: set = set()
+    if cfg.get("init_weights"):
+        audit = load_pretrained(model, Path(cfg["init_weights"]))
+        if freeze_epochs:
+            frozen = set(audit["matched"])
+            for name, p in model.named_parameters():
+                if name in frozen:
+                    p.requires_grad_(False)
     weights = torch.tensor(class_weights(y), dtype=torch.float32, device=device)
     loss_fn = torch.nn.CrossEntropyLoss(weight=weights)
     opt = torch.optim.AdamW(model.parameters(), lr=float(cfg.get("lr", 1e-3)),
@@ -279,7 +296,11 @@ def train_fold(J, S, P, y, cfg: dict, device: str, rng) -> "BST4":  # noqa: F821
     batch = min(int(cfg.get("batch_size", 32)), n)
     y_t = torch.from_numpy(np.ascontiguousarray(y)).to(device)
     model.train()
-    for _ in range(epochs):
+    for epoch in range(epochs):
+        if frozen and epoch == freeze_epochs:
+            for name, p in model.named_parameters():
+                if name in frozen:
+                    p.requires_grad_(True)
         jj, sj, pj = jitter_shift((J, S, P), rng.integers(-1, 2, n))
         perm = rng.permutation(n)
         for i in range(0, n - batch + 1, batch):
@@ -329,6 +350,24 @@ def run_logo_cv(data: dict, meta, cfg: dict):
     y[confident] = encode_labels([s for s, keep in zip(shot_types, confident) if keep])
 
     device = resolve_device(cfg.get("device", "auto"))
+    init_audit = None
+    if cfg.get("init_weights"):
+        # audit once on a throwaway model (train_fold repeats the load silently per fold)
+        from .model import BST4, load_pretrained
+
+        probe = BST4(in_dim=int(J.shape[-1]), seq_len=int(J.shape[1]),
+                     n_class=len(CLASSES), variant=cfg.get("variant", "cg_ap"))
+        a = load_pretrained(probe, Path(cfg["init_weights"]))
+        del probe
+        init_audit = {"path": str(cfg["init_weights"]), "n_matched": len(a["matched"]),
+                      "skipped_shape": a["skipped_shape"], "missing": a["missing"],
+                      "unexpected": a["unexpected"], "matched_params": a["matched_params"],
+                      "total_params": a["total_params"]}
+        log.info("stroke: init from %s — %d tensors matched (%.1f%% of params), "
+                 "%d shape-skipped, %d missing",
+                 cfg["init_weights"], len(a["matched"]),
+                 100.0 * a["matched_params"] / a["total_params"],
+                 len(a["skipped_shape"]), len(a["missing"]))
     folds = fold_split(video_ids.tolist())
     probs = np.zeros((meta.height, len(CLASSES)), dtype=np.float64)
     fold_of_row = np.zeros(meta.height, dtype=np.int64)
@@ -384,6 +423,8 @@ def run_logo_cv(data: dict, meta, cfg: dict):
         "device": device,
         "config": dict(cfg),
     }
+    if init_audit is not None:
+        report["init_weights_report"] = init_audit
     oof_cols: dict = {c: meta[c] for c in
                       ("event_id", "video_id", "t_s", "shot_type", "is_calibration")
                       if c in meta.columns}
@@ -423,22 +464,33 @@ def train_cli(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", choices=["auto", "cpu", "mps"], default="auto")
     ap.add_argument("--out", help="run dir (default: <labeling>/stroke_runs/<UTC>_<variant>_<pose-style>)")
+    ap.add_argument("--init-weights",
+                    help="pretrained checkpoint to transfer shape-compatible tensors from "
+                         "(upstream BST bare state_dict or our format; see runbook §8)")
+    ap.add_argument("--freeze-epochs", type=int, default=0,
+                    help="freeze the transferred tensors for the first N epochs "
+                         "(N >= --epochs = frozen-trunk probe; requires --init-weights)")
     ap.add_argument("--promote", action="store_true",
                     help="copy the final checkpoint to models/weights/stroke/ + sidecar "
                          "(refused unless the LOGO gate passed)")
     args = ap.parse_args(argv)
+    if args.freeze_epochs and not args.init_weights:
+        ap.error("--freeze-epochs requires --init-weights")
 
     cfg_env = load_config()
     labeling = Path(cfg_env.frame_cache_dir).expanduser().parent / ".labeling"
     dataset_dir = Path(args.dataset).expanduser() if args.dataset else labeling / "stroke_dataset"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    suffix = ("_init" + (f"_frz{args.freeze_epochs}" if args.freeze_epochs else "")
+              if args.init_weights else "")
     out_dir = (Path(args.out).expanduser() if args.out
-               else labeling / "stroke_runs" / f"{stamp}_{args.variant}_{args.pose_style}")
+               else labeling / "stroke_runs" / f"{stamp}_{args.variant}_{args.pose_style}{suffix}")
 
     data, meta = load_dataset(dataset_dir)
     cfg = {"variant": args.variant, "pose_style": args.pose_style, "lr": args.lr,
            "epochs": args.epochs, "batch_size": args.batch_size, "seed": args.seed,
-           "device": args.device}
+           "device": args.device, "init_weights": args.init_weights,
+           "freeze_epochs": args.freeze_epochs}
     oof, report = run_logo_cv(data, meta, cfg)
 
     try:
@@ -458,6 +510,9 @@ def train_cli(argv: Sequence[str] | None = None) -> int:
             "sha256": {f: hashlib.sha256((dataset_dir / f).read_bytes()).hexdigest()
                        for f in ("stroke_dataset.npz", "meta.parquet")},
         },
+        **({"init_weights_sha256": hashlib.sha256(
+            Path(args.init_weights).expanduser().read_bytes()).hexdigest()}
+           if args.init_weights else {}),
         "caveats": [
             "one session / one lighting: LOGO-CV measures cross-game, not cross-session generalization",
             "MPS is not bit-deterministic — the CPU command in the runbook is the reproducibility reference",

@@ -222,3 +222,35 @@ def load_checkpoint(path: Path, map_location: str = "cpu") -> tuple[BST4, dict]:
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     return model, dict(ckpt["config"])
+
+
+def load_pretrained(model: BST4, path: Path, map_location: str = "cpu") -> dict:
+    """Shape-filtered transfer from a pretrained checkpoint into `model` (in place).
+
+    Accepts upstream BST's released format (a bare state_dict — their training scripts
+    `torch.save(best_state, path)`) or our {"state_dict","config"} wrapper. Slot weights are
+    shared across slots and BST4 kept upstream's attribute names, so the released 2-player
+    BST_CG_AP maps key-for-key; every tensor whose key exists here with an equal shape is
+    copied, the rest keep their init_weights() values. That deliberately re-initializes the
+    positional embeddings even where only seq_len differs — they are LEARNED upstream and
+    their rows encode front-anchored hit-to-hit windows, not our centered ±8 — and the class
+    head. A pure shape filter also transfers a bias next to a re-initialized weight (e.g.
+    tcn_pose.net.0.bias under J_only); harmless, and the audit shows it as matched.
+
+    Returns the audit: name lists `matched` / `skipped_shape` (key exists, shape differs) /
+    `missing` (ours, absent in donor) / `unexpected` (donor's, absent here), plus
+    `matched_params` / `total_params` element counts over the model's state_dict."""
+    ckpt = torch.load(Path(path), map_location=map_location, weights_only=True)
+    donor = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+    own = model.state_dict()
+    matched = {k: v for k, v in donor.items() if k in own and own[k].shape == v.shape}
+    model.load_state_dict(matched, strict=False)
+    return {
+        "matched": sorted(matched),
+        "skipped_shape": sorted(k for k, v in donor.items()
+                                if k in own and own[k].shape != v.shape),
+        "missing": sorted(k for k in own if k not in donor),
+        "unexpected": sorted(k for k in donor if k not in own),
+        "matched_params": int(sum(v.numel() for v in matched.values())),
+        "total_params": int(sum(v.numel() for v in own.values())),
+    }
