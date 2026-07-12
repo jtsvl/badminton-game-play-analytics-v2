@@ -203,6 +203,17 @@ threshold the guess is display-only text, exactly like the serve hint. `--no-pre
 additionally keeps rally-first clips hint-only (serve-bias guard). Session-3 accept rates
 tell us whether 0.8 stays the right threshold.
 
+**VLM pilot — MEASURED 2026-07-12, adoption gate FAILED, rung dropped.** Qwen2.5-VL-7B
+(4-bit, local via mlx-vlm, ~2.9 s/clip) on a stratified 105-clip sample of labeled
+Session-2 clips (`worker/scripts/vlm_prelabel_pilot.py`, 9 frames @ 640×360, German
+taxonomy prompt): top-1 agreement **0.267 vs the GBDT's 0.534** — nowhere near the gate
+(beat GBDT overall AND materially on net/smash). Per class: serve 1.00 (the rally-first
+hint does the work), drive 0.87 recall only by over-predicting drive on almost everything
+(most smashes → drive/serve), and **0.00 on clear, drop, lift, net, smash**; confidence
+uniformly 0.80 (uncalibrated). Matches the literature expectation — sampled frames lose the
+motion/audio signal the task needs. The GBDT stays the only pre-labeler; artifacts at
+`.labeling/vlm_pilot/` for reproduction.
+
 **Label-error mining (one-time Session-2 cleanup, queue generated 2026-07-12):**
 `worker stroke-assist-report --relabel-queue relabel_session2.json --tasks
 '<labeling>/tasks_Session2_*.json'` found **65 high-confidence disagreements** (p ≥ 0.8;

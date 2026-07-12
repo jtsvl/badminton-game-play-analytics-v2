@@ -22,6 +22,11 @@ can't confidently call bucketed as **`unknown`** and surfaced in the UI, never h
   train acc 0.945 vs held-out 0.402 — a **cross-game generalization gap**, not underfit; the
   sanctioned hyperparameter space is exhausted. First levers: near-half recovery v2 (below)
   and more labeled sessions — user decision before any further build.
+- **Pretrained-transfer addendum (MEASURED 2026-07-12, runbook §8):** initializing BST4 from
+  the released ShuttleSet BST_CG_AP checkpoint (89.1 % of params transfer key-for-key) lifts
+  the best BST4 to **0.490 ± 0.024** (seed 42; seeds 43/44 → 0.448/0.454) — a real +7–12 pp
+  over the lr-matched scratch control, still below the GBDT's 0.536. Experiment closed;
+  future BST4 work starts from pretrained init (see "Skeleton + training init").
 - `stroke` is in `STAGE_ORDER` and `SIDE_ANGLE_STAGES` (`pipeline/__init__.py`) but **not** in `_REAL` —
   it resolves to the `_todo` no-op stub — and **not** in `RESUME_STAGES` (`__main__.py`). No
   `pipeline/stroke.py` exists.
@@ -217,7 +222,21 @@ Body26 (Halpe) indices 0–16 are exactly **COCO-17** → the stroke input is `k
 **Train from scratch as v1** — the model is tiny (minutes–hours on MPS) and the broadcast-singles
 pretrain transfers poorly to our steeper camera, 4-slot input, and sparse shuttle coverage (the
 4-slot revision also breaks the pretrained 2-player input shape — from-scratch is now structural;
-a pretrained-trunk fallback would need stream surgery and is correspondingly weaker). Variant
+a pretrained-trunk fallback would need stream surgery and is correspondingly weaker).
+
+> **MEASURED 2026-07-12 — the paragraph above was wrong in its load-bearing part.** Slot
+> weights are shared across slots and BST4 kept upstream's attribute names, so the released
+> ShuttleSet `BST_CG_AP` checkpoint transfers **86/94 tensors (89.1 % of params) with zero
+> surgery** (`model.load_pretrained`, `train-stroke --init-weights/--freeze-epochs`; audit +
+> full ladder in runbook §8). Result: fine-tune-all reaches **0.490 ± 0.024 (seed 42;
+> seeds 43/44 → 0.448/0.454)** vs the lr-matched scratch control 0.374 — a real +7 to
+> +12 pp, and above the from-scratch BST4 best 0.400 — **but still below the GBDT's 0.536**;
+> τ stays unsatisfiable and net/drive recall stays ≈ 0.05. Per the locked rules: GBDT
+> remains the candidate family, experiment closed, nothing promoted. Standing consequence:
+> any future BST4 work (esp. the 30 fps re-ingest) starts from the pretrained init, not from
+> scratch — transfer survives the temporal-scale and camera gap.
+
+Variant
 **BST_CG_AP** adapted to 4 player streams with shared TCN weights, **`seq_len=16`** ≈ ±0.67 s at
 the pipeline's real **12 fps analysis cadence** (`ingest.DEFAULT_ANALYSIS_FPS = 12`, discovered at
 the Phase-1 gate — the earlier "30 frames ≈ ±0.5 s @ 30 fps" actually spans 2.5 s and neighboring

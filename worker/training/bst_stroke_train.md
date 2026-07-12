@@ -204,7 +204,25 @@ P(≥ 0.70) < 5 % — the durable payoff is converting the spec's reasoned rejec
 measured fact, and the frozen-probe number prices every future pretraining path (e.g.
 30 fps re-ingest + init).
 
-### Results
+### Results (all 2026-07-12, MPS, seed 42 unless noted; runs in `stroke_runs/`)
 | rung | config | mean LOGO acc | pooled | notes |
 |---|---|---|---|---|
-| 2 | JnB_bone scratch lr 3e-4 | 0.374 ± 0.052 | 0.384 | lr-matched control, run `20260712T204812Z` (MPS). Confirms bones hurt from scratch (J_only lr 3e-4 = 0.400) — the checkpoint must first buy back that deficit |
+| 1 | cpu 1-epoch plumbing | — | — | audit exact: 86 matched / 8 shape-skipped / 0 missing / 0 unexpected, 89.1 % of params; ckpt sha verified |
+| 2 | JnB_bone scratch lr 3e-4 | 0.374 ± 0.052 | 0.384 | lr-matched control (`20260712T204812Z`). Confirms bones hurt from scratch (J_only lr 3e-4 = 0.400) |
+| 3a | + init, lr 3e-4 | **0.490 ± 0.024** | 0.493 | best (`…rung3a`) |
+| 3b | + init, lr 1e-4 | 0.448 ± 0.041 | 0.453 | |
+| 4a | + init, frozen trunk (150) | 0.433 ± 0.029 | 0.437 | frozen probe: raw upstream features transfer (+5.9 pp over control) despite the 12 fps/camera gap |
+| 4b | + init, unfreeze @ 30 | 0.462 ± 0.024 | 0.468 | |
+| 5 | 3a with seeds 43 / 44 | 0.448 / 0.454 | 0.449 / 0.466 | seed 42 was the lucky end — the 3a family is ≈ 0.45–0.49 |
+
+**Verdict (locked decision rules, best-of-3/4 vs rung 2): pretraining is REAL but
+insufficient.** Δ over the lr-matched control = +7.4 to +11.6 pp across seeds — clearly
+beyond the 5–8 pp noise band, and +5 to +9 pp over the previous from-scratch BST4 best
+(0.400). But every pretrained run stays below the GBDT's 0.536, τ per FR-22 remains
+unsatisfiable (knee at 0), and the starved classes stay starved (rung 3a pooled recall:
+net 0.05, drive 0.05, smash 0.26 — the GBDT holds 0.30/0.14/0.21). Per the rules: **GBDT
+remains the candidate family; experiment closed, no promotion.** What this buys: the spec's
+design-time rejection of pretraining is now a measured fact in the opposite direction —
+transfer works even across the 2.5× temporal-scale and broadcast-to-steep-camera gap — so a
+future 30 fps re-ingest should be evaluated **with** pretrained init (the frozen-probe
+number says upstream features carry signal our 12 fps windows only partially exploit).
