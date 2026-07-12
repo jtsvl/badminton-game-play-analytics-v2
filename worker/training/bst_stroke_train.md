@@ -152,3 +152,57 @@ where the floor projection is valid — see the spec's D′/E′ amendment — c
 wiring, no promotion. The measured levers on the table: more labeled sessions (every
 comparable system trains on ≥ 10× our rows), net/drive mining from unlabeled hits, near-half
 recovery v2, and a 30 fps re-ingest for the smash/drive time resolution.
+
+## 8. Pretrained-weight transfer experiment (2026-07-12)
+
+The spec's design-time rejection of pretraining ("the 4-slot revision breaks the pretrained
+2-player input shape") was **audited and found wrong in the load-bearing part**: all
+slot-processing weights are shared across slots and BST4 kept upstream's attribute names, so
+the released 2-player `BST_CG_AP` state_dict maps onto the 4-slot model key-for-key. With
+`--pose-style JnB_bone` (the checkpoint's in_dim=72), **86/94 tensors ≈ 89.1 % of parameters
+transfer**; re-initialized by design: the 3 positional embeddings (LEARNED upstream, rows
+encode front-anchored hit-to-hit windows at 30 fps — not our centered ±8 @ 12 fps) and the
+25-class/300-wide head (ours: 7-class/500-wide). Known transfer-quality risks, accepted and
+measured rather than argued: TCN receptive field 0.57 s @ 30 fps vs 1.42 s @ 12 fps (motion
+filters run 2.5× too slow), bbox top-left vs center-aligned joint anchoring, broadcast pro
+singles vs steep-camera amateur doubles.
+
+### Checkpoint
+- Source: the official repo's Google Drive (README "Weights trained on ShuttleSet").
+  Serial choice per `results_and_images/result_table.xlsx`, sheet "ShuttleSet_merged (30)":
+  **`bst_CG_AP_JnB_bone_merged.pt` = serial_1** (accuracy 0.826, macro-F1 0.803 — best
+  macro-F1 of the ten 2D serials; Drive file id `1PhnbUAyqq-sfsj0cI6sSIYHkQcRxV8qb`).
+- Store at `worker/.cache/_vendor/BST_weights/shuttleset/` (git-ignored). sha256: (fill on download)
+- Verify before first use (shapes prove it is the 25-class seq-30 JnB_bone variant):
+  `tcn_pose.net.0.weight (100,72,5)` · `embedding_tem (1,31,100)` · `mlp_head.mlp.mlp.3.weight (25,400)`.
+  The rung-1 audit must report exactly 86 matched / 8 shape-skipped / 0 missing / 0 unexpected.
+
+### Commands (from the worktree `worker/`; data + vendor live in the main checkout)
+```bash
+export BST_REPO=<main>/worker/.cache/_vendor/BST/stroke_classification
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+DS=<main>/worker/worker/.labeling/stroke_dataset
+CKPT=<main>/worker/.cache/_vendor/BST_weights/shuttleset/bst_CG_AP_JnB_bone_merged.pt
+RUN="uv run python -m worker train-stroke --seed 42 --dataset $DS --pose-style JnB_bone"
+$RUN --device cpu --epochs 1 --init-weights $CKPT      # rung 1: plumbing + audit
+$RUN --lr 3e-4                                         # rung 2: lr-matched scratch control
+$RUN --lr 3e-4 --init-weights $CKPT                    # rung 3a: fine-tune all
+$RUN --lr 1e-4 --init-weights $CKPT                    # rung 3b
+$RUN --lr 3e-4 --init-weights $CKPT --freeze-epochs 150  # rung 4a: frozen-trunk probe
+$RUN --lr 3e-4 --init-weights $CKPT --freeze-epochs 30   # rung 4b: warmup-unfreeze
+# rung 5: best of 3-4 with --seed 43 / --seed 44
+```
+
+### Decision rules (locked before running; primary comparison = best of rung 3/4 vs rung 2)
+Δ < +5 pp → pretraining does not help at 12 fps; close the experiment. +5–8 pp but < 0.536 →
+real but the GBDT stays the candidate. ≥ 0.536 but < 0.70 → stop and discuss (0.5–0.7 rule).
+≥ 0.70 → gate passes, normal promote path; sidecar additionally records the upstream weight
+file + sha256 (MIT). Honest prior: realistic band 0.35–0.48, P(beats GBDT) ~10–15 %,
+P(≥ 0.70) < 5 % — the durable payoff is converting the spec's reasoned rejection into a
+measured fact, and the frozen-probe number prices every future pretraining path (e.g.
+30 fps re-ingest + init).
+
+### Results
+| rung | config | mean LOGO acc | pooled | notes |
+|---|---|---|---|---|
+| 2 | JnB_bone scratch lr 3e-4 | (running) | | |

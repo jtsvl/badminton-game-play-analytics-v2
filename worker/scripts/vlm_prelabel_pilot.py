@@ -104,7 +104,8 @@ def parse_vlm_answer(text: str) -> Optional[Tuple[str, float]]:
 def clip_paths_from_tasks(tasks_glob: str, labeling_root: Path) -> dict:
     """{event_id: clip path} from the original exporter task JSONs."""
     out: dict = {}
-    for p in sorted(Path().glob(tasks_glob)) or sorted(labeling_root.glob("tasks_*.json")):
+    paths = sorted(Path().glob(tasks_glob)) if tasks_glob else []
+    for p in paths or sorted(labeling_root.glob("tasks_*.json")):
         for task in json.loads(Path(p).read_text(encoding="utf-8")):
             rel = task["data"]["video"].split("?d=", 1)[-1]
             out[task["data"]["event_id"]] = {

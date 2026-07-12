@@ -55,5 +55,22 @@ class TestParseVlmAnswer(unittest.TestCase):
                          ("clear", 1.0))
 
 
+class TestClipPathsFromTasks(unittest.TestCase):
+    def test_empty_glob_falls_back_to_labeling_root(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "tasks_G1.json").write_text(json.dumps([{
+                "data": {"video": "/data/local-files/?d=stroke/G1/clip.mp4",
+                         "event_id": "e1", "first_of_rally": True},
+            }]), encoding="utf-8")
+            out = pilot.clip_paths_from_tasks("", root)
+        self.assertEqual(set(out), {"e1"})
+        self.assertEqual(out["e1"]["path"], root / "stroke/G1/clip.mp4")
+        self.assertTrue(out["e1"]["first_of_rally"])
+
+
 if __name__ == "__main__":
     unittest.main()
