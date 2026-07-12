@@ -44,6 +44,9 @@ FEATURE_COLS = (
     "out_end_dist_net", "out_dv_abs", "out_du_abs", "out_crossed_net", "out_speed_uv",
     # E incoming displacement (court)
     "in_dv_abs", "in_speed_uv",
+    # D'/E' image-space displacement (user-approved 2026-07-12: floor projection of elevated
+    # contact points is garbage for ~63% of hits — picture units are always available)
+    "out_dpxn_abs", "out_dpyn_abs", "out_speed_img", "in_speed_img",
     # F image-y arc
     "hit_pxn", "hit_pyn", "out_apex_rise", "out_apex_t_frac", "out_end_drop",
     "out_py_slope_early", "in_apex_rise",
@@ -180,6 +183,18 @@ def build_feature_row(label: dict, *, events: Sequence[dict], rallies: Sequence[
         (u0, v0), (up, vp) = pt0, pt_prev
         row["in_dv_abs"] = abs(v0 - vp)
         row["in_speed_uv"] = math.hypot(u0 - up, v0 - vp) / (t0 - t_prev)
+
+    # D'/E' — image-space displacement, homography-free (picture units, trees don't need meters)
+    if anchor and end_row:
+        dxn = (float(end_row["px"]) - float(anchor["px"])) / frame_w
+        dyn = (float(end_row["py"]) - float(anchor["py"])) / frame_h
+        row["out_dpxn_abs"], row["out_dpyn_abs"] = abs(dxn), abs(dyn)
+        if t1 is not None and t1 > t0:
+            row["out_speed_img"] = math.hypot(dxn, dyn) / (t1 - t0)
+    if anchor and prev_row and t_prev is not None and t0 > t_prev:
+        row["in_speed_img"] = math.hypot(
+            (float(anchor["px"]) - float(prev_row["px"])) / frame_w,
+            (float(anchor["py"]) - float(prev_row["py"])) / frame_h) / (t0 - t_prev)
 
     # F — image-y arc over the outgoing segment (real detections only, first-argmin ties)
     if anchor and t1 is not None:

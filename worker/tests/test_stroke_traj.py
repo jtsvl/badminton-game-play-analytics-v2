@@ -50,10 +50,42 @@ def _row(label, *, events, rallies, shuttle, tracks=None, frame_w=1.0, frame_h=1
 
 class TestConstants(unittest.TestCase):
     def test_column_groups_are_locked(self):
-        self.assertEqual(len(FEATURE_COLS), 24)
+        self.assertEqual(len(FEATURE_COLS), 28)
         self.assertEqual(len(PPOS_COLS), 3)
         self.assertTrue(all(c.startswith("ppos_") for c in PPOS_COLS))
         self.assertFalse(set(FEATURE_COLS) & set(PPOS_COLS))
+
+
+class TestImageDisplacement(unittest.TestCase):
+    """Image-space displacement/speed (user-approved 2026-07-12 after the projection probe):
+    the floor projection of elevated contact points is garbage for ~63% of hits, so the
+    displacement signal lives in picture units — always computable, no homography needed."""
+
+    def test_image_displacement_and_speed_without_homography(self):
+        r = _row(_label(1.0), events=[_hit(1.0), _hit(1.5)], rallies=[_rally()],
+                 shuttle=[_det(1.0, 0.3, 0.3), _det(1.5, 0.35, 0.7)], homography=None)
+        self.assertAlmostEqual(r["out_dpxn_abs"], 0.05)
+        self.assertAlmostEqual(r["out_dpyn_abs"], 0.4)
+        self.assertAlmostEqual(r["out_speed_img"], ((0.05 ** 2 + 0.4 ** 2) ** 0.5) / 0.5)
+        self.assertIsNone(r["in_speed_img"])  # first of rally
+
+    def test_incoming_image_speed(self):
+        r = _row(_label(1.6, hit_idx=2), events=[_hit(1.0), _hit(1.6)], rallies=[_rally()],
+                 shuttle=[_det(1.0, 0.3, 0.7), _det(1.6, 0.3, 0.4)], homography=None)
+        self.assertAlmostEqual(r["in_speed_img"], 0.3 / 0.6)
+
+    def test_image_displacement_normalizes_by_frame_size(self):
+        r = _row(_label(1.0), events=[_hit(1.0), _hit(1.5)], rallies=[_rally()],
+                 shuttle=[_det(1.0, 100.0, 300.0), _det(1.5, 150.0, 700.0)],
+                 frame_w=1000.0, frame_h=2000.0, homography=None)
+        self.assertAlmostEqual(r["out_dpxn_abs"], 0.05)
+        self.assertAlmostEqual(r["out_dpyn_abs"], 0.2)
+
+    def test_no_endpoint_detection_leaves_image_displacement_none(self):
+        r = _row(_label(1.0), events=[_hit(1.0)], rallies=[_rally(end=3.0)],
+                 shuttle=[_det(1.0, 0.3, 0.3)], homography=None)  # rally_end, no det near 3.0
+        self.assertIsNone(r["out_dpxn_abs"])
+        self.assertIsNone(r["out_speed_img"])
 
 
 class TestBoundaries(unittest.TestCase):

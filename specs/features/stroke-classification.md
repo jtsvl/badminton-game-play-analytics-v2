@@ -62,7 +62,7 @@ key `feature_importance_gain` = mean gain across fold models). Runs land in
 ≥ 0.70 → gate pass, user decides. Determinism: `hist` on CPU, `nthread=1`, per-fold seeds —
 bit-reproducible (no MPS caveat).
 
-### Features (24 core + 3 optional player features, all NaN-able Float64)
+### Features (28 core + 3 optional player features, all NaN-able Float64)
 Per labeled hit, from its **hit-to-hit segment**: outgoing `[t0, t1]` where t1 = next *detected*
 hit in the same rally (time-span lookup, `hits_in_rallies` semantics) else `rally.t_end_s`
 (labeled videos have no landing events); incoming `[t_prev, t0]`, absent for the first hit.
@@ -81,6 +81,15 @@ and apex are read off real detections only. Coordinates: image-normalized `px/W,
 - **D outgoing displacement (court)**: `out_end_dist_net`, `out_dv_abs`, `out_du_abs`,
   `out_crossed_net`, `out_speed_uv`.
 - **E incoming displacement (court)**: `in_dv_abs`, `in_speed_uv`.
+- **D′/E′ image-space displacement** (user-approved amendment, 2026-07-12): `out_dpxn_abs`,
+  `out_dpyn_abs`, `out_speed_img`, `in_speed_img`. **Measured on the real export**: the floor
+  projection of *elevated* contact points is unusable for ~63 % of hits (median offset ≈ one
+  court length; high far-court contacts sit above the camera horizon, where the projection
+  flips sign — non-monotonic garbage, not noise; the same reason shuttle.parquet's own
+  in-flight u/v are junk). Picture-unit displacement is always computable and consistent; the
+  court groups C/D/E stay as sparse columns (valid ≈ 37 %, mostly low near-court contacts —
+  the missingness itself is inference-available signal), and `ppos_` inherits that ≈ 37 %
+  coverage since it measures distance to the projected contact point.
 - **F image-y arc**: `hit_pxn`, `hit_pyn`, `out_apex_rise`, `out_apex_t_frac`, `out_end_drop`,
   `out_py_slope_early`, `in_apex_rise` (probe on real data: apex-rise alone rank-orders
   lift .093 ≫ clear .018 > drive .012 > drop .003 > smash/net/serve ≈ 0 — the family works at
