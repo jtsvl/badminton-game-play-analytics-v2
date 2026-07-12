@@ -144,6 +144,12 @@ def main() -> None:
         export_cli(sys.argv[2:])
         return
 
+    if len(sys.argv) > 1 and sys.argv[1] == "train-stroke-gbdt":
+        from .stroke.gbdt import train_cli
+
+        train_cli(sys.argv[2:])
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "backfill-calib-frames":
         from .backfill_calib_frames import backfill_cli
 
