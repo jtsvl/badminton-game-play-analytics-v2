@@ -50,7 +50,12 @@ smash time-resolution.**
 
 **Status: DESIGN, approved spike — eval only.** No pipeline wiring and no promotion path in this
 spike regardless of outcome; a gate pass triggers a user decision on the model family, nothing
-more. Motivation: the BST4 failure is a **generalization gap** (train 0.945 vs held-out 0.402 on
+more. **Carve-out (user-approved 2026-07-12): labeling-assist artifact.** `train-stroke-gbdt
+--fit-full` may additionally save `assist_model.ubj` + `assist_meta.json` (`purpose:
+labeling_assist_only`, `never_promote: true`), trained on all confident rows, used ONLY to
+pre-fill/triage Label Studio tasks for future sessions (features/stroke-labeling.md). Loaders
+must refuse artifacts whose meta lacks `labeling_assist_only`; the ≥ 0.70 gate for wiring
+stage 7 into the pipeline is untouched by this carve-out. Motivation: the BST4 failure is a **generalization gap** (train 0.945 vs held-out 0.402 on
 554 rows — memorization), and the label-ambiguity theory was tested and killed 2026-07-12
 (clean-clip accuracy 0.383 ≈ ambiguous 0.411; class-controlled CMH OR 0.92 [0.62–1.37]) — so the
 lever is the **representation**, not the optimizer or the labels. Hand-crafted hit-to-hit

@@ -11,7 +11,14 @@ import unittest
 from importlib.util import find_spec
 from pathlib import Path
 
-from worker.stroke.gbdt import load_features, mean_gain, run_logo, train_cli
+from worker.stroke.gbdt import (
+    fit_full,
+    load_features,
+    mean_gain,
+    run_logo,
+    save_assist,
+    train_cli,
+)
 from worker.stroke.train import CLASSES, class_weights
 
 _XGB = bool(find_spec("xgboost"))
@@ -252,6 +259,90 @@ class TestXgbFitPredict(unittest.TestCase):
 
         _, report = run_logo(df, cols, fit, {"seed": 42})
         self.assertGreater(report["pooled_accuracy"], 0.95)  # class id is a feature
+
+
+class TestFitFull(unittest.TestCase):
+    def test_trains_on_all_confident_rows_with_empty_test_matrix(self):
+        import polars as pl
+
+        rows = _two_video_fixture()
+        df = pl.DataFrame(rows, strict=False)
+        cols = ["flight_time_out", "hit_pyn", "out_speed_img", "in_speed_img"]
+        seen = []
+
+        def spy(X_tr, y_tr, sample_weight, X_te, seed):
+            seen.append((X_tr.shape, len(y_tr), len(sample_weight), X_te.shape))
+            return _uniform_stub(X_tr, y_tr, sample_weight, X_te, seed)
+
+        n_train = fit_full(df, cols, spy, {"seed": 42})
+        n_conf = sum(1 for r in rows if not r["is_calibration"])
+        self.assertEqual(n_train, n_conf)
+        (x_shape, n_y, n_w, te_shape), = seen
+        self.assertEqual(x_shape, (n_conf, len(cols)))
+        self.assertEqual((n_y, n_w), (n_conf, n_conf))
+        self.assertEqual(te_shape[0], 0)  # nothing held out — assist model sees all labels
+
+
+class TestSaveAssist(unittest.TestCase):
+    class _FakeBooster:
+        def save_model(self, path):
+            Path(path).write_bytes(b"booster-bytes")
+
+    def test_meta_contract_and_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            out_dir = Path(d) / "20260712T000000Z_gbdt_traj"
+            out_dir.mkdir(parents=True)
+            cols = ["b_feature", "a_feature"]  # order is the inference contract — no sorting
+            path = save_assist(self._FakeBooster(), out_dir, feature_cols=cols,
+                               params={"eta": 0.05}, seed=42, n_train_rows=554,
+                               dataset_sha256="abc123", git_sha="deadbeef",
+                               xgboost_version="3.2.0")
+            self.assertEqual(path, out_dir / "assist_model.ubj")
+            self.assertTrue(path.exists())
+            meta = json.loads((out_dir / "assist_meta.json").read_text())
+            self.assertEqual(meta["purpose"], "labeling_assist_only")
+            self.assertIs(meta["never_promote"], True)
+            self.assertEqual(meta["model_version"], "20260712T000000Z_gbdt_traj")
+            self.assertEqual(meta["classes"], list(CLASSES))
+            self.assertEqual(meta["feature_columns"], cols)
+            self.assertEqual(meta["n_train_rows"], 554)
+            self.assertEqual(meta["dataset_sha256"], "abc123")
+
+
+@unittest.skipUnless(_XGB, _SKIP)
+class TestFitFullCli(unittest.TestCase):
+    def test_fit_full_writes_loadable_assist_artifact(self):
+        import numpy as np
+        import polars as pl
+        import xgboost as xgb
+
+        with tempfile.TemporaryDirectory() as d:
+            path = _write_features(d, _two_video_fixture())
+            out = Path(d) / "run"
+            rc = train_cli(["--features", str(path), "--out", str(out),
+                            "--n-estimators", "10", "--seed", "42", "--fit-full"])
+            self.assertEqual(rc, 0)
+            meta = json.loads((out / "assist_meta.json").read_text())
+            self.assertEqual(meta["purpose"], "labeling_assist_only")
+            self.assertEqual(meta["model_version"], "run")
+            n_conf = sum(1 for r in _two_video_fixture() if not r["is_calibration"])
+            self.assertEqual(meta["n_train_rows"], n_conf)
+
+            booster = xgb.Booster(model_file=str(out / "assist_model.ubj"))
+            df = pl.read_parquet(path)
+            X = df.select(meta["feature_columns"]).to_numpy().astype(np.float64)
+            probs = booster.predict(xgb.DMatrix(X, feature_names=meta["feature_columns"]))
+            self.assertEqual(probs.shape, (df.height, len(CLASSES)))
+            np.testing.assert_allclose(probs.sum(axis=1), np.ones(df.height), atol=1e-5)
+
+    def test_default_writes_no_artifact(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _write_features(d, _two_video_fixture())
+            out = Path(d) / "run"
+            train_cli(["--features", str(path), "--out", str(out),
+                       "--n-estimators", "10", "--seed", "42"])
+            self.assertFalse((out / "assist_model.ubj").exists())
+            self.assertFalse((out / "assist_meta.json").exists())
 
 
 @unittest.skipUnless(_XGB, _SKIP)

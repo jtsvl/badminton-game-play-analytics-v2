@@ -6,11 +6,16 @@ stroke/train.py, train on confident rows only, one OOF prediction per held-out r
 mean LOGO accuracy >= 0.70 — but parameterized by a `fit_predict` callable so the whole
 protocol tests with a stub on light installs; xgboost is imported only inside
 `xgb_fit_predict`. Eval only: no promotion path, no pipeline wiring, whatever the result
-(locked). Deterministic by construction: `hist` on CPU, nthread=1, per-fold seeds.
+(locked). One user-approved carve-out (2026-07-12): `--fit-full` additionally saves a
+LABELING-ASSIST artifact (assist_model.ubj + assist_meta.json, `purpose:
+labeling_assist_only`) trained on all confident rows — it pre-fills Label Studio tasks and
+nothing else; the ≥0.70 gate for wiring stage 7 into the pipeline is untouched.
+Deterministic by construction: `hist` on CPU, nthread=1, per-fold seeds.
 
     python -m worker train-stroke-gbdt [--features P] [--seed 42] [--out DIR] [--ppos]
                                        [--max-depth 4] [--eta 0.1] [--n-estimators 200]
                                        [--subsample 0.8] [--colsample-bytree 0.8]
+                                       [--fit-full]
 """
 from __future__ import annotations
 
@@ -145,6 +150,53 @@ def run_logo(df, feature_cols: Sequence[str], fit_predict, cfg: dict):
     return pl.DataFrame(oof_cols), report
 
 
+def fit_full(df, feature_cols: Sequence[str], fit_predict, cfg: dict) -> int:
+    """Fit ONE model on ALL confident rows — the labeling-assist artifact, never the
+    pipeline. Masks/encoding/weights identical to run_logo minus the fold holdout; the
+    test matrix is empty (nothing honest to predict — this model has seen every label).
+    The caller captures the booster out-of-band (xgb_fit_predict's `boosters` param).
+    Returns the number of training rows for the artifact metadata."""
+    import numpy as np
+
+    X = df.select(list(feature_cols)).to_numpy().astype(np.float64)
+    confident = ~df["is_calibration"].to_numpy()
+    y = encode_labels([s for s, keep in zip(df["shot_type"].to_list(), confident) if keep])
+    sample_weight = class_weights(y)[y]
+    # seed slot after the folds, mirroring the BST final all-data train (train.py)
+    n_folds = len(fold_split([str(v) for v in df["video_id"].to_list()]))
+    full_seed = int(np.random.default_rng([int(cfg.get("seed", 42)), n_folds])
+                    .integers(2 ** 31 - 1))
+    fit_predict(X[confident], y, sample_weight, X[:0], full_seed)
+    return int(confident.sum())
+
+
+def save_assist(booster, out_dir: Path, *, feature_cols: Sequence[str], params: dict,
+                seed: int, n_train_rows: int, dataset_sha256: str,
+                git_sha: str | None, xgboost_version: str) -> Path:
+    """Write assist_model.ubj + assist_meta.json. `feature_columns` ORDER is the inference
+    contract — prelabel must assemble X exactly in this order. `purpose`/`never_promote`
+    are the guardrail: loaders must refuse anything not marked labeling_assist_only."""
+    import json
+
+    model_path = out_dir / "assist_model.ubj"
+    booster.save_model(str(model_path))
+    meta = {
+        "purpose": "labeling_assist_only",
+        "never_promote": True,
+        "model_version": out_dir.name,
+        "classes": list(CLASSES),
+        "feature_columns": list(feature_cols),
+        "params": dict(params),
+        "seed": int(seed),
+        "n_train_rows": int(n_train_rows),
+        "dataset_sha256": dataset_sha256,
+        "git_sha": git_sha,
+        "xgboost_version": xgboost_version,
+    }
+    (out_dir / "assist_meta.json").write_text(json.dumps(meta, indent=2))
+    return model_path
+
+
 def mean_gain(boosters: Sequence, feature_cols: Sequence[str]) -> dict:
     """Mean gain importance across the fold boosters, 0 where a feature went unused,
     sorted descending — the spike's main diagnostic beyond the headline accuracy."""
@@ -178,6 +230,8 @@ def xgb_fit_predict(X_tr, y_tr, sample_weight, X_te, seed: int, *, params: dict 
         dtrain, num_boost_round=int(p["n_estimators"]))
     if boosters is not None:
         boosters.append(booster)
+    if np.asarray(X_te).shape[0] == 0:  # fit_full's empty test matrix — nothing to predict
+        return np.zeros((0, len(CLASSES)))
     return booster.predict(xgb.DMatrix(np.asarray(X_te, dtype=np.float64),
                                        feature_names=names))
 
@@ -209,6 +263,10 @@ def train_cli(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--subsample", type=float, default=DEFAULT_PARAMS["subsample"])
     ap.add_argument("--colsample-bytree", type=float,
                     default=DEFAULT_PARAMS["colsample_bytree"])
+    ap.add_argument("--fit-full", action="store_true",
+                    help="additionally fit on ALL confident rows and save the "
+                         "labeling-assist artifact (assist_model.ubj — pre-labels Label "
+                         "Studio tasks only, never the pipeline)")
     args = ap.parse_args(argv)
 
     cfg_env = load_config()
@@ -281,6 +339,23 @@ def train_cli(argv: Sequence[str] | None = None) -> int:
     gate = report["gate_passed"]
     print(f"GATE (mean >= {GATE_MEAN_ACCURACY:.2f}): {'PASSED' if gate else 'FAILED'} "
           f"-> {out_dir}")
+
+    if args.fit_full:
+        full_boosters: list = []
+
+        def fit_all(X_tr, y_tr, sample_weight, X_te, full_seed):
+            return xgb_fit_predict(X_tr, y_tr, sample_weight, X_te, full_seed,
+                                   params=params, feature_names=feature_cols,
+                                   boosters=full_boosters)
+
+        n_train = fit_full(df, feature_cols, fit_all, cfg)
+        model_path = save_assist(
+            full_boosters[0], out_dir, feature_cols=feature_cols, params=params,
+            seed=args.seed, n_train_rows=n_train,
+            dataset_sha256=report["dataset"]["sha256"]["features.parquet"],
+            git_sha=git_sha, xgboost_version=xgboost.__version__)
+        print(f"labeling-assist model (n={n_train}) -> {model_path} "
+              "[labeling_assist_only — pre-fills Label Studio, never the pipeline]")
     return 0
 
 
