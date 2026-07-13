@@ -22,6 +22,20 @@ class TestSliceFor(unittest.TestCase):
             (["remap", "rally_sync", "aggregate", "overlay"], "done"),
         )
 
+    def test_remap_returns_to_prior_status(self):
+        # Backfill re-runs (e.g. pose_keyframes) pass the match's current status so a 'review'
+        # match is not silently flipped past the PlayerReview gate.
+        self.assertEqual(
+            _slice_for({"stage": "remap", "params": {"return_status": "review"}}),
+            (["remap", "rally_sync", "aggregate", "overlay"], "review"),
+        )
+
+    def test_remap_ignores_null_params(self):
+        self.assertEqual(
+            _slice_for({"stage": "remap", "params": None}),
+            (["remap", "rally_sync", "aggregate", "overlay"], "done"),
+        )
+
     def test_rally_review_slice_defaults_to_done(self):
         # No overlay: rally edits change nothing overlay produces (it never reads rallies).
         self.assertEqual(
@@ -42,6 +56,20 @@ class TestSliceFor(unittest.TestCase):
             _slice_for({"stage": "rally_review", "params": None}),
             (["remap", "rally_sync", "aggregate"], "done"),
         )
+
+    def test_return_status_unchanged_leaves_match_status_untouched(self):
+        # 'unchanged' → end None (like standalone proxy jobs): a backfill that races a trainer
+        # confirmation must not overwrite the newer status with its enqueue-time snapshot.
+        stages, end = _slice_for({"stage": "remap", "params": {"return_status": "unchanged"}})
+        self.assertEqual(stages, ["remap", "rally_sync", "aggregate", "overlay"])
+        self.assertIsNone(end)
+
+    def test_return_status_rejects_unknown_values(self):
+        # A typo'd status would hide the match from every status-gated view — fall back to 'done'.
+        for bogus in ("reviewed", "calibrating", "failed", ""):
+            with self.subTest(bogus=bogus):
+                _, end = _slice_for({"stage": "remap", "params": {"return_status": bogus}})
+                self.assertEqual(end, "done")
 
     def test_ingest_slice_includes_proxy(self):
         # proxy rides along on ingest so every new upload gets a playback proxy; it never

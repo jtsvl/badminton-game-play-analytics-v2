@@ -106,7 +106,9 @@ op). Hence: veto = low threshold + span guard; bridge = high threshold + serve-e
 exists (join pose `track` → `tracks.parquet` kept track ids; `source="interp"` rows have no pose —
 harmless) and passes them to `build_rallies(dets, player_energy, swings)`. Gating lives ONLY
 inside the segment.py rules (`swing_bridge` flag), so the eval harness flips it via env without
-rewiring.
+rewiring. (Second `pose.parquet` consumer since 2026-07-12: the `overlay` stage persists in-rally
+skeleton keyframes to `pose_keyframes` — `features/pose-skeleton-overlay.md`; tuning `SWING_*`
+knobs does not affect it.)
 
 ## Eval harness
 

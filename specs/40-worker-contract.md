@@ -36,7 +36,7 @@ A job's `stage` selects the **slice** the worker runs (`__main__.py`):
 |---|---|---|
 | `ingest` | `[ingest, proxy]` (proxy = 720p playback artifact, never raises) | `calibrating` |
 | `calibrate` | `RESUME_STAGES` = `[calibrate, detect, pose, gate_track, shuttle, rally_hit, stroke*, aggregate, overlay]` (*stroke lands here in the stage-7 build — `features/stroke-classification.md`; until then it is not in `RESUME_STAGES`) | `review` |
-| `remap` | `[remap, rally_sync, aggregate, overlay]` (FR-35 — reuses cached `tracks.parquet`, no re-detect; `rally_sync` keeps DB rally spans/trainer edits) | `done` |
+| `remap` | `[remap, rally_sync, aggregate, overlay]` (FR-35 — reuses cached `tracks.parquet`, no re-detect; `rally_sync` keeps DB rally spans/trainer edits) | `params.return_status` (default `done`) — lets backfills re-run overlay on `review` matches without skipping the PlayerReview gate |
 | `rally_review` | `[remap, rally_sync, aggregate]` (FR-35 — trainer dropped/merged rallies; no overlay, it never reads rallies) | `params.return_status` (default `done`) |
 | `proxy` | `[proxy]` standalone (backfill; `features/video-proxy.md`) | unchanged |
 
@@ -54,7 +54,7 @@ must not skip the PlayerReview confirmation; editing at `done` stays `done`.
 | rally_hit | shuttle, tracks, match_players (side binding) | `rallies` (+ `winner_side` from out landings) + `events`(serve/hit/rally_end/landing); debug `rallies.parquet`/`events.parquet` |
 | stroke | pose, shuttle, tracks, events (stage-6 hit anchors), match discipline | enriched `events` hit payloads `{shot_type, confidence, hit_disputed, half, model_version}` via `replace_rallies`; debug `events.parquet` rewrite. **Not** `player_shot_stats` — counts are derived in `aggregate` (singles-gated) so `remap`/`rally_review` re-attribute without re-classification; `stroke` stays out of those slices |
 | aggregate | tracks, **rallies** (in-rally gating), enriched events (shot counts) | `player_match_stats`, `player_shot_stats` (`count`+`share_pct` via `upsert_player_shot_stats`; `errors` column stays the landing writer's), `pair_match_stats`, `match_rally_stats` inputs |
-| overlay | tracks, shuttle, hits | `track_keyframes` (~10 Hz), hit markers |
+| overlay | tracks, shuttle, pose + frames.json (skeleton), rallies (gating) | `track_keyframes` (~10 Hz), `pose_keyframes` (in-rally skeleton, `features/pose-skeleton-overlay.md`) |
 | rally_sync | DB `rallies` + `events` (authoritative, incl. trainer edits) | cache `rallies.parquet`/`events.parquet` + re-uploaded artifacts, `ctx[rallies_path/events_path]`; `rally_corrections` rows when `job.params.corrections` is present (FR-35 eval corpus, `features/rally-shot-review.md`) |
 | proxy | source video (local `videos/` or bucket) | `analysis-artifacts/<video_id>/proxy_720p.mp4` (TUS chunked — Kong kills single requests at ~60 s), `match_videos.proxy_path`. ffmpeg host dep; **never raises** (`features/video-proxy.md`) |
 `rally_hit` runs all trajectory/serve logic in **normalized image space** (the ground homography can't place an
