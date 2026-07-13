@@ -1,5 +1,11 @@
 # Feature — Stroke classification (pipeline stage 7)
 
+> **SUPERSEDED (2026-07-13) by `specs/features/stroke-classification-v2.md`.** The v2 rebuild
+> governs all new stroke work. This file stays as v1 reference: its measurements (Phase-1 slot
+> coverage, Phase-2 LOGO-CV 0.400 → gate FAILED, GBDT spike 0.536 → gate FAILED, pipeline never
+> wired) remain valid history; its design decisions do not. Known error corrected in v2 §2: the
+> taxonomy claim below (ShuttleSet class counts) was refuted 0:3 in the Phase-0 verification.
+
 **Status: DESIGN LOCKED (2026-07-05) — build in progress on `feat/stroke-classification`.**
 FR-21/22/23. See `specs/30-ml-pipeline.md` stage 7 and `specs/40-worker-contract.md`.
 Nothing below is BUILT unless explicitly marked so.
@@ -147,8 +153,10 @@ TCNs (two player skeletons, shuttle trajectory, player court positions) → 2-la
 Its expected inputs match our artifacts 1:1 — MMPose-style 2D skeletons, **TrackNetV3** shuttle
 trajectory in [0,1], court positions from feet in [0,1].
 Taxonomy: coarse 7 (FR-23): `clear, smash, drop, net, drive, lift, serve` + **`unknown`** below the
-confidence threshold (FR-22). *(Correction to earlier revisions: ShuttleSet is 35 classes / 25 merged;
-BadmintonDB is the 18-class set.)* Iterate the hard pairs (drop/net, clear/lift) before growing the
+confidence threshold (FR-22). *(This revision's claim "ShuttleSet is 35 classes / 25 merged;
+BadmintonDB is the 18-class set" was REFUTED 0:3 in the v2 Phase-0 verification: ShuttleSet's
+native vocabulary IS 18 fine types (+unknown); 35/25 are the BST checkpoint head sizes — see
+`stroke-classification-v2.md` §2.)* Iterate the hard pairs (drop/net, clear/lift) before growing the
 taxonomy.
 
 ## Locked decisions (user, 2026-07-05 — do not relitigate silently)
