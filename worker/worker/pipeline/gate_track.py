@@ -13,11 +13,10 @@ import logging
 import os
 from collections import Counter
 from pathlib import Path
-from statistics import median
 
 from ..geometry import (
-    apply_homography, enforce_n_tracks, fill_track_gaps, foot_point, role_assign,
-    smooth_track, stitch_role_fragments,
+    apply_homography, fill_track_gaps, foot_point, select_role_primaries,
+    smooth_track, stitch_fragments_framewise,
 )
 
 log = logging.getLogger("worker.pipeline.gate_track")
@@ -38,6 +37,12 @@ FOOT_BIAS_K = float(os.environ.get("FOOT_BIAS_K", "0"))
 # eval_corrections / specs/fix-later.md. The pose stage always runs (keypoints feed Phase 4 + stroke).
 USE_POSE_FOOT = os.environ.get("USE_POSE_FOOT", "0").lower() not in ("0", "", "false", "no")
 POSE_CONF_THR = float(os.environ.get("POSE_CONF_THR", "0.3"))  # min ankle confidence to trust the pose foot
+# Framewise re-ID gates (stitch_fragments_framewise): boundary continuity allowance in meters
+# (base + speed·gap) and the minimum meters separating the best from the second-best same-half
+# role before a fragment is trusted (below it: honest hole beats a partner swap).
+STITCH_BASE_GATE_M = float(os.environ.get("STITCH_BASE_GATE_M", "1.0"))
+STITCH_SPEED_CAP_M_S = float(os.environ.get("STITCH_SPEED_CAP_M_S", "6.0"))
+STITCH_AMBIGUITY_M = float(os.environ.get("STITCH_AMBIGUITY_M", "0.5"))
 
 ROLE_TO_SIDESLOT = {
     "near": ("A", 0),
@@ -49,35 +54,45 @@ ROLE_TO_SIDESLOT = {
 }
 
 
-def build_role_tracks(samples, counts, frame_t, n, discipline, max_gap=MAX_GAP, smooth_window=SMOOTH_WINDOW):
+def build_role_tracks(samples, counts, frame_t, n, discipline, max_gap=MAX_GAP, smooth_window=SMOOTH_WINDOW,
+                      base_gate_m=None, speed_cap_m_s=None, ambiguity_m=None):
     """Turn in-court samples into role-labelled, gap-repaired output rows (pure — no I/O).
 
     `samples`: list of (t, frame, track_id, u, v) that passed court gating. `counts`: in-court frame
     count per track. Returns (out_rows, role_of) where each row is {t, track_id, u, v, role, source}
     and role_of maps every emitted track id (primaries + re-ID'd fragments) to its role.
 
-    Three Phase-4 steps layered on the original keep→role_assign→smooth flow:
-      1. primaries = the N most-present tracks (`enforce_n_tracks`), roled by their median (u,v);
-      2. **re-ID** (`stitch_role_fragments`): dropped in-court fragments that continue a role's hole are
-         relabelled to that role (`source="reid"`) — recovering *real* detections BoT-SORT split off;
+    Three steps (Phase-4, primaries/stitch upgraded for the coverage fix):
+      1. primaries = per court half, the most-present COEXISTING pair (`select_role_primaries`) —
+         two tracks alive at once are provably two people, where the old global top-N-by-count
+         picked four near tracks on a far-fragmented game and corrupted the far roles;
+      2. **re-ID** (`stitch_fragments_framewise`, v2): dropped in-court fragments that fill a role's
+         per-frame holes AND continue its boundary positions are relabelled to that role
+         (`source="reid"`) — recovering *real* detections BoT-SORT split off. Overlapping frames
+         dedupe in favour of the primary's detected row;
       3. **bounded interp** (`fill_track_gaps`): short holes (≤ max_gap frames) between a role's anchors
          are linearly filled (`source="interp"`), never extrapolated.
     Per-role jitter smoothing (`smooth_track`) is applied last, as before. With exactly N full tracks
     and no fragments/holes this is identical to the pre-Phase-4 output (every row `source="detected"`)."""
-    keep = set(enforce_n_tracks(counts, n))
-    spans, all_med = {}, {}
-    for tid in counts:
-        tsamp = [s for s in samples if s[2] == tid]
-        frames = [s[1] for s in tsamp]
-        spans[tid] = (min(frames), max(frames))
-        all_med[tid] = (median([s[3] for s in tsamp]), median([s[4] for s in tsamp]))
+    by_tid: dict[int, list] = {}
+    for t, f, tid, u, v in samples:
+        by_tid.setdefault(tid, []).append((f, u, v))
+    for tid in by_tid:
+        by_tid[tid].sort()
 
-    medians = {tid: all_med[tid] for tid in keep}
-    roles = role_assign(medians, "singles" if n == 2 else "doubles")  # primary track -> role
+    frames_seen = sorted(frame_t)
+    spf = ((frame_t[frames_seen[-1]] - frame_t[frames_seen[0]]) / (frames_seen[-1] - frames_seen[0])
+           if len(frames_seen) > 1 else 1 / 12)
+    roles = select_role_primaries(by_tid, n, spf)  # primary track -> role
 
-    primaries = {roles[tid]: {"median": medians[tid], "span": spans[tid]} for tid in keep if tid in roles}
-    fragments = {tid: {"median": all_med[tid], "span": spans[tid]} for tid in counts if tid not in keep}
-    stitched = stitch_role_fragments(primaries, fragments)  # fragment track -> role
+    role_paths = {role: by_tid[tid] for tid, role in roles.items()}
+    fragments = {tid: by_tid[tid] for tid in counts if tid not in roles}
+    stitched = stitch_fragments_framewise(
+        role_paths, fragments, spf,
+        base_gate_m=STITCH_BASE_GATE_M if base_gate_m is None else base_gate_m,
+        speed_cap_m_s=STITCH_SPEED_CAP_M_S if speed_cap_m_s is None else speed_cap_m_s,
+        ambiguity_margin_m=STITCH_AMBIGUITY_M if ambiguity_m is None else ambiguity_m,
+    )  # fragment track -> role
 
     role_of = dict(roles)
     role_of.update(stitched)
@@ -91,7 +106,13 @@ def build_role_tracks(samples, counts, frame_t, n, discipline, max_gap=MAX_GAP, 
 
     out_rows = []
     for role, segs in by_role.items():
-        segs.sort()
+        # Framewise stitching admits fragments that overlap the primary's frames — dedupe per
+        # frame, preferring the primary's detected row over a fragment's reid row.
+        best: dict[int, tuple] = {}
+        for f, u, v, tid, src in sorted(segs):
+            if f not in best or (best[f][4] == "reid" and src == "detected"):
+                best[f] = (f, u, v, tid, src)
+        segs = sorted(best.values())
         meta = {f: (tid, src) for f, u, v, tid, src in segs}
         primary_tid = Counter(s[3] for s in segs).most_common(1)[0][0]
         filled = fill_track_gaps([(f, u, v) for f, u, v, _, _ in segs], max_gap)
@@ -100,6 +121,37 @@ def build_role_tracks(samples, counts, frame_t, n, discipline, max_gap=MAX_GAP, 
             tid, src = (primary_tid, "interp") if is_filled else meta[f]
             out_rows.append({"t": t, "track_id": int(tid), "u": su, "v": sv, "role": role, "source": src})
     return out_rows, role_of
+
+
+def court_samples(det_rows, H, frame_t, pose_feet=None, foot_k=None, pose_conf_thr=None, margin=MARGIN):
+    """Project detections to court coords and gate to ±margin — (samples, counts, n_pose_feet).
+
+    The exact sample-building gate_track runs in production; eval_pose_coverage --recompute reuses
+    it so offline stitching measurements can't drift from the pipeline. det_rows: dicts with
+    frame/track/x/y/w/h; pose_feet: optional {(frame, track): (x, y, conf)} (Phase-3 pose foot)."""
+    foot_k = FOOT_BIAS_K if foot_k is None else foot_k
+    pose_conf_thr = POSE_CONF_THR if pose_conf_thr is None else pose_conf_thr
+    pose_feet = pose_feet or {}
+    samples: list[tuple] = []  # (t, frame, track_id, u, v)
+    counts: dict[int, int] = {}
+    n_pose = 0
+    for r in det_rows:
+        tid = r["track"]
+        if tid is None:
+            continue
+        pf = pose_feet.get((r["frame"], tid))
+        used_pose = pf is not None and pf[0] is not None and pf[2] >= pose_conf_thr
+        if used_pose:
+            ax, ay = pf[0], pf[1]  # real ankle keypoint
+        else:
+            ax, ay = foot_point((r["x"], r["y"], r["w"], r["h"]), foot_k)  # fallback (Phase 2)
+        u, v = apply_homography(H, ax, ay)
+        if not (-margin <= u <= 1 + margin and -margin <= v <= 1 + margin):
+            continue  # off-court (adjacent court / spectator) → drop
+        samples.append((frame_t.get(r["frame"], 0.0), int(r["frame"]), int(tid), u, v))
+        counts[int(tid)] = counts.get(int(tid), 0) + 1
+        n_pose += int(used_pose)
+    return samples, counts, n_pose
 
 
 def run(ctx) -> None:
@@ -116,11 +168,16 @@ def run(ctx) -> None:
             raise RuntimeError("gate_track: no homography — calibrate must run first")
         H = cal["homography"]
 
+    cache = Path(cfg.frame_cache_dir).expanduser() / str(video_id)
     detections_path = ctx.get("detections_path")
     if not detections_path:
-        raise RuntimeError("gate_track: no detections_path — detect must run first")
+        # retrack slice: gate_track runs first, so detect never populated ctx — resolve the
+        # cached/uploaded detections.parquet instead of re-detecting.
+        from .remap import resolve_artifact
 
-    cache = Path(cfg.frame_cache_dir).expanduser() / str(video_id)
+        detections_path = resolve_artifact(store, cfg, str(video_id), cache, "detections.parquet")
+    if not detections_path:
+        raise RuntimeError("gate_track: no detections.parquet in ctx, cache or bucket — detect must run first")
     manifest = json.loads((cache / "frames.json").read_text())
     frame_t = {f["frame"]: f["t"] for f in manifest["frames"]}
 
@@ -139,25 +196,7 @@ def run(ctx) -> None:
             pose_feet[(pr["frame"], pr["track"])] = (pr["foot_x"], pr["foot_y"], pr["foot_conf"])
 
     det = pl.read_parquet(detections_path)
-    samples: list[tuple] = []  # (t, frame, track_id, u, v)
-    counts: dict[int, int] = {}
-    n_pose = 0
-    for r in det.iter_rows(named=True):
-        tid = r["track"]
-        if tid is None:
-            continue
-        pf = pose_feet.get((r["frame"], tid))
-        used_pose = pf is not None and pf[0] is not None and pf[2] >= POSE_CONF_THR
-        if used_pose:
-            ax, ay = pf[0], pf[1]  # real ankle keypoint
-        else:
-            ax, ay = foot_point((r["x"], r["y"], r["w"], r["h"]), FOOT_BIAS_K)  # fallback (Phase 2)
-        u, v = apply_homography(H, ax, ay)
-        if not (-MARGIN <= u <= 1 + MARGIN and -MARGIN <= v <= 1 + MARGIN):
-            continue  # off-court (adjacent court / spectator) → drop
-        samples.append((frame_t.get(r["frame"], 0.0), int(r["frame"]), int(tid), u, v))
-        counts[int(tid)] = counts.get(int(tid), 0) + 1
-        n_pose += int(used_pose)
+    samples, counts, n_pose = court_samples(det.iter_rows(named=True), H, frame_t, pose_feet)
 
     if not samples:
         raise RuntimeError("gate_track: no in-court detections after gating (check calibration)")

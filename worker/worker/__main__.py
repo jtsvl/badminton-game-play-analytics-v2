@@ -56,6 +56,10 @@ def _slice_for(job: dict) -> tuple[list[str], str | None]:
         # (it never reads rallies). End status = where the match was before the edit ('review'
         # must not skip the PlayerReview confirmation; 'done' stays done).
         return ["remap", "rally_sync", "aggregate"], _return_status(job)
+    if stage == "retrack":
+        # Re-run tracking identity (gate_track rebuilds tracks.parquet from cached detections —
+        # no re-detect) + everything downstream of it. Backfill path for stitching improvements.
+        return ["gate_track", "rally_sync", "aggregate", "overlay"], _return_status(job)
     return [stage], None
 
 

@@ -10,11 +10,14 @@ Canonical confirmed-corner order is FL, FR, NR, NL, mapping to the unit square b
 """
 from __future__ import annotations
 
+import logging
 import math
 from statistics import median
 from typing import Dict, List, Sequence, Tuple
 
 from .insights import COURT_W_M, COURT_L_M
+
+log = logging.getLogger("worker.geometry")
 
 # Singles side lines sit this far inside each doubles side line (full length in singles).
 SINGLES_INSET_M = 0.46
@@ -259,42 +262,209 @@ def enforce_n_tracks(counts: Dict[int, int], n: int) -> List[int]:
     return [tid for tid, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:n]]
 
 
-def stitch_role_fragments(
-    primaries: Dict[str, dict], fragments: Dict[int, dict], max_court_dist: float = 0.5
+def select_role_primaries(
+    by_tid: Dict[int, List["FrameSample"]], n: int, seconds_per_frame: float,
+    partner_coexist_s: float = 1.0,
 ) -> Dict[int, str]:
-    """Re-associate dropped in-court track fragments with the role they continue (Phase-4 re-ID, RC3).
+    """Half-aware primary selection: {track_id: role} — successor of the global
+    enforce_n_tracks + role_assign pair for gate_track.
 
-    BoT-SORT drops a small/low-contrast player (the far player on f35d0984) and re-acquires them under
-    a *new* track id, which `enforce_n_tracks` then discards as a short fragment — leaving a hole. Each
-    `fragments[tid]` is matched to a primary role iff it (a) is in the same court half, (b) does **not**
-    temporally overlap that role's primary coverage (so it genuinely fills the role's hole, not a frame
-    the role already has), and (c) is the nearest such role within `max_court_dist` (court-normalized) —
-    a guard against cross-court blips. This recovers *real detected* positions; it does not fabricate.
+    Global top-N-by-count breaks when one half fragments much harder than the other (Session2
+    Game 3: all four biggest tracks were near-half, so role_assign labelled two NEAR tracks as
+    the far roles — identity corruption). Instead: split tracks by half (median v) and, per half
+    (doubles), pick the most-present PAIR of tracks that COEXIST for ≥ `partner_coexist_s` — two
+    tracks alive at once are two people, so coexistence proves "partner", where raw size alone
+    could just be the same player re-tracked under a new id. Falls back to the top-2 by presence
+    when no pair coexists. Within a half, left/right is ordered by median u. Halves with no
+    tracks yield no roles (the stitcher then has nothing to attach there — honest absence).
+    """
+    near: List[Tuple[int, int]] = []  # (count, tid), count first for sorting
+    far: List[Tuple[int, int]] = []
+    for tid, samples in by_tid.items():
+        (near if median(v for _, _, v in samples) >= 0.5 else far).append((len(samples), tid))
 
-    primaries: role -> {"median": (u,v), "span": (first_frame, last_frame)}.
-    fragments: track_id -> {"median": (u,v), "span": (first_frame, last_frame)}.
+    roles: Dict[int, str] = {}
+    for half_name, tracks in (("near", near), ("far", far)):
+        if not tracks:
+            continue
+        tracks.sort(reverse=True)
+        if n == 2:
+            roles[tracks[0][1]] = half_name
+            continue
+        # Most-present coexisting pair (top candidates only — O(k²) on a handful of tracks).
+        cand = tracks[:10]
+        frames = {tid: {f for f, _, _ in by_tid[tid]} for _, tid in cand}
+        best_pair = None
+        best_presence = -1
+        for i, (ca, a) in enumerate(cand):
+            for cb, b in cand[i + 1:]:
+                if len(frames[a] & frames[b]) * seconds_per_frame < partner_coexist_s:
+                    continue
+                if ca + cb > best_presence:
+                    best_presence = ca + cb
+                    best_pair = [a, b]
+        if best_pair is None:
+            best_pair = [tid for _, tid in tracks[:2]]  # nothing provably coexists — presence fallback
+        best_pair.sort(key=lambda t: median(u for _, u, _ in by_tid[t]))
+        if len(best_pair) == 2:
+            roles[best_pair[0]] = f"{half_name}_left"
+            roles[best_pair[1]] = f"{half_name}_right"
+        else:  # a lone track in the half: side by its own median u
+            side = "left" if median(u for _, u, _ in by_tid[best_pair[0]]) < 0.5 else "right"
+            roles[best_pair[0]] = f"{half_name}_{side}"
+    return roles
+
+
+def stitch_fragments_framewise(
+    role_paths: Dict[str, List["FrameSample"]],
+    fragments: Dict[int, List["FrameSample"]],
+    seconds_per_frame: float,
+    base_gate_m: float = 1.0,
+    speed_cap_m_s: float = 6.0,
+    ambiguity_margin_m: float = 0.5,
+    collision_max_ratio: float = 0.2,
+) -> Dict[int, str]:
+    """Re-associate dropped in-court track fragments with the role they continue (re-ID v2).
+
+    BoT-SORT drops a small/low-contrast player and re-acquires them under a *new* track id, which
+    `enforce_n_tracks` discards — leaving per-frame holes in the role's timeline. v1 matched by
+    whole-track medians and rejected ANY span overlap, which in doubles rejected nearly every
+    fragment (a sparse primary's [min,max] span covers most of the clip). v2 is framewise:
+
+      (a) same court half (fragment's median v vs the role name);
+      (b) mutual exclusion: one person can't be two places — a fragment coexisting with a role's
+          own coverage for more than `collision_max_ratio` of its frames cannot BE that role
+          (brief double-tracking around a BoT-SORT id switch stays tolerated). In doubles this is
+          the strongest identity signal: the partner's presence disqualifies the wrong role.
+          Implies (v1's replacement for) the fills-a-hole test: 100% collision = fills nothing;
+      (c) boundary continuity: distance (in METERS) from the fragment's first sample to the role's
+          nearest anchor before it — and from its last sample to the role's next anchor after it —
+          each within `base_gate_m + speed_cap_m_s · gap_seconds` (a player can't teleport).
+          Anchors whose position sits in the WRONG half for the role are corpse anchors (a dying
+          track's box drifting across the net) and are discarded, not veto evidence;
+      (d) ambiguity rejection: if a second same-half role passes with a boundary distance within
+          `ambiguity_margin_m` of the best, the fragment is dropped — an honest hole beats a
+          partner swap (wrong skeleton color AND wrong stats). Collision-excluded roles don't
+          count as contenders here: exclusion is evidence FOR the remaining role, not ambiguity.
+
+    Fragments are processed in start-frame order and an accepted fragment EXTENDS its role's path,
+    so chains of fragments cover long dropouts. Recovers *real detected* positions only.
+
+    Identity by ELIMINATION: when every other same-half role is collision-excluded with sustained
+    coexistence (≥ `EXCLUDED_COEXIST_S` absolute seconds of simultaneous tracks — two tracks that
+    verifiably exist at once are two people) and the fragment is long enough to trust the
+    statistic (≥ `MIN_ELIMINATION_S`), the sole remaining role is accepted even without a passing
+    boundary check — id switches drift boxes exactly at the handover, so the continuity veto is
+    least reliable right where elimination is most certain. Boundary checks compare MEDIANS of
+    the outermost `BOUNDARY_K` samples, not single boxes.
+
+    role_paths: role -> sorted [(frame, u, v)] (the primary's samples).
+    fragments:  track_id -> [(frame, u, v)].
     Returns {fragment_track_id: role}; fragments matching no role are omitted (stay dropped).
     """
-    out: Dict[int, str] = {}
-    for tid, frag in fragments.items():
-        fu, fv = frag["median"]
-        fa, fb = frag["span"]
-        frag_far = fv < 0.5
-        best_role = None
-        best_dist = max_court_dist
-        for role, prim in primaries.items():
+    from bisect import bisect_left
+
+    BOUNDARY_K = 6           # samples per boundary median (jitter/glitch damping)
+    EXCLUDED_COEXIST_S = 1.0  # absolute seconds of partner coexistence that count as "accounted for"
+    MIN_ELIMINATION_S = 2.0   # fragment length before elimination evidence is trusted
+    CORPSE_MARGIN = 0.08      # v-depth past the net (~1 m) before a near anchor counts as wrong-half
+
+    paths = {role: sorted(p) for role, p in role_paths.items()}
+    covered = {role: {f for f, _, _ in p} for role, p in paths.items()}
+
+    def meters(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+        return math.hypot((p1[0] - p2[0]) * COURT_W_M, (p1[1] - p2[1]) * COURT_L_M)
+
+    def med_pos(samples: Sequence[Tuple[int, float, float]]) -> Tuple[float, float]:
+        return (median(u for _, u, _ in samples), median(v for _, _, v in samples))
+
+    def try_attach(tid: int, frag: List["FrameSample"]):
+        frag_far = median(v for _, _, v in frag) < 0.5
+        f0 = frag[0][0]
+        fn = frag[-1][0]
+        start_pos = med_pos(frag[:BOUNDARY_K])
+        end_pos = med_pos(frag[-BOUNDARY_K:])
+
+        frag_frames = {f for f, _, _ in frag}
+        passing: List[Tuple[float, str]] = []  # (boundary distance of the nearest-in-time anchor, role)
+        open_roles: List[str] = []             # same-half roles not excluded by collision
+        max_excluded_coexist_s = 0.0
+        for role, path in paths.items():
             if role.startswith("far") != frag_far:
                 continue  # different court half
-            pa, pb = prim["span"]
-            if pa <= fb and fa <= pb:
-                continue  # overlaps the role's own coverage → fills no hole
-            pu, pv = prim["median"]
-            d = math.hypot(fu - pu, fv - pv)
-            if d <= best_dist:
-                best_dist = d
-                best_role = role
-        if best_role is not None:
-            out[tid] = best_role
+            overlap = len(frag_frames & covered[role])
+            if overlap > collision_max_ratio * len(frag_frames):
+                # the role is already detected during the fragment → can't be this person
+                max_excluded_coexist_s = max(max_excluded_coexist_s, overlap * seconds_per_frame)
+                continue
+            open_roles.append(role)
+            frames = [f for f, _, _ in path]
+            i = bisect_left(frames, f0)
+            before = path[max(0, i - BOUNDARY_K):i]
+            j = bisect_left(frames, fn + 1)
+            after = path[j:j + BOUNDARY_K]
+            role_far = role.startswith("far")
+            checks = []  # (gap_s, distance_m, allowance_m)
+            for anchor, frag_pos, gap_frames in (
+                (before, start_pos, f0 - before[-1][0] if before else 0),
+                (after, end_pos, after[0][0] - fn if after else 0),
+            ):
+                if not anchor:
+                    continue
+                a_pos = med_pos(anchor)
+                # Corpse anchor: a NEAR role's box clearly inside the far half is a dying track's
+                # drift across the net — not evidence, discard. Near roles only: the bbox-bottom
+                # projection bias pushes far-court v LARGER (~1.6 m, specs/fix-later.md), so a far
+                # anchor past the net is routinely legitimate and the mirrored test would discard
+                # real far anchors wholesale.
+                if not role_far and a_pos[1] < 0.5 - CORPSE_MARGIN:
+                    continue
+                gap_s = gap_frames * seconds_per_frame
+                checks.append((gap_s, meters(frag_pos, a_pos), base_gate_m + speed_cap_m_s * gap_s))
+            if not checks or any(d > allow for _, d, allow in checks):
+                continue  # no continuity evidence, or a boundary teleports
+            passing.append((min(checks)[1], role))  # distance at the temporally nearest anchor
+
+        role = None
+        verdict = "no candidate"
+        if passing:
+            passing.sort()
+            if len(passing) == 1 or passing[1][0] - passing[0][0] >= ambiguity_margin_m:
+                role = passing[0][1]
+            else:
+                verdict = f"ambiguous {passing[:2]}"  # honest hole beats a partner swap
+        elif (len(open_roles) == 1 and max_excluded_coexist_s >= EXCLUDED_COEXIST_S
+              and (fn - f0) * seconds_per_frame >= MIN_ELIMINATION_S):
+            role = open_roles[0]  # everyone else is accounted for → it's them, boundary glitch or not
+            verdict = "elimination"
+        if role is None:
+            log.debug("stitch: tid=%s frames %d-%d (%d rows) not attached: %s (open=%s coexist=%.1fs)",
+                      tid, f0, fn, len(frag), verdict, open_roles, max_excluded_coexist_s)
+            return None
+        log.debug("stitch: tid=%s frames %d-%d (%d rows) -> %s (%s)",
+                  tid, f0, fn, len(frag), role, verdict)
+        return role
+
+    # Evidence-rich (longest) fragments first, then iterate to a fixpoint: a fragment that is
+    # ambiguous on one pass can become decidable on the next, once other attachments extend the
+    # role timelines (collision exclusion / elimination / fresher anchors). Every pass only ever
+    # ADDS attachments, so this terminates in ≤ len(fragments) passes.
+    out: Dict[int, str] = {}
+    pending = sorted(((tid, sorted(f)) for tid, f in fragments.items()), key=lambda kv: -len(kv[1]))
+    progress = True
+    while progress and pending:
+        progress = False
+        remaining = []
+        for tid, frag in pending:
+            role = try_attach(tid, frag)
+            if role is None:
+                remaining.append((tid, frag))
+                continue
+            out[tid] = role
+            paths[role] = sorted(paths[role] + frag)
+            covered[role].update(f for f, _, _ in frag)
+            progress = True
+        pending = remaining
     return out
 
 

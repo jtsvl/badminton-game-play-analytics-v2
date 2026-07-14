@@ -92,7 +92,7 @@ class TestPoseKeyframes(unittest.TestCase):
         _write_manifest(self.cache, {0: 0.0, 1: 0.0833333})
         tracks = _tracks([(0.0, 1, "near", "detected"), (0.0833333, 1, "near", "detected")])
 
-        out = _pose_keyframes(CTX, self.cache, tracks, MP, None)
+        out = _pose_keyframes(CTX, self.cache, tracks, MP, [(0.0, 1.0)])  # in-rally: native rate
 
         self.assertEqual(set(out), {"player:p-1"})
         data = out["player:p-1"]
@@ -166,6 +166,60 @@ class TestPoseKeyframes(unittest.TestCase):
         self.assertLessEqual(len(data), POSE_MAX_KEYFRAMES_PER_PLAYER)
         self.assertGreater(len(data), POSE_MAX_KEYFRAMES_PER_PLAYER // 2)  # thinned, not truncated
         self.assertEqual(data[0]["t"], 0.0)  # keeps the start, strides through the rest
+
+    def test_missing_pose_parquet_restored_from_artifact_bucket(self):
+        # Fresh worker / evicted cache on a retrack: pose.parquet comes back from the bucket
+        # (pose.py uploaded it) instead of silently skipping the skeletons.
+        other = Path(tempfile.mkdtemp())
+        _write_pose(other, [(0, 1, 96.0, 54.0, 0.9)])
+        payload = (other / "pose.parquet").read_bytes()
+
+        class _Store:
+            def download(self, bucket, key):
+                assert key == "vid-9/pose.parquet"
+                return payload
+
+        class _Cfg:
+            artifact_bucket = "analysis-artifacts"
+
+        _write_manifest(self.cache, {0: 0.0})
+        tracks = _tracks([(0.0, 1, "near", "detected")])
+        ctx = {"store": _Store(), "cfg": _Cfg(), "job": {"video_id": "vid-9"}}
+        out = _pose_keyframes(ctx, self.cache, tracks, MP, None)
+        self.assertEqual([d["t"] for d in out["player:p-1"]], [0.0])
+
+    def test_out_of_rally_keyframes_thin_to_pose_keyframe_hz(self):
+        # Hybrid payload control: native 12 fps INSIDE rally spans (fast swings), ~6 Hz between
+        # rallies (walking around). poseAt's 0.3 s max-gap tolerates 1/6 s spacing, so rendering
+        # never drops out.
+        n = 48  # 4 s @ 12 fps
+        _write_pose(self.cache, [(i, 1, 96.0, 54.0, 0.9) for i in range(n)])
+        _write_manifest(self.cache, {i: i / 12.0 for i in range(n)})
+        tracks = _tracks([(i / 12.0, 1, "near", "detected") for i in range(n)])
+
+        out = _pose_keyframes(CTX, self.cache, tracks, MP, [(1.0, 2.0)])
+
+        ts = [d["t"] for d in out["player:p-1"]]
+        in_rally = [t for t in ts if 1.0 <= t <= 2.0]
+        out_rally = [t for t in ts if t < 1.0 or t > 2.0]
+        self.assertEqual(len(in_rally), 13)  # every analysis frame 1.0..2.0 kept
+        # out-of-rally: one keyframe per 1/6 s bucket → spacing ≥ ~1/6 s, roughly halved count
+        self.assertLess(len(out_rally), 20)
+        self.assertGreater(len(out_rally), 15)
+        for a, b in zip(out_rally, out_rally[1:]):
+            if b - a < 0.9:  # ignore the jump across the in-rally window
+                self.assertGreaterEqual(round(b - a, 4), round(1 / 12, 4))
+
+    def test_thinning_off_keeps_native_rate(self):
+        from unittest.mock import patch
+
+        n = 48
+        _write_pose(self.cache, [(i, 1, 96.0, 54.0, 0.9) for i in range(n)])
+        _write_manifest(self.cache, {i: i / 12.0 for i in range(n)})
+        tracks = _tracks([(i / 12.0, 1, "near", "detected") for i in range(n)])
+        with patch("worker.pipeline.overlay.POSE_KEYFRAME_HZ", 0):
+            out = _pose_keyframes(CTX, self.cache, tracks, MP, [(1.0, 2.0)])
+        self.assertEqual(len(out["player:p-1"]), n)
 
     def test_no_bound_players_returns_empty_dict(self):
         # Labels that bind nothing → {} (run() then clears stale skeleton rows), not None.

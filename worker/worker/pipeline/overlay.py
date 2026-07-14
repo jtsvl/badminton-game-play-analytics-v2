@@ -48,6 +48,10 @@ def _shuttle_keyframes(ctx, cache: Path):
 # Payload safety valve for very long recordings: over the cap a player's keyframes are thinned
 # by a uniform stride (never skipped — a sparse skeleton beats none). Normal games stay under it.
 POSE_MAX_KEYFRAMES_PER_PLAYER = int(os.environ.get("POSE_MAX_KEYFRAMES_PER_PLAYER", "10000"))
+# Hybrid rate: OUT-of-rally keyframes thin to this rate (Hz); in-rally stays native ~12 fps (fast
+# swings deserve full temporal detail, walking between points doesn't). 0 = native everywhere.
+# poseAt (web) hides at >0.3 s to the nearest key, so 6 Hz (~0.167 s spacing) renders seamlessly.
+POSE_KEYFRAME_HZ = float(os.environ.get("POSE_KEYFRAME_HZ", "6"))
 
 
 def _pose_keyframes(ctx, cache: Path, tracks_df, match_players, spans):
@@ -62,8 +66,14 @@ def _pose_keyframes(ctx, cache: Path, tracks_df, match_players, spans):
     thinning. Payload is bounded by POSE_MAX_KEYFRAMES_PER_PLAYER (thin, never skip).
     """
     pose_path = ctx.get("pose_path") or str(cache / "pose.parquet")
+    if not Path(pose_path).exists() and ctx.get("store") is not None:
+        # Fresh worker / evicted cache (e.g. retrack backfill): pose.py uploaded its parquet.
+        from .remap import resolve_artifact
+
+        pose_path = resolve_artifact(ctx["store"], ctx["cfg"], str(ctx["job"]["video_id"]),
+                                     cache, "pose.parquet")
     manifest_path = cache / "frames.json"
-    if not Path(pose_path).exists() or not manifest_path.exists():
+    if not pose_path or not Path(pose_path).exists() or not manifest_path.exists():
         return None
 
     import polars as pl  # lazy
@@ -95,14 +105,22 @@ def _pose_keyframes(ctx, cache: Path, tracks_df, match_players, spans):
     df = df.join(idx, on=["frame", "track"], how="inner")
 
     clamp = lambda v: min(1.0, max(0.0, v))  # RTMPose can place edge-cropped joints outside the frame
+    in_rally = (lambda t: any(t0 <= t <= t1 for t0, t1 in spans)) if spans else (lambda t: False)
     out: dict[str, list] = {}
     for role, mp in players.items():
         sub = df.filter(pl.col("role") == role).sort("t")
         data = []
+        last_bucket = None
         for r in sub.iter_rows(named=True):
+            t = r["t"]
+            if POSE_KEYFRAME_HZ and not in_rally(t):
+                bucket = int(t * POSE_KEYFRAME_HZ)
+                if bucket == last_bucket:
+                    continue  # out-of-rally: first keyframe per 1/HZ bucket only
+                last_bucket = bucket
             kp = [[round(clamp(x / width), 4), round(clamp(y / height), 4), round(s, 4)]
                   for (x, y), s in zip(r["kp"], r["kp_score"])]
-            data.append({"t": round(r["t"], 3), "kp": kp})
+            data.append({"t": round(t, 3), "kp": kp})
         if len(data) > POSE_MAX_KEYFRAMES_PER_PLAYER:
             stride = -(-len(data) // POSE_MAX_KEYFRAMES_PER_PLAYER)  # ceil
             log.warning("overlay: %d pose keyframes for %s — thinning by stride %d (cap %d)",

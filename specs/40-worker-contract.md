@@ -27,7 +27,7 @@ Studio; it owns no HTTP surface — it **polls** `processing_jobs`, does work, a
 
 ## Stage order & I/O
 Stages mirror `30-ml-pipeline.md`. Each stage reads the frame cache + prior artifacts and writes the next.
-`stage` string ∈ `ingest · calibrate · detect · pose · gate_track · shuttle · rally_hit · stroke · aggregate · overlay · remap · rally_sync · proxy`.
+`stage` string ∈ `ingest · calibrate · detect · pose · gate_track · shuttle · rally_hit · stroke · aggregate · overlay · remap · rally_sync · retrack · proxy`.
 (pose runs **before** gate_track: it supplies the ankle foot that gate_track projects instead of the bbox bottom.)
 
 A job's `stage` selects the **slice** the worker runs (`__main__.py`):
@@ -38,6 +38,7 @@ A job's `stage` selects the **slice** the worker runs (`__main__.py`):
 | `calibrate` | `RESUME_STAGES` = `[calibrate, detect, pose, gate_track, shuttle, rally_hit, stroke*, aggregate, overlay]` (*stroke lands here in the stage-7 build — `features/stroke-classification.md`; until then it is not in `RESUME_STAGES`) | `review` |
 | `remap` | `[remap, rally_sync, aggregate, overlay]` (FR-35 — reuses cached `tracks.parquet`, no re-detect; `rally_sync` keeps DB rally spans/trainer edits) | `params.return_status` (default `done`) — lets backfills re-run overlay on `review` matches without skipping the PlayerReview gate |
 | `rally_review` | `[remap, rally_sync, aggregate]` (FR-35 — trainer dropped/merged rallies; no overlay, it never reads rallies) | `params.return_status` (default `done`) |
+| `retrack` | `[gate_track, rally_sync, aggregate, overlay]` (tracking-identity rebuild — stitching/primaries changes; `gate_track` resolves `detections.parquet` from cache or bucket via `remap.resolve_artifact`, no re-detect. Re-seeds `match_players.track_label` via `_auto_map` → trainer re-confirms identity in PlayerReview) | `params.return_status` (default `done`) |
 | `proxy` | `[proxy]` standalone (backfill; `features/video-proxy.md`) | unchanged |
 
 `rally_review`'s end status returns the match to where it was before the edit — editing at `review`
@@ -54,7 +55,7 @@ must not skip the PlayerReview confirmation; editing at `done` stays `done`.
 | rally_hit | shuttle, tracks, match_players (side binding) | `rallies` (+ `winner_side` from out landings) + `events`(serve/hit/rally_end/landing); debug `rallies.parquet`/`events.parquet` |
 | stroke | pose, shuttle, tracks, events (stage-6 hit anchors), match discipline | enriched `events` hit payloads `{shot_type, confidence, hit_disputed, half, model_version}` via `replace_rallies`; debug `events.parquet` rewrite. **Not** `player_shot_stats` — counts are derived in `aggregate` (singles-gated) so `remap`/`rally_review` re-attribute without re-classification; `stroke` stays out of those slices |
 | aggregate | tracks, **rallies** (in-rally gating), enriched events (shot counts) | `player_match_stats`, `player_shot_stats` (`count`+`share_pct` via `upsert_player_shot_stats`; `errors` column stays the landing writer's), `pair_match_stats`, `match_rally_stats` inputs |
-| overlay | tracks, shuttle, pose + frames.json (skeleton), rallies (gating) | `track_keyframes` (~10 Hz), `pose_keyframes` (in-rally skeleton, `features/pose-skeleton-overlay.md`) |
+| overlay | tracks, shuttle, pose + frames.json (skeleton), rallies (hybrid thinning rate) | `track_keyframes` (~10 Hz), `pose_keyframes` (whole-video skeleton, 12 fps in-rally / ~6 Hz between, `features/pose-skeleton-overlay.md`) |
 | rally_sync | DB `rallies` + `events` (authoritative, incl. trainer edits) | cache `rallies.parquet`/`events.parquet` + re-uploaded artifacts, `ctx[rallies_path/events_path]`; `rally_corrections` rows when `job.params.corrections` is present (FR-35 eval corpus, `features/rally-shot-review.md`) |
 | proxy | source video (local `videos/` or bucket) | `analysis-artifacts/<video_id>/proxy_720p.mp4` (TUS chunked — Kong kills single requests at ~60 s), `match_videos.proxy_path`. ffmpeg host dep; **never raises** (`features/video-proxy.md`) |
 `rally_hit` runs all trajectory/serve logic in **normalized image space** (the ground homography can't place an
@@ -92,6 +93,13 @@ Final aggregates → Postgres rows exactly matching `20-data-model.md` (the web'
   `pose.parquet.foot_source` ∈ `ankle`/`head`/`none` mark re-ID'd, interpolated or head-grounded positions so the
   overlay surfaces them as „Schätzung" — never as a plain detection. The `eval_corrections` scorecard reports
   recovered (re-ID/interp) court error in a **separate** bucket, never folded into the detected near/far stats.
+- **Consumer identity join** (`pipeline/identity.py`, 2026-07-13): `match_players.track_label`
+  *identifies* a player via ONE raw tracker id, but the player's timeline spans many ids — re-ID
+  fragment rows keep their own `track_id`. Every consumer (aggregate stats, position overlay,
+  skeleton overlay) binds label → that tid's **role** → all rows of that role
+  (`identity.role_players`); filtering by the bare `track_label` silently drops the re-ID rows
+  and is a bug. Pose additionally joins per `(frame, track)` against non-interp rows only
+  (`identity.role_frame_index`) so gap-fill frames never fabricate a skeleton.
 
 ## Config / env
 `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL`, buckets, `WORKER_ID`,
@@ -101,6 +109,10 @@ downloading), `CALIB_FRAME_COUNT` (12 calibration snapshots, 0007), `PYTORCH_ENA
 See `.env.example`.
 Foot/recovery tuning (all default off / conservative): `FOOT_BIAS_K` (bbox-nudge, 0), `USE_POSE_FOOT` (0),
 `POSE_CONF_THR` (0.3), `GAP_FILL_MAX_FRAMES` (longest short hole the re-ID interp will fill, 8).
+Re-ID v2 stitching gates: `STITCH_BASE_GATE_M` (1.0), `STITCH_SPEED_CAP_M_S` (6.0),
+`STITCH_AMBIGUITY_M` (0.5 — below it a fragment equidistant to both same-half roles is dropped,
+honest hole over partner swap). Skeleton payload: `POSE_KEYFRAME_HZ` (6 — out-of-rally thinning
+rate, 0 = native), `POSE_MAX_KEYFRAMES_PER_PLAYER` (10000 — long-recording stride-thin valve).
 Shuttle (stage 5): `SHUTTLE_TRACKER` (tracknetv3|wasb|fake, **default `tracknetv3`** — the fine-tuned
 own-footage winner; wasb is the frozen pre-fine-tune baseline), `SHUTTLE_CONF_THR` (0.5 — peak
 below = a real dropout, not a fabricated point), `SHUTTLE_MAX_STEP` (0.5 court units, isolated-spike guard),
