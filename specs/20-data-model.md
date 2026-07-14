@@ -88,6 +88,16 @@ heatmap_uri? · placement_uri? · fastest?  (ESTIMATE)` — unique (match_id, pl
 ### track_keyframes  (overlay, ~10 Hz)
 `id · video_id · subject ('player:<id>'|'shuttle') · data jsonb [{t,u,v}]` — unique (video_id, subject)
 
+### pose_keyframes  (skeleton overlay, whole video: ~12 fps in-rally / ~6 Hz between rallies — `features/pose-skeleton-overlay.md`)
+`id · video_id · subject ('player:<id>') · format ('halpe26') · data jsonb [{t, kp:[[x,y,score]×26]}]`
+— unique (video_id, subject). `x,y` are **normalized image coords** (keypoint px ÷ native
+width/height, clamped to [0,1]), not court (u,v): elevated joints break the ground homography.
+The web fetches this table **lazily** on the first „Skelett" toggle (usePoseTracks), never with
+the report. Third
+image-coord surface after `rally_end {x,y}` and `landing {px,py}` — same normalized-[0,1]
+precedent, never raw pixels. `score` = RTMPose per-joint confidence. Halpe-26 index map lives in
+the feature spec; future derived metrics land as an additive `angles` key, not a reshape.
+
 ### processing_jobs  (work queue — claimed with FOR UPDATE SKIP LOCKED)
 `id · match_id · video_id? · stage · status∈{queued,running,succeeded,failed,cancelled} · progress ·
 params jsonb? · error? · claimed_by? · claimed_at? · started_at? · finished_at? · created_at`

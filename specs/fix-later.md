@@ -45,11 +45,21 @@ player *was* re-detected through most of the span under short-lived track ids (6
 fragments with B1 + bounded short-hole interp (`fill_track_gaps`) — scorecard **misses 69 → 0** (k=0.16) / → 4
 (k=0), recovering real detections; detected near/far cm unchanged; recovered far error (~1.3 m, deferred RC2 depth)
 in a separate scorecard bucket. See specs/30-ml-pipeline.md stage 3.
-**Still deferred (the upstream cause):** far-half detection **recall** — BoT-SORT fragments/loses the small,
-low-contrast far player (`conf=0.25,imgsz=1280`); re-ID mitigates downstream but doesn't fix recall. Wants tiling
-/ higher-res inference for the far half and/or stronger BoT-SORT ReID persistence. Also: **head/height occlusion
-grounding** (`pose.ground_occluded_feet`) is built + unit-tested but **unverified on real data** — it can't help
-this clip (no detection → no head) and needs a partial-occlusion answer key (mostly doubles, P3) to prove.
+**Superseded 2026-07-13 (coverage pass, `features/pose-skeleton-overlay.md` §Coverage):** three deeper problems
+were found and FIXED on Session-2 doubles: (1) all three consumers filtered rows by the single
+`match_players.track_label`, silently dropping every `source="reid"` row — stats/overlay/skeletons ran on
+16–41 % of each player's in-rally movement (fixed: label→role join, `pipeline/identity.py`); (2) v1 stitching's
+whole-span-overlap rejection attached almost nothing in doubles (fixed: `stitch_fragments_framewise`);
+(3) global top-N primaries + relative role_assign bound 18/20 Session-2 role slots to NEAR-half tracks — the
+far players were entirely absent from shipped data (fixed: `select_role_primaries` coexisting pairs). After
+the `retrack` backfill: per-player skeleton coverage 82–100 % wall-clock, far court 85–96 %.
+**Still deferred (the upstream cause):** far-half detection **recall** — measured ceiling ≈ 90 % of in-rally
+frames per far player (both far players detected in 82 %); BoT-SORT fragments/loses the small, low-contrast far
+player (`conf=0.25,imgsz=1280`). Wants tiling / higher-res inference for the far half and/or stronger BoT-SORT
+ReID persistence. Also deferred: **doubles near-pair ambiguity** — a lone center-court fragment while BOTH near
+roles are untracked is dropped (honest hole; geometry can't name the partner — appearance/jersey re-ID would);
+**head/height occlusion grounding** (`pose.ground_occluded_feet`) is built + unit-tested but **unverified on
+real data** — needs a partial-occlusion answer key (mostly doubles, P3) to prove.
 
 ## Far-court top-speed inflation (P1 movement tier) — FIXED
 The two players furthest from the camera showed an inflated **top speed** (~30–34 km/h on the
@@ -136,3 +146,18 @@ coverage-only, not precision/recall. **To close it:** label ≥1 Session-2 clip 
 + over-exposure rallies first) → `eval_shuttle --labels` out-of-session — the held-out metric
 `shuttle-finetune-plan.md` always wanted. Target: cross-session F1 ≥ 0.80 before trusting new sessions
 unlabeled (see `30-ml-pipeline.md` stage-5 targets).
+
+## Kong serves REST responses without gzip — pose fetch is ~8.5 MB on the wire (2026-07-13)
+The whole-video skeleton payload (`pose_keyframes`, 3.7–9.5 MB JSON per doubles match) is fetched
+lazily on the first „Skelett" toggle, but Kong/PostgREST currently ignores `Accept-Encoding: gzip`
+(verified with curl: `size_download` = full JSON size). On the hall LAN that is a 1–2 s toggle;
+remote it is sluggish. **Fix:** enable gzip/br for `rest/v1` responses in the Kong config on
+Coolify (numbers-heavy JSON compresses ~4–5×). Worker-side knobs already exist
+(`POSE_KEYFRAME_HZ`, `POSE_MAX_KEYFRAMES_PER_PLAYER`) if a future match still proves too heavy.
+
+## Session-2 track_labels were re-seeded by the retrack backfill — PlayerReview re-confirm pending (2026-07-13)
+The tracking-identity rebuild (`features/pose-skeleton-overlay.md` §Coverage) made the old
+`match_players.track_label`s point at tracks that no longer carry the players' timelines, so the
+`retrack` slice re-seeds all four labels per match via `_auto_map` (near=A / far=B convention,
+left/right by court side). All 5 matches sit at `review` status: the trainer should re-confirm
+(or flip) the mapping in PlayerReview — doubles identity remains a manual gate by design.

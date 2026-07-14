@@ -37,17 +37,27 @@ ReID alone (same-club kit) — spatial+motion continuity is primary.
 ≤ 1.0 m far half on the `eval_corrections` scorecard (measured 0.4/0.5 m un-fitted pose, 0.2/0.3 m clip-fitted
 nudge on f35d0984) *(initial targets — revise as answer-key clips accumulate)*.
 
-**Built (P1, Phase 4 — far-player robustness, RC3):** when BoT-SORT drops a small/low-contrast player and
-re-acquires them under a fresh id, `enforce_n_tracks` discards that short fragment, leaving a hole. Two layers
-recover it in `gate_track.build_role_tracks` (pure, unit-tested) before output:
-1. **Role re-ID** (`geometry.stitch_role_fragments`): a dropped in-court fragment is re-associated with the role
-   it continues — same court half, frame span **not overlapping** the role's primary coverage (it fills the
-   role's hole), nearest within `max_court_dist`. This recovers **real detected** positions, tagged
-   `source="reid"`; it never fabricates.
-2. **Bounded short-hole interp** (`geometry.fill_track_gaps`): holes of ≤ `GAP_FILL_MAX_FRAMES` (default 8) frames
+**Built (P1, Phase 4 — far-player robustness, RC3; identity rebuilt 2026-07-13):** when BoT-SORT drops a
+small/low-contrast player and re-acquires them under a fresh id, the fragment must be re-associated or the
+role has a hole. Three layers in `gate_track.build_role_tracks` (pure, unit-tested) before output:
+1. **Half-aware primaries** (`geometry.select_role_primaries`): per court half, the most-present
+   **coexisting pair** of tracks — two tracks alive at once are provably two people. Replaced the global
+   top-N-by-count + relative `role_assign`, which on far-fragmented doubles games picked near tracks for the
+   far roles (Session-2 postmortem: 18/20 role slots were near-half tracks — the far players were absent
+   from every shipped stat/overlay; see `features/pose-skeleton-overlay.md` §Coverage).
+2. **Framewise re-ID v2** (`geometry.stitch_fragments_framewise`, replaced `stitch_role_fragments`): a
+   fragment attaches to a same-half role iff it fills per-frame holes (span overlap is irrelevant; brief
+   double-tracking ≤ 20 % of its frames is tolerated), its boundary MEDIANS are velocity-continuous with
+   the role's anchors (`base 1 m + 6 m/s · gap`; a near-role anchor that died across the net is a corpse,
+   not evidence), and no second role is nearly as plausible (`STITCH_AMBIGUITY_M` — honest hole over
+   partner swap). Sustained coexistence with the partner role is **mutual-exclusion evidence**: with the
+   partner accounted for, the sole open role wins by elimination even when the boundary check glitches
+   (id switches drift boxes exactly at handovers). Longest-first + fixpoint iteration lets later
+   attachments disambiguate earlier drops. Tagged `source="reid"`; never fabricates.
+3. **Bounded short-hole interp** (`geometry.fill_track_gaps`): holes of ≤ `GAP_FILL_MAX_FRAMES` (default 8) frames
    between two anchors are linearly interpolated (`source="interp"`); longer one-sided dropouts are **left
-   absent** (never extrapolated). `tracks.parquet` gains a **`source`** column (`detected`/`reid`/`interp`) so the
-   overlay surfaces re-ID/interp positions as estimates („Schätzung").
+   absent** (never extrapolated). `tracks.parquet` carries the **`source`** column (`detected`/`reid`/`interp`) so
+   the overlay surfaces re-ID/interp positions as estimates („Schätzung").
 *Measured (f35d0984: far player B1 lost frames 284–355, 69 manual re-adds):* re-ID stitched the two dropped far
 fragments back into B1 → the `eval_corrections` scorecard **misses 69 → 0** (k=0.16) / 69 → 4 (k=0 default),
 recovering 63 real detections + 6 interp fills; the **detected** near/far cm is unchanged (re-ID/interp only add
@@ -166,12 +176,16 @@ thresholds are untuned until a real-footage re-run; no located-rate/precision cl
 answer key exists.
 
 ## Stage 7 — Stroke classification (FR-21/22/23)
-**BST (MIT, public weights)** — consumes player skeleton + shuttle xy + court xy (tiny transformer; hours to train
-on MPS). Adopt **ShuttleSet 18-class BWF taxonomy collapsed to 6–8 coarse classes** first. Low-confidence → `unknown`.
-*Fine-tune:* yes — ~300–1k own labeled strokes; iterate hard pairs (drop/net, clear/lift).
-*Accept:* coarse-class accuracy **≥ 70 %** on held-out own-footage strokes to ship, `unknown`-rate surfaced not
-hidden (lit ceiling 77–85 % on clean data) *(initial target — revise once own labels exist; see
-`features/stroke-classification.md`)*.
+**Governed by `features/stroke-classification-v2.md` (signed off 2026-07-13)** — v1
+(`features/stroke-classification.md`) is superseded: its build failed the 0.70 gate (LOGO-CV 0.400)
+and was never wired. v2 in one line: learned hit detection (HitNet-pattern GRU + audio-onset timing
+refinement) → 5-way hitter attribution → **BST-4-slot** (Chang et al., CVPRW 2026, arXiv:2502.21085,
+MIT) from the ShuttleSet-25 `_merged` checkpoint, trained on **coarse-8** (17 fine labels for
+labeling; ShuttleSet is natively 18 fine types — the earlier "35/25 classes" claim here mixed in the
+checkpoint head sizes and was refuted). Low-confidence → `unknown`/„Unsicher" abstention.
+*Accept:* the single ≥ 70 % gate is replaced by the **G0–G5 gate stack** (hit timing, attribution,
+per-class recall, calibrated abstention, outcomes, trainer edit rate) — see v2 spec §9; below-gate
+models are labeling-assist only, never pipeline.
 
 ## Stage 8 — Insight aggregation (FR-11/12/13/14/26/27)
 Pure functions from tracks/events (TDD these): distance (court-space displacement), avg/top speed, sprints

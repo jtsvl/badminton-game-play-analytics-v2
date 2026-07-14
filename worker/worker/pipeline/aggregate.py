@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 from .. import insights as ins
 from ..geometry import net_depth
 from ..insights import Sample
+from . import identity
 
 log = logging.getLogger("worker.pipeline.aggregate")
 
@@ -125,6 +126,9 @@ def run(ctx) -> None:
     if df.is_empty():
         log.warning("aggregate: tracks.parquet empty — nothing to write")
         return
+    # Identity binds on the UNGATED timeline: a rally edit that gates out the labeled track's own
+    # rows must not unbind the player (their re-ID fragment rows may still be in-rally).
+    identity_rows = df.to_dicts()
 
     # `duration_min` from the FULL clip (the timeline axis spans the whole match), computed before gating.
     video = store.get_video(video_id) or {}
@@ -146,20 +150,19 @@ def run(ctx) -> None:
         log.info("aggregate: no rallies — movement computed over the whole clip")
 
     players = store.get_match_players(match_id)
-    by_label: Dict[int, dict] = {
-        int(mp["track_label"]): mp for mp in players if mp.get("track_label") is not None
-    }
-    if not by_label:
+    # label → role → the whole role timeline (re-ID fragment rows included): filtering by the
+    # single labeled track_id computed stats from a fraction of the player's movement.
+    bound = identity.role_players(players, identity_rows)
+    if not bound:
         raise RuntimeError("aggregate: no match_players.track_label set — track→player mapping missing")
 
     written = 0
-    for tid in sorted(df["track_id"].unique().to_list()):
-        mp = by_label.get(int(tid))
-        if not mp:
+    for role in sorted(bound):
+        mp = bound[role]
+        sub = df.filter(pl.col("role") == role).sort("t")
+        if sub.is_empty():
             continue
-        sub = df.filter(pl.col("track_id") == tid).sort("t")
         track: List[Sample] = [(r["t"], r["u"], r["v"]) for r in sub.iter_rows(named=True)]
-        role = str(sub["role"][0])
         st = compute_player_stats(track, role, duration_min)
         store.upsert_player_match_stats({"match_id": match_id, "player_id": mp["player_id"], **st})
         written += 1

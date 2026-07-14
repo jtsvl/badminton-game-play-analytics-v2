@@ -54,7 +54,7 @@ function mkPlayer(over: {
 }
 
 const singles: MatchReport = {
-  video: { src: '', label: 'Demo-Aufnahme', durationS: null },
+  video: { id: 'vid-demo', src: '', label: 'Demo-Aufnahme', durationS: null },
   calib: null,
   tracks: [],
   meta: {

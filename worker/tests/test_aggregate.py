@@ -1,12 +1,76 @@
 """Tests for the pure aggregation wiring (worker/pipeline/aggregate.compute_player_stats).
 
 Guards the insights.zones() depth-orientation fix: raw v is NOT distance-from-net (v=0 is the far
-baseline, net is at v=0.5), so aggregate must apply geometry.net_depth before zones().
+baseline, net is at v=0.5), so aggregate must apply geometry.net_depth before zones(). Also pins
+the identity join in run(): stats consume the WHOLE role timeline (re-ID fragment rows included),
+not just the single labeled track_id.
 """
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 from worker import insights as ins
-from worker.pipeline.aggregate import compute_player_stats, out_error_counts
+from worker.pipeline.aggregate import compute_player_stats, out_error_counts, run as aggregate_run
+
+class _FakeStore:
+    """Just enough store for aggregate.run's player-stats half (doubles skips the landing part)."""
+
+    def __init__(self, match_players):
+        self.match_players = match_players
+        self.stats_rows = []
+
+    def get_video(self, video_id):
+        return {"duration_s": 60.0, "match_id": "m-1"}
+
+    def get_match(self, match_id):
+        return {"discipline": "doubles"}
+
+    def get_match_players(self, match_id):
+        return self.match_players
+
+    def upsert_player_match_stats(self, row):
+        self.stats_rows.append(row)
+
+
+class TestRunIdentityJoin(unittest.TestCase):
+    def test_reid_fragment_rows_flow_into_player_stats(self):
+        # Player labeled track 1; frames after t=1 belong to re-ID fragment 42. Each step is one
+        # metre of lateral movement (Δu = 1/COURT_W_M): label-only would see 1 m, the role
+        # timeline sees 3 m.
+        import polars as pl
+
+        du = 1.0 / ins.COURT_W_M
+        rows = [(0.0, 1, "detected"), (1.0, 1, "detected"), (2.0, 42, "reid"), (3.0, 42, "reid")]
+        df = pl.DataFrame(
+            {
+                "t": [r[0] for r in rows],
+                "track_id": [r[1] for r in rows],
+                "u": [0.2 + i * du for i in range(len(rows))],
+                "v": [0.75] * len(rows),
+                "role": ["near_left"] * len(rows),
+                "source": [r[2] for r in rows],
+            }
+        )
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tracks_path = Path(tmp.name) / "tracks.parquet"
+        df.write_parquet(tracks_path)
+
+        store = _FakeStore([{"id": "mp-1", "player_id": "p-1", "side": "A", "slot": 0, "track_label": 1}])
+        ctx = {
+            "store": store,
+            "cfg": SimpleNamespace(frame_cache_dir=tmp.name),  # no rallies.parquet → whole clip
+            "job": {"video_id": "v-1", "match_id": "m-1"},
+            "tracks_path": str(tracks_path),
+        }
+        aggregate_run(ctx)
+
+        self.assertEqual(len(store.stats_rows), 1)
+        row = store.stats_rows[0]
+        self.assertEqual(row["player_id"], "p-1")
+        self.assertEqual(row["distance_m"], 3)  # all 4 samples, not just the labeled track's 2
+
 
 # near player camped deep (own baseline, v≈0.9) — must read as REAR, not front.
 NEAR_REAR = [(0.0, 0.5, 0.90), (1.0, 0.55, 0.92), (2.0, 0.48, 0.88), (3.0, 0.51, 0.91)]

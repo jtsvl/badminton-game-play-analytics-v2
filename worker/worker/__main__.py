@@ -3,7 +3,7 @@
 Job `stage` selects the slice to run, honoring the gates (specs/40-worker-contract.md):
   ingest       → [ingest,proxy]                           then match.status='calibrating'
   calibrate    → RESUME_STAGES (calibrate…overlay, incl. shuttle+rally_hit)  then match.status='review'
-  remap        → [remap,rally_sync,aggregate,overlay]     then match.status='done'
+  remap        → [remap,rally_sync,aggregate,overlay]     then params.return_status (default 'done')
   rally_review → [remap,rally_sync,aggregate]             then params.return_status (default 'done')
   proxy        → [proxy] standalone (backfill; match status untouched, stage never raises)
 The trainer confirms corners (calibrate) then the track→player mapping (remap, FR-35) in the web UI
@@ -24,6 +24,19 @@ log = logging.getLogger("worker")
 RESUME_STAGES = ["calibrate", "detect", "pose", "gate_track", "shuttle", "rally_hit", "aggregate", "overlay"]
 
 
+def _return_status(job: dict) -> str | None:
+    """params.return_status, validated: only 'review'/'done' may be written (a typo'd status would
+    hide the match from every status-gated view); 'unchanged' leaves the match status untouched
+    (backfills that race a trainer confirmation should not overwrite the newer status)."""
+    end = (job.get("params") or {}).get("return_status") or "done"
+    if end == "unchanged":
+        return None
+    if end not in ("review", "done"):
+        log.warning("job %s: invalid return_status %r — using 'done'", job.get("id"), end)
+        return "done"
+    return end
+
+
 def _slice_for(job: dict) -> tuple[list[str], str | None]:
     stage = job.get("stage") or "ingest"
     if stage == "ingest":
@@ -35,13 +48,18 @@ def _slice_for(job: dict) -> tuple[list[str], str | None]:
     if stage == "remap":
         # FR-35: trainer corrected the track→player mapping → cheap recompute (no re-detect).
         # rally_sync keeps the DB-authoritative rally spans (incl. trainer edits) in the cache.
-        return ["remap", "rally_sync", "aggregate", "overlay"], "done"
+        # return_status lets backfills (e.g. pose_keyframes) return a 'review' match to 'review'
+        # instead of flipping it past the PlayerReview gate.
+        return ["remap", "rally_sync", "aggregate", "overlay"], _return_status(job)
     if stage == "rally_review":
         # FR-35: trainer dropped/merged rallies in the web UI → re-gate the stats. No overlay
         # (it never reads rallies). End status = where the match was before the edit ('review'
         # must not skip the PlayerReview confirmation; 'done' stays done).
-        end = (job.get("params") or {}).get("return_status") or "done"
-        return ["remap", "rally_sync", "aggregate"], end
+        return ["remap", "rally_sync", "aggregate"], _return_status(job)
+    if stage == "retrack":
+        # Re-run tracking identity (gate_track rebuilds tracks.parquet from cached detections —
+        # no re-detect) + everything downstream of it. Backfill path for stitching improvements.
+        return ["gate_track", "rally_sync", "aggregate", "overlay"], _return_status(job)
     return [stage], None
 
 
@@ -112,6 +130,30 @@ def main() -> None:
         from .shuttle.dataset_export import export_cli
 
         export_cli(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "export-stroke-clips":
+        from .stroke_clips import export_cli
+
+        export_cli(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "import-stroke-labels":
+        from .import_stroke_labels import import_cli
+
+        import_cli(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "export-stroke-dataset":
+        from .stroke.dataset import export_cli
+
+        export_cli(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "train-stroke":
+        from .stroke.train import train_cli
+
+        train_cli(sys.argv[2:])
         return
 
     if len(sys.argv) > 1 and sys.argv[1] == "backfill-calib-frames":

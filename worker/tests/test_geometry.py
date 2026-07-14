@@ -233,46 +233,270 @@ class TestResample10Hz(unittest.TestCase):
         self.assertAlmostEqual(at7[2], 0.2, places=6)
 
 
-class TestStitchRoleFragments(unittest.TestCase):
-    """Phase-4 role re-ID: re-associate dropped in-court track fragments with the role they continue,
-    so a player lost by BoT-SORT and re-detected under a fresh id resumes the same role. Modelled on
-    f35d0984: far-left player (B1) lost after frame 282, re-detected as short fragments 64 & 68."""
+class TestSelectRolePrimaries(unittest.TestCase):
+    """Half-aware primary selection (successor of global enforce_n_tracks + role_assign): pick
+    each half's anchor track by presence, and its partner by PROVEN COEXISTENCE — two tracks that
+    exist at once are two people. The global top-N-by-count broke on Session2 Game 3: the far
+    players fragmented so heavily that all four biggest tracks were near-half, and role_assign
+    labelled two NEAR tracks as the far roles (identity corruption, not just lost coverage)."""
 
-    PRIMARIES = {
-        "near_left": {"median": (0.30, 0.80), "span": (0, 355)},
-        "near_right": {"median": (0.70, 0.80), "span": (0, 355)},
-        "far_left": {"median": (0.55, 0.05), "span": (0, 282)},   # lost after 282 (the hole)
-        "far_right": {"median": (0.50, 0.20), "span": (0, 355)},  # fully detected (no hole)
-    }
+    SPF = 1 / 12
 
-    def test_far_fragments_stitch_into_the_role_with_the_temporal_hole(self):
-        frags = {64: {"median": (0.70, 0.05), "span": (286, 337)},
-                 68: {"median": (0.50, 0.02), "span": (342, 355)}}
-        self.assertEqual(g.stitch_role_fragments(self.PRIMARIES, frags),
-                         {64: "far_left", 68: "far_left"})
+    @staticmethod
+    def _t(f0, f1, u, v):
+        return [(f, u, v) for f in range(f0, f1 + 1)]
 
-    def test_overlapping_role_is_not_claimed_even_if_nearest(self):
-        # fragment sits exactly on far_right's median, but far_right is present the whole time
-        # (overlap) → it must fall to far_left, the role with the actual hole.
-        frags = {64: {"median": (0.50, 0.20), "span": (286, 337)}}
-        self.assertEqual(g.stitch_role_fragments(self.PRIMARIES, frags), {64: "far_left"})
+    def test_doubles_two_primaries_per_half_even_when_near_dominates(self):
+        # The Game-3 shape: near pair fragments into four big tracks (each bigger than any far
+        # track); far players only have small fragments. All four near tracks outrank the far
+        # ones globally — but each half must still get its own two primaries.
+        by_tid = {
+            1: self._t(0, 500, 0.30, 0.80),    # near pair, first period
+            2: self._t(0, 500, 0.70, 0.85),
+            3: self._t(600, 1000, 0.30, 0.82),  # near pair, second period (same people, new ids)
+            4: self._t(600, 1000, 0.70, 0.80),
+            5: self._t(0, 300, 0.40, 0.20),     # far pair — far smaller row counts
+            6: self._t(0, 280, 0.60, 0.25),
+        }
+        roles = g.select_role_primaries(by_tid, n=4, seconds_per_frame=self.SPF)
+        self.assertEqual(roles[1], "near_left")
+        self.assertEqual(roles[2], "near_right")
+        self.assertEqual(roles[5], "far_left")
+        self.assertEqual(roles[6], "far_right")
+        self.assertNotIn(3, roles)  # second-period near tracks stay fragments (stitchable)
+        self.assertNotIn(4, roles)
 
-    def test_fragment_overlapping_every_same_half_role_is_dropped(self):
-        # a far blip while both far roles are present fills no hole → not stitched.
-        prim = dict(self.PRIMARIES, far_left={"median": (0.55, 0.05), "span": (0, 355)})
-        frags = {64: {"median": (0.70, 0.05), "span": (286, 337)}}
-        self.assertEqual(g.stitch_role_fragments(prim, frags), {})
+    def test_partner_must_coexist_not_just_be_big(self):
+        # Track 3 is bigger than track 2 but never coexists with track 1 — it's the SAME person
+        # re-tracked, not the partner. The coexisting track 2 is the partner.
+        by_tid = {
+            1: self._t(0, 400, 0.30, 0.80),
+            3: self._t(401, 900, 0.35, 0.82),   # bigger, but zero coexistence with 1
+            2: self._t(100, 350, 0.70, 0.85),   # coexists 250 frames with 1
+            5: self._t(0, 400, 0.40, 0.20),
+            6: self._t(0, 400, 0.60, 0.25),
+        }
+        roles = g.select_role_primaries(by_tid, n=4, seconds_per_frame=self.SPF)
+        self.assertEqual(roles[1], "near_left")
+        self.assertEqual(roles[2], "near_right")
+        self.assertNotIn(3, roles)
 
-    def test_other_half_roles_are_ignored(self):
-        # a near-half fragment is never assigned to a far role and vice-versa.
-        frags = {64: {"median": (0.70, 0.05), "span": (286, 337)}}  # far (v<0.5)
-        out = g.stitch_role_fragments(self.PRIMARIES, frags)
-        self.assertNotIn(out.get(64), ("near_left", "near_right"))
+    def test_singles_one_per_half(self):
+        by_tid = {
+            1: self._t(0, 500, 0.50, 0.80),
+            2: self._t(0, 500, 0.50, 0.20),
+            9: self._t(0, 100, 0.90, 0.85),  # smaller near track: not a primary in singles
+        }
+        roles = g.select_role_primaries(by_tid, n=2, seconds_per_frame=self.SPF)
+        self.assertEqual(roles, {1: "near", 2: "far"})
 
-    def test_spatially_distant_fragment_is_rejected(self):
-        # far-half but nowhere near either far role's position → guarded out (not a continuation).
-        frags = {99: {"median": (0.02, 0.45), "span": (286, 337)}}
-        self.assertEqual(g.stitch_role_fragments(self.PRIMARIES, frags, max_court_dist=0.4), {})
+    def test_empty_half_yields_no_roles_for_it(self):
+        by_tid = {1: self._t(0, 500, 0.30, 0.80), 2: self._t(0, 500, 0.70, 0.85)}
+        roles = g.select_role_primaries(by_tid, n=4, seconds_per_frame=self.SPF)
+        self.assertEqual(set(roles.values()), {"near_left", "near_right"})
+
+
+class TestStitchFragmentsFramewise(unittest.TestCase):
+    """Framewise re-ID (stitching v2, successor of stitch_role_fragments): fragments attach to the
+    role whose per-frame HOLES they fill, gated by boundary continuity (velocity-bounded distance
+    to the role's nearest anchors in meters) and by ambiguity rejection (two same-half roles nearly
+    equally close → honest hole beats a partner swap). Frames @ ~12 fps (SPF = 1/12 s).
+
+    Old-suite mapping: temporal-hole stitch → test_fragment_continues_the_role_with_the_hole;
+    overlapping-role-not-claimed / blip-dropped → the hole test (test_no_new_frames_for_any_role…);
+    other-half ignored → test_other_half_never_claimed; distant-fragment rejected →
+    test_velocity_bound_rejects_teleport. NEW vs v1: span overlap no longer rejects
+    (test_fragment_overlapping_primary_span…), chaining, ambiguity trap."""
+
+    SPF = 1 / 12
+
+    @staticmethod
+    def _path(f0, f1, u, v):
+        return [(f, u, v) for f in range(f0, f1 + 1)]
+
+    def _roles(self, far_left_end=282, far_right_end=355):
+        return {
+            "near_left": self._path(0, 355, 0.30, 0.80),
+            "near_right": self._path(0, 355, 0.70, 0.80),
+            "far_left": self._path(0, far_left_end, 0.35, 0.15),
+            "far_right": self._path(0, far_right_end, 0.75, 0.15),
+        }
+
+    def test_fragment_continues_the_role_with_the_hole(self):
+        # far_left lost after 282; fragment resumes 14 cm away 4 frames later → stitched.
+        frags = {64: self._path(286, 337, 0.36, 0.16)}
+        out = g.stitch_fragments_framewise(self._roles(), frags, self.SPF)
+        self.assertEqual(out, {64: "far_left"})
+
+    def test_fragment_overlapping_primary_span_still_fills_its_hole_frames(self):
+        # far_left detected 0-282 and 320-355 (span 0-355). Fragment 278-310 overlaps the span —
+        # v1 rejected ANY span overlap — and briefly double-tracks frames 278-282 (15%, under the
+        # collision threshold); frames 283-310 are real holes → must stitch.
+        roles = self._roles()
+        roles["far_left"] = self._path(0, 282, 0.35, 0.15) + self._path(320, 355, 0.37, 0.17)
+        frags = {64: self._path(278, 310, 0.36, 0.16)}
+        out = g.stitch_fragments_framewise(roles, frags, self.SPF)
+        self.assertEqual(out, {64: "far_left"})
+
+    def test_no_new_frames_for_any_role_is_dropped(self):
+        # a far blip while both far roles are fully present fills no hole → not stitched.
+        frags = {64: self._path(286, 337, 0.70, 0.14)}
+        out = g.stitch_fragments_framewise(self._roles(far_left_end=355), frags, self.SPF)
+        self.assertEqual(out, {})
+
+    def test_other_half_never_claimed(self):
+        # near-half fragment (v>0.5) never attaches to a far role, whatever the holes.
+        frags = {64: self._path(286, 337, 0.36, 0.80)}
+        roles = self._roles()
+        del roles["near_left"], roles["near_right"]  # only far roles offered
+        self.assertEqual(g.stitch_fragments_framewise(roles, frags, self.SPF), {})
+
+    def test_velocity_bound_rejects_teleport_when_both_roles_open(self):
+        # Both far roles lost after 282; the fragment starts 4 m from far_left's anchor and 4.7 m
+        # from far_right's, 4 frames later (allow = 1 + 6·(1/3) = 3 m): continuous with NEITHER,
+        # could be either → honest drop. (With the partner accounted for instead, elimination
+        # would accept — see test_long_fragment_accepted_by_elimination….)
+        frags = {99: self._path(286, 337, 0.36, 0.45)}
+        out = g.stitch_fragments_framewise(self._roles(far_right_end=282), frags, self.SPF)
+        self.assertEqual(out, {})
+
+    def test_corpse_anchor_in_the_wrong_half_is_not_veto_evidence(self):
+        # A dying near-half track often drifts its box across the net before BoT-SORT kills it —
+        # the role's last samples then sit in the FAR half. Such an anchor is self-evidently not
+        # the player's position: discarded, near_right passes via its sane re-acquire anchor and
+        # wins clearly over near_left. (Vetoing on the corpse would hand the fragment to the
+        # WRONG partner — a swap, not just a hole.)
+        roles = {
+            "near_left": self._path(0, 282, 0.30, 0.80),
+            "near_right": (self._path(0, 270, 0.70, 0.80)
+                           + self._path(271, 282, 0.60, 0.38)     # box drifted across the net
+                           + self._path(350, 355, 0.56, 0.76)),   # re-acquired
+        }
+        frags = {64: self._path(286, 340, 0.55, 0.75)}
+        out = g.stitch_fragments_framewise(roles, frags, self.SPF)
+        self.assertEqual(out, {64: "near_right"})
+
+    def test_end_anchor_must_also_be_continuous(self):
+        # Start matches far_left, but 4 frames before far_left's re-acquire anchor the fragment
+        # sits 4 m up-court (allow 3 m) — a different person crossed; reject.
+        roles = self._roles()
+        roles["far_left"] = self._path(0, 282, 0.35, 0.15) + self._path(312, 355, 0.35, 0.15)
+        frags = {64: [(f, 0.36, 0.16 if f < 300 else 0.45) for f in range(286, 309)]}
+        self.assertEqual(g.stitch_fragments_framewise(roles, frags, self.SPF), {})
+
+    def test_partner_swap_trap_ambiguous_fragment_is_dropped(self):
+        # Both far roles lost after 282; the fragment starts exactly between their last anchors
+        # (0.305 m to each) → ambiguous, dropped: an honest hole beats a possible partner swap.
+        roles = self._roles(far_left_end=282, far_right_end=282)
+        roles["far_left"] = self._path(0, 282, 0.45, 0.15)
+        roles["far_right"] = self._path(0, 282, 0.55, 0.15)
+        frags = {64: self._path(286, 300, 0.50, 0.15)}
+        self.assertEqual(g.stitch_fragments_framewise(roles, frags, self.SPF), {})
+
+    def test_clearly_nearer_role_wins_when_both_pass(self):
+        # Same double-hole, but the fragment is 0.12 m from far_left vs 0.79 m from far_right —
+        # margin (0.5 m) exceeded → far_left wins.
+        roles = self._roles(far_left_end=282, far_right_end=282)
+        roles["far_left"] = self._path(0, 282, 0.35, 0.15)
+        roles["far_right"] = self._path(0, 282, 0.48, 0.15)
+        frags = {64: self._path(286, 300, 0.37, 0.15)}
+        out = g.stitch_fragments_framewise(roles, frags, self.SPF)
+        self.assertEqual(out, {64: "far_left"})
+
+    def test_chained_fragments_extend_the_role(self):
+        # Both far roles lost after 282. Fragment A clearly continues far_left and drifts to
+        # (0.40, 0.20). Fragment B starts at A's tail: with chaining its far_left distance is
+        # 0.15 m (unambiguous win); without chaining it would be ~0.88 m vs far_right's ~1.17 m —
+        # inside the ambiguity margin and wrongly dropped.
+        roles = self._roles(far_left_end=282, far_right_end=282)
+        roles["far_left"] = self._path(0, 282, 0.35, 0.15)
+        roles["far_right"] = self._path(0, 282, 0.55, 0.15)
+        a = [(f, 0.36 + 0.04 * (f - 286) / 24, 0.16 + 0.04 * (f - 286) / 24) for f in range(286, 311)]
+        b = self._path(314, 340, 0.41, 0.21)
+        out = g.stitch_fragments_framewise(roles, {64: a, 68: b}, self.SPF)
+        self.assertEqual(out, {64: "far_left", 68: "far_left"})
+
+    def test_collision_with_a_roles_frames_excludes_that_role(self):
+        # Mutual exclusion: one person can't be two places. near_left is DETECTED for 64% of the
+        # fragment's frames (286-320 of 286-340), so the fragment cannot be near_left even though
+        # it still fills some near_left holes (321-340) and near_left's anchor is equally close.
+        # Collision removes near_left from the candidates → no ambiguity drop → near_right.
+        roles = {
+            "near_left": self._path(0, 320, 0.45, 0.80),   # covers most of the fragment
+            "near_right": self._path(0, 282, 0.55, 0.80),  # lost after 282
+        }
+        frags = {64: self._path(286, 340, 0.50, 0.80)}
+        out = g.stitch_fragments_framewise(roles, frags, self.SPF)
+        self.assertEqual(out, {64: "near_right"})
+
+    def test_small_collision_does_not_exclude(self):
+        # BoT-SORT briefly double-tracks around an id switch: a few overlapping frames (< the
+        # collision threshold) must not disqualify the role the fragment genuinely continues.
+        roles = self._roles()
+        roles["far_left"] = self._path(0, 290, 0.35, 0.15)  # 5 frames overlap with the fragment
+        frags = {64: self._path(286, 340, 0.36, 0.16)}      # 55 frames, ~9% collision
+        out = g.stitch_fragments_framewise(roles, frags, self.SPF)
+        self.assertEqual(out, {64: "far_left"})
+
+    def test_long_fragment_accepted_by_elimination_despite_boundary_glitch(self):
+        # near_right is detected during 100% of the (long) fragment → the fragment must be
+        # near_left by elimination (only two near players exist). BoT-SORT id switches often drift
+        # the box in the handover frames, so the 1-frame-gap boundary check fails (1.67 m > 1.5 m
+        # allowance) — elimination evidence must outrank that veto.
+        roles = {
+            "near_left": self._path(0, 99, 0.30, 0.80),
+            "near_right": self._path(0, 550, 0.65, 0.80),
+        }
+        frags = {64: self._path(100, 500, 0.55, 0.85)}
+        out = g.stitch_fragments_framewise(roles, frags, self.SPF)
+        self.assertEqual(out, {64: "near_left"})
+
+    def test_elimination_accepts_on_sustained_partner_coexistence(self):
+        # near_left coexists with the fragment for 151 frames (~12.6 s) — 25% of the fragment,
+        # but mutual exclusion is about absolute coexistence, not ratio: 12.6 s of simultaneous
+        # tracks proves the fragment is NOT near_left. near_right's only anchor is a corpse
+        # (discarded) → no continuity evidence either way → elimination must still accept.
+        roles = {
+            "near_left": self._path(200, 350, 0.40, 0.85),
+            "near_right": self._path(0, 100, 0.60, 0.38),  # died drifting across the net
+        }
+        frags = {64: self._path(200, 800, 0.60, 0.80)}
+        out = g.stitch_fragments_framewise(roles, frags, self.SPF)
+        self.assertEqual(out, {64: "near_right"})
+
+    def test_boundary_check_uses_median_not_single_glitch_sample(self):
+        # The fragment's very first box is a glitch 1.8 m off; the median of its first samples
+        # sits right at near_left's tail. near_right is excluded by collision (21%) but not
+        # "accounted for" (<50%), so elimination doesn't apply — the median boundary must pass.
+        roles = {
+            "near_left": self._path(0, 99, 0.30, 0.80),
+            "near_right": self._path(0, 120, 0.75, 0.80),
+        }
+        frag = [(100, 0.60, 0.80)] + self._path(101, 200, 0.32, 0.80)
+        out = g.stitch_fragments_framewise(roles, {64: frag}, self.SPF)
+        self.assertEqual(out, {64: "near_left"})
+
+    def test_ambiguous_fragment_resolves_after_partner_timeline_fills_in(self):
+        # Pass 1: X (100-300) is ambiguous between the stale near anchors → not attached yet.
+        # Y (250-400) clearly continues near_left. Pass 2: X now coexists with near_left's
+        # extended coverage (frames 250-300, ~4 s) → excluded there → near_right by elimination.
+        # A single in-order pass would drop X forever; the fixpoint loop must recover it.
+        roles = {
+            "near_left": self._path(0, 99, 0.35, 0.85),
+            "near_right": self._path(0, 99, 0.65, 0.85),
+        }
+        x = self._path(100, 300, 0.50, 0.85)   # dead-center: ambiguous vs both anchors
+        y = self._path(250, 400, 0.35, 0.85)   # unambiguously near_left
+        out = g.stitch_fragments_framewise(roles, {64: x, 68: y}, self.SPF)
+        self.assertEqual(out, {68: "near_left", 64: "near_right"})
+
+    def test_fragment_before_the_primary_uses_the_after_anchor(self):
+        # Role acquired late (frames 100+); a fragment covering the start continues INTO it.
+        roles = self._roles()
+        roles["far_left"] = self._path(100, 355, 0.35, 0.15)
+        frags = {64: self._path(0, 80, 0.36, 0.16)}
+        out = g.stitch_fragments_framewise(roles, frags, self.SPF)
+        self.assertEqual(out, {64: "far_left"})
 
 
 class TestFillTrackGaps(unittest.TestCase):

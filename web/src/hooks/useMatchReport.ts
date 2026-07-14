@@ -136,7 +136,7 @@ export function useMatchReport(slug: string | undefined, viewerPlayerId?: string
 
         const report: MatchReport = {
           video: vid
-            ? { src: videoSrc, label: vid.label ?? '', durationS: vid.duration_s ?? null }
+            ? { id: vid.id, src: videoSrc, label: vid.label ?? '', durationS: vid.duration_s ?? null }
             : null,
           calib,
           tracks,
