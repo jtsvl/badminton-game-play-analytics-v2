@@ -42,6 +42,8 @@ models/weights/
 worker/.cache/
 **/.cache/
 **/.labeling/
+# alt-fps re-ingest caches (e.g. worker/.cache-30fps, ~53GB — never commit)
+**/.cache-*/
 *.parquet
 frames_cache/
 worker/renders/
