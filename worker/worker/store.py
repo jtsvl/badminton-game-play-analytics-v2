@@ -258,6 +258,14 @@ class Store:
             return
         self._sb.table("rally_corrections").insert(rows).execute()
 
+    def insert_hit_corrections(self, rows: List[dict]) -> None:
+        """Append-only persist of hit-review corrections (the learned hit-detector's eval + training
+        corpus, 0013 migration; stroke-classification-v2 §5/§9 G0). Plain INSERT like
+        insert_rally_corrections: re-editing the same hit across saves is itself signal."""
+        if not rows:
+            return
+        self._sb.table("hit_corrections").insert(rows).execute()
+
     def get_rallies(self, match_id: str) -> List[dict]:
         """A match's rally rows, ordered by idx (rally_sync maps events' rally_id → idx off these)."""
         res = self._sb.table("rallies").select("*").eq("match_id", match_id).order("idx").execute()

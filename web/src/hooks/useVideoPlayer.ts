@@ -21,10 +21,23 @@ export interface VideoPlayer {
   onLoaded: () => void
   togglePlay: () => void
   seek: (val: number) => void
+  rate: number
+  setRate: (r: number) => void
 }
 
 const OV_KEY = 'bca-ov-v1'
+const RATE_KEY = 'bca-rate-v1'
 const DEFAULT_OV: OverlayToggles = { tracking: true, wege: true, shuttle: false, zonen: false }
+
+function loadRate(): number {
+  try {
+    const r = parseFloat(localStorage.getItem(RATE_KEY) || '')
+    if (r >= 0.1 && r <= 4) return r
+  } catch {
+    /* noop */
+  }
+  return 1
+}
 
 function loadOv(): OverlayToggles {
   try {
@@ -50,6 +63,7 @@ export function useVideoPlayer(slug: string | undefined, hasFootage: boolean): V
   const [time, setTime] = useState(0)
   const [dur, setDur] = useState(hasFootage ? 0 : DEMO_LOOP)
   const [ov, setOv] = useState<OverlayToggles>(loadOv)
+  const [rate, setRateState] = useState<number>(loadRate)
   const posKey = 'bca-vt-' + (slug ?? 'x')
 
   const toggle = useCallback((key: keyof OverlayToggles) => {
@@ -103,6 +117,7 @@ export function useVideoPlayer(slug: string | undefined, hasFootage: boolean): V
     const v = vref.current
     if (!v) return
     setDur(v.duration || 0)
+    v.playbackRate = rate // a freshly-loaded <video> resets to 1× — re-apply the chosen speed
     try {
       const saved = parseFloat(localStorage.getItem(posKey) || '')
       if (saved > 0 && saved < (v.duration || 0) - 1) {
@@ -114,7 +129,7 @@ export function useVideoPlayer(slug: string | undefined, hasFootage: boolean): V
     } catch {
       v.currentTime = 1
     }
-  }, [posKey])
+  }, [posKey, rate])
 
   const togglePlay = useCallback(() => {
     const v = vref.current
@@ -143,5 +158,16 @@ export function useVideoPlayer(slug: string | undefined, hasFootage: boolean): V
     [hasFootage],
   )
 
-  return { vref, playing, setPlaying, time, setTime, dur, hasFootage, ov, toggle, onLoaded, togglePlay, seek }
+  const setRate = useCallback((r: number) => {
+    const v = vref.current
+    if (v) v.playbackRate = r
+    setRateState(r)
+    try {
+      localStorage.setItem(RATE_KEY, String(r))
+    } catch {
+      /* noop */
+    }
+  }, [])
+
+  return { vref, playing, setPlaying, time, setTime, dur, hasFootage, ov, toggle, onLoaded, togglePlay, seek, rate, setRate }
 }

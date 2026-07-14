@@ -48,7 +48,7 @@ def _lazy(name: str) -> Callable[[StageContext], None]:
 # (possibly trainer-edited) DB rows so aggregate re-gates against the authoritative spans.
 # `proxy` is the 720p playback proxy (specs/features/video-proxy.md) — supplementary, never raises.
 _REAL = ("ingest", "calibrate", "detect", "pose", "gate_track", "shuttle", "rally_hit",
-         "aggregate", "overlay", "remap", "rally_sync", "proxy")
+         "aggregate", "overlay", "remap", "rally_sync", "proxy", "hit_review")
 STAGES: Dict[str, Callable[[StageContext], None]] = {name: _todo(name) for name in STAGE_ORDER}
 STAGES.update({name: _lazy(name) for name in _REAL})
 

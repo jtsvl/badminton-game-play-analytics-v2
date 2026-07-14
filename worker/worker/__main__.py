@@ -42,6 +42,12 @@ def _slice_for(job: dict) -> tuple[list[str], str | None]:
         # must not skip the PlayerReview confirmation; 'done' stays done).
         end = (job.get("params") or {}).get("return_status") or "done"
         return ["remap", "rally_sync", "aggregate"], end
+    if stage == "hit_review":
+        # stroke-classification-v2 §5/§9: trainer corrected the draft hit list in /match/:slug/hits.
+        # The web already wrote the corrected `events` directly; this only persists the append-only
+        # hit_corrections corpus (the learned hit-detector's eval/training GT). Never changes match
+        # status (return None) — hit-labeling must not disturb the report gate.
+        return ["hit_review"], None
     return [stage], None
 
 
