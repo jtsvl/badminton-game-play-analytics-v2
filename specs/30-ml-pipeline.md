@@ -166,12 +166,17 @@ thresholds are untuned until a real-footage re-run; no located-rate/precision cl
 answer key exists.
 
 ## Stage 7 — Stroke classification (FR-21/22/23)
-**BST (MIT, public weights)** — consumes player skeleton + shuttle xy + court xy (tiny transformer; hours to train
-on MPS). Adopt **ShuttleSet 18-class BWF taxonomy collapsed to 6–8 coarse classes** first. Low-confidence → `unknown`.
-*Fine-tune:* yes — ~300–1k own labeled strokes; iterate hard pairs (drop/net, clear/lift).
-*Accept:* coarse-class accuracy **≥ 70 %** on held-out own-footage strokes to ship, `unknown`-rate surfaced not
-hidden (lit ceiling 77–85 % on clean data) *(initial target — revise once own labels exist; see
-`features/stroke-classification.md`)*.
+**Governed by `features/stroke-classification-v2.md` (signed off 2026-07-13)** — v1
+(`features/stroke-classification.md`) is superseded: its build failed the 0.70 gate (LOGO-CV 0.400,
+GBDT spike 0.536) and was never wired. v2 in one line: learned hit detection (HitNet-pattern GRU +
+audio-onset timing refinement) → 5-way hitter attribution → **BST-4-slot** (Chang et al., CVPRW
+2026, arXiv:2502.21085, MIT) from the ShuttleSet-25 `_merged` checkpoint, trained on **coarse-8**
+(17 fine labels for labeling; ShuttleSet is natively 18 fine types — the earlier "35/25 classes"
+claim here mixed in the checkpoint head sizes and was refuted). Low-confidence →
+`unknown`/„Unsicher" abstention.
+*Accept:* the single ≥ 70 % gate is replaced by the **G0–G5 gate stack** (hit timing, attribution,
+per-class recall, calibrated abstention, outcomes, trainer edit rate) — see v2 spec §9; below-gate
+models are labeling-assist only, never pipeline.
 
 ## Stage 8 — Insight aggregation (FR-11/12/13/14/26/27)
 Pure functions from tracks/events (TDD these): distance (court-space displacement), avg/top speed, sprints

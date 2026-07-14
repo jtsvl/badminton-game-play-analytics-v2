@@ -49,8 +49,10 @@ implemented + verified. Three IDs are pinned to match the handoff READMEs: **FR-
 - **FR-21** Classify each hit into a shot type from the BWF-derived taxonomy, output per-player `shots:[[type,count]]`.
 - **FR-22** Hits that cannot be confidently classified are bucketed as **`unknown`**, surfaced in the UI as
   „Sonstige" **only when count > 0**.
-- **FR-23** Ship a coarse taxonomy first (Clear, Netzdrop, Drop, Lift, Drive, Aufschlag, Smash) for reliability;
-  finer classes are a later refinement.
+- **FR-23** Ship a coarse taxonomy first for reliability; finer classes are a later refinement.
+  Coarse-8 as signed off 2026-07-13 (`features/stroke-classification-v2.md` §4): Aufschlag, Clear,
+  Smash, Drop, Drive, Netzspiel, Lift, Abwehr. *(Earlier revision listed a coarse-7 without Abwehr
+  and with „Netzdrop" as the coarse name — superseded by the DBV-checked taxonomy.)*
 
 ## Pose / footwork (P3)
 - **FR-24** Estimate 2D pose for each in-court player (top-down), feeding stroke classification and footwork metrics.

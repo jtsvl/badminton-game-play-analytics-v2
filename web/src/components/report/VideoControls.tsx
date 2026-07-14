@@ -5,30 +5,28 @@ import type { VideoPlayer } from '../../hooks/useVideoPlayer'
 interface Props {
   player: VideoPlayer
   style?: CSSProperties
+  /** Hit-editor opt-in: show a slow-mo speed selector + playhead frame-step for precise annotation. */
+  showRate?: boolean
+  /** Video fps for frame-accurate stepping (defaults to 30 if unknown). */
+  fps?: number
 }
 
-/** Play/pause bubble button + scrubber + time readout. */
-export function VideoControls({ player, style }: Props) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10, ...style }}>
+const RATES = [0.25, 0.5, 1, 2]
+const rateLabel = (r: number) => `${String(r).replace('.', ',')}×` // de-DE decimal comma
+
+/** Play/pause bubble button + scrubber + time readout. With `showRate`, adds a speed selector and
+ * ◀/▶ 1-frame buttons that step the PAUSED video one frame (precise hit annotation). */
+export function VideoControls({ player, style, showRate, fps }: Props) {
+  const mainRow = (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
       <button
         type="button"
         onClick={player.togglePlay}
         aria-label={player.playing ? 'Pause' : 'Abspielen'}
         style={{
-          width: 38,
-          height: 38,
-          borderRadius: 19,
-          border: '1px solid #C66C27',
-          cursor: 'pointer',
-          background: '#FA8832',
-          color: '#1A0500',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          boxShadow: '0 3px 0 #C66C27',
-          flex: 'none',
-          padding: 0,
+          width: 38, height: 38, borderRadius: 19, border: '1px solid #C66C27', cursor: 'pointer',
+          background: '#FA8832', color: '#1A0500', display: 'flex', alignItems: 'center',
+          justifyContent: 'center', boxShadow: '0 3px 0 #C66C27', flex: 'none', padding: 0,
         }}
       >
         {player.playing ? (
@@ -57,4 +55,47 @@ export function VideoControls({ player, style }: Props) {
       </span>
     </div>
   )
+
+  if (!showRate) return <div style={style}>{mainRow}</div>
+
+  const stepFrame = (dir: number) => {
+    if (player.playing) player.togglePlay() // frame-stepping only makes sense paused
+    const f = 1 / (fps || 30)
+    player.seek(Math.max(0, Math.min(player.dur || 0, player.time + dir * f)))
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, ...style }}>
+      {mainRow}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, color: 'var(--muted)', marginRight: 2 }}>Tempo</span>
+        {RATES.map((r) => {
+          const active = player.rate === r
+          return (
+            <button
+              key={r}
+              type="button"
+              aria-label={`Tempo ${rateLabel(r)}`}
+              aria-pressed={active}
+              onClick={() => player.setRate(r)}
+              style={{ ...rateBtn, ...(active ? rateBtnActive : null) }}
+            >
+              {rateLabel(r)}
+            </button>
+          )
+        })}
+        <span style={{ display: 'inline-flex', gap: 6, marginLeft: 'auto' }}>
+          <button type="button" aria-label="Video 1 Frame zurück" onClick={() => stepFrame(-1)} style={rateBtn}>◀ 1F</button>
+          <button type="button" aria-label="Video 1 Frame vor" onClick={() => stepFrame(1)} style={rateBtn}>1F ▶</button>
+        </span>
+      </div>
+    </div>
+  )
 }
+
+const rateBtn: CSSProperties = {
+  border: '1px solid #C66C27', background: '#FEF4EA', color: '#1A0500', borderRadius: 8,
+  padding: '3px 9px', fontSize: 12.5, cursor: 'pointer', fontFamily: 'var(--font-body)',
+  fontVariantNumeric: 'tabular-nums',
+}
+const rateBtnActive: CSSProperties = { background: '#FA8832', boxShadow: '0 2px 0 #C66C27' }

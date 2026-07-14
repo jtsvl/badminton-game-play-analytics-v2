@@ -1,62 +1,322 @@
 # Feature — Stroke classification (pipeline stage 7)
 
-**Status: SPEC ONLY — no code yet.** Captured honestly so it is build-ready when prioritised (next P3
-build). FR-21/22/23. See `specs/30-ml-pipeline.md` stage 7 and `specs/40-worker-contract.md`.
+> **SUPERSEDED (2026-07-13) by `specs/features/stroke-classification-v2.md`.** The v2 rebuild
+> governs all new stroke work. This file stays as v1 reference: its measurements (Phase-1 slot
+> coverage, Phase-2 LOGO-CV 0.400 → gate FAILED, GBDT spike 0.536 → gate FAILED, pipeline never
+> wired) remain valid history; its design decisions do not. Known error corrected in v2 §2: the
+> taxonomy claim below (ShuttleSet class counts) was refuted 0:3 in the Phase-0 verification.
+
+**Status: DESIGN LOCKED (2026-07-05) — build in progress on `feat/stroke-classification`.**
+FR-21/22/23. See `specs/30-ml-pipeline.md` stage 7 and `specs/40-worker-contract.md`.
+Nothing below is BUILT unless explicitly marked so.
 
 ## Goal
 Classify each detected hit into a shot type from the coarse BWF-derived taxonomy and attribute it to the
 hitting player → per-player `shots: [[type, count]]` in the report (FR-21), with everything the model
 can't confidently call bucketed as **`unknown`** and surfaced in the UI, never hidden (FR-22).
 
-## Current state (verified 2026-07-02)
+## Current state (verified 2026-07-05)
+- **Phase 2 (training + LOGO-CV eval) is BUILT and run — the acceptance gate FAILED, so the
+  pipeline stays unwired.** In-tree, TDD'd: `stroke/model.py` (BST4 — the vendored BST_CG_AP
+  generalized to the 4 quadrant slots with presence-masked AimPlayer/CleanGate; collision-safe
+  vendor import), `stroke/train.py` (LOGO loop, τ sweep, `worker train-stroke` CLI), runbook
+  `worker/training/bst_stroke_train.md` (vendored SHA + every command).
+- **Measured 2026-07-05** (`PYTORCH_ENABLE_MPS_FALLBACK=1 uv run python -m worker train-stroke
+  --seed 42 [--lr 3e-4]`, full sanctioned sweep in the runbook): best mean LOGO-CV accuracy
+  **0.400 ± 0.056** (pooled 0.403) vs the ≥ 0.70 gate; τ targets unsatisfiable (knee at 0 —
+  no confidence separation); net + drive recall 0.00; Unsicher abstention 0.00. Diagnosis:
+  train acc 0.945 vs held-out 0.402 — a **cross-game generalization gap**, not underfit; the
+  sanctioned hyperparameter space is exhausted. First levers: near-half recovery v2 (below)
+  and more labeled sessions — user decision before any further build.
 - `stroke` is in `STAGE_ORDER` and `SIDE_ANGLE_STAGES` (`pipeline/__init__.py`) but **not** in `_REAL` —
   it resolves to the `_todo` no-op stub — and **not** in `RESUME_STAGES` (`__main__.py`). No
   `pipeline/stroke.py` exists.
-- `player_shot_stats` rows are populated **only by `seed.sql`** today; the demo report renders those.
-- Provisional hit counting already exists upstream: `rally_hit`'s `count_hits` (image-space vertical
-  reversals) writes `events` `hit` rows with `payload {provisional: true}`, confidence 0.3.
+- `player_shot_stats` counts come **only from `seed.sql`** today; `aggregate` writes only the
+  `errors` column (out-landings, `shot_type='unknown'`, singles-gated).
+- Provisional hit counting exists upstream: `rally_hit`'s `count_hits` writes `events` `hit` rows
+  with `payload {provisional: true}`, confidence 0.3.
+- **Labels are BUILT and imported** (see `features/stroke-labeling.md`): 695 training rows in
+  `worker/worker/.labeling/stroke_labels.parquet` (drop 165, lift 153, unknown 141, clear 78,
+  smash 61, serve 55, drive 22, net 20) + 43 `no_hit` rows in `hit_detection_eval.parquet`.
+  All 5 Session-2 games, all doubles, one session/lighting; source video 30 fps, but the frame
+  cache all stages read is the **12 fps analysis cadence** (`ingest.DEFAULT_ANALYSIS_FPS`).
 
-## Inputs (all already produced by earlier stages)
-- **`pose.parquet`** — full body26 `kp[]` / `kp_score[]` per track per frame (kept for exactly this
-  stage), plus foot/`foot_source`.
-- **`shuttle.parquet`** — `t, u, v, visibility, frame, px, py, conf` from the fine-tuned tracker.
-- **`tracks.parquet`** — court-space player positions (`t, track_id, u, v, role, source`).
-- **`events` `hit` rows** — stage 6's provisional hit frames, the anchor points to classify around.
+## Alternative candidate: trajectory-geometry GBDT (spike — MEASURED 2026-07-12)
 
-## Model (per the locked stage-7 research)
-**BST (MIT, public weights)** — a small transformer over player skeleton + shuttle xy + court xy;
-hours to train on MPS. Taxonomy: **ShuttleSet 18 classes collapsed to the coarse 7** (FR-23):
-`clear, smash, drop, net, drive, lift, serve` + **`unknown`** below the confidence threshold (FR-22).
-Iterate the hard pairs (drop/net, clear/lift) before growing the taxonomy.
+**Measured 2026-07-12 (full sanctioned sweep in the runbook §7, `uv run python -m worker
+train-stroke-gbdt --seed 42 [--eta 0.05 --n-estimators 400 --ppos]`, worker git `8410897`):
+best mean LOGO-CV accuracy 0.536 ± 0.023 (pooled 0.534; seed 43/44 replicates 0.526/0.523;
+bit-deterministic on CPU) — GATE FAILED vs ≥ 0.70, but decisively above BST4's 0.400 ± 0.056
+(+12–14 pp, beyond the ~5–8 pp fold-noise band) at a fraction of the cost. net/drive recall
+recovered from 0.00/0.00 to 0.30/0.14; smash lags at 0.21; τ per FR-22 still unsatisfiable
+(knee at 0 — no confidence separation). Per the locked decision rules (0.5–0.7 → stop and
+discuss): stopped — no pipeline wiring, no promotion. Next levers on the table: more labeled
+sessions, net/drive mining from unlabeled hits, near-half recovery v2, 30 fps re-ingest for
+smash time-resolution.**
 
-## Outputs / gaps to close when building
-1. **Refine `events.hit`**: replace the provisional payload with `shot_type`, `player` (match_players
-   attribution) and a real confidence; hit-fusion — the pose swing cue refines/confirms stage 6's
-   velocity-reversal `count_hits` (they should converge; disagreement = a flag, not a silent pick).
-2. **Write `player_shot_stats`**: a new **`Store.upsert_player_shot_stats` helper is required** — it does
-   not exist today (only seed.sql fills that table). Unique key `(match_id, player_id, shot_type)` per
-   `20-data-model.md`.
-3. **Register the stage**: add `stroke` to `_REAL` and to `RESUME_STAGES` (after `rally_hit`, before
-   `aggregate`), so the calibrate slice runs it and `aggregate` can consume shot counts.
-4. `remap` interaction: shot attribution references player identity — a `remap` job after identity
-   correction must also re-attribute shots (cheap: re-map track→player labels, no re-classification).
+**Status: DESIGN, approved spike — eval only.** No pipeline wiring and no promotion path in this
+spike regardless of outcome; a gate pass triggers a user decision on the model family, nothing
+more. Motivation: the BST4 failure is a **generalization gap** (train 0.945 vs held-out 0.402 on
+554 rows — memorization), and the label-ambiguity theory was tested and killed 2026-07-12
+(clean-clip accuracy 0.383 ≈ ambiguous 0.411; class-controlled CMH OR 0.92 [0.62–1.37]) — so the
+lever is the **representation**, not the optimizer or the labels. Hand-crafted hit-to-hit
+trajectory geometry + XGBoost is the regime where GBDTs beat deep nets on < 10k tabular samples
+(arXiv:2207.08815); the closest published comparable classifies ~these 7 classes at **72.1 %**
+with XGBoost on 7 such features (Sensors 24(13):4372). BST's own ablation ranks shuttle > pose,
+and shuttle coverage near hits is dense (median in-window coverage 1.00; measured on this cache:
+every hit has a shuttle detection within 0.1 s; hit-to-hit segments carry median 5 detections,
+≥ 2 in 95 %).
+
+### Protocol — identical to BST4 by construction
+Same `stroke/train.py` functions (`fold_split`, `sweep_tau`, metrics): 5 LOGO folds keyed by
+`video_id`; train on the 554 confident rows only; every held-out-game row (confident + the 141
+Unsicher) gets exactly one OOF prediction; τ per FR-22; **gate = mean LOGO-CV accuracy ≥ 0.70**;
+same `report.json` shape (`torch_version` → `xgboost_version`, `device` = `"cpu"`, one additive
+key `feature_importance_gain` = mean gain across fold models). Runs land in
+`stroke_runs/<UTC>_gbdt_traj/` with the same `oof_predictions.parquet` schema. Decision rules
+(locked): < 5–8 pp over BST4's 0.400 is noise at these fold sizes; 0.5–0.7 → stop and discuss
+(levers: more labeled sessions, net/drive mining from unlabeled hits, near-half recovery v2);
+≥ 0.70 → gate pass, user decides. Determinism: `hist` on CPU, `nthread=1`, per-fold seeds —
+bit-reproducible (no MPS caveat).
+
+### Features (28 core + 3 optional player features, all NaN-able Float64)
+Per labeled hit, from its **hit-to-hit segment**: outgoing `[t0, t1]` where t1 = next *detected*
+hit in the same rally (time-span lookup, `hits_in_rallies` semantics) else `rally.t_end_s`
+(labeled videos have no landing events); incoming `[t_prev, t0]`, absent for the first hit.
+Anchor/endpoint = nearest `shuttle.parquet` row within 0.1 s; **no interpolation** — endpoints
+and apex are read off real detections only. Coordinates: image-normalized `px/W, py/H`
+(homography-free) plus court `(u,v) = apply_homography(H, px, py)` **at anchor points only**
+(the shuttle parquet's in-flight u,v are airborne-projection garbage); homography per video via
+`store.get_calibration`, horizon/out-of-range → NaN.
+
+- **A rally context**: `first_of_rally`, `hit_idx_in_rally` (both recomputed from events+rallies,
+  mechanical), `out_end_is_rally_end` (measured: rally_end boundaries inflate smash flight time —
+  this flag lets trees correct for it).
+- **B timing**: `flight_time_out`, `flight_time_in`.
+- **C position at hit (court)**: `hit_dist_net` |v−0.5|, `hit_u_center_dist` |u−0.5|, `hit_v_raw`
+  (the one raw-v exception — near/far conditioning for perspective-scaled image-y magnitudes).
+- **D outgoing displacement (court)**: `out_end_dist_net`, `out_dv_abs`, `out_du_abs`,
+  `out_crossed_net`, `out_speed_uv`.
+- **E incoming displacement (court)**: `in_dv_abs`, `in_speed_uv`.
+- **D′/E′ image-space displacement** (user-approved amendment, 2026-07-12): `out_dpxn_abs`,
+  `out_dpyn_abs`, `out_speed_img`, `in_speed_img`. **Measured on the real export**: the floor
+  projection of *elevated* contact points is unusable for ~63 % of hits (median offset ≈ one
+  court length; high far-court contacts sit above the camera horizon, where the projection
+  flips sign — non-monotonic garbage, not noise; the same reason shuttle.parquet's own
+  in-flight u/v are junk). Picture-unit displacement is always computable and consistent; the
+  court groups C/D/E stay as sparse columns (valid ≈ 37 %, mostly low near-court contacts —
+  the missingness itself is inference-available signal), and `ppos_` inherits that ≈ 37 %
+  coverage since it measures distance to the projected contact point.
+- **F image-y arc**: `hit_pxn`, `hit_pyn`, `out_apex_rise`, `out_apex_t_frac`, `out_end_drop`,
+  `out_py_slope_early`, `in_apex_rise` (probe on real data: apex-rise alone rank-orders
+  lift .093 ≫ clear .018 > drive .012 > drop .003 > smash/net/serve ≈ 0 — the family works at
+  the 12 fps cadence).
+- **G segment quality**: `n_dets_out`, `n_dets_in` (density loss on fast low shots is itself an
+  inference-available signal).
+- **P optional, ablation-only** (`ppos_` prefix): `ppos_min_dist_same_half`,
+  `ppos_min_dist_other_half` (distance from the projected contact point to the nearest tracked
+  player on each half — geometric scene facts, **no hitter attribution anywhere**; every
+  which-half-hit signal measured ~50/50 on this footage), `ppos_n_slots_filled`.
+
+Side-invariance by **reparameterization, not flipping**: net-relative unsigned quantities
+(|v−0.5|, |Δv|, crossed_net) need no hit-side inference. NaN policy: XGBoost-native missing
+routing, no sentinels; degradation is per-feature, never per-row — all 695 label rows emit a
+vector (554 train + 141 Unsicher calibration).
+
+**Leakage rules**: the human `hitter` label is meta-only, never a feature (unavailable at
+inference); all *detected* hits are segment boundaries incl. the 43 `no_hit` false positives
+(inference-consistent; ~5.8 % of segments have one corrupted boundary — accepted);
+no `winner_side`/`end_shot_type` (near-direct label leakage); no per-video constants
+(video-ID proxies under LOGO-CV).
+
+### Sanctioned knobs (locked)
+`multi:softprob`, `tree_method=hist`, class-weighted sample weights always on (same
+inverse-frequency `class_weights`), fixed `num_boost_round` — **no early stopping** (no honest
+validation set inside a LOGO fold; same fixed-budget rationale as BST). Grid:
+`max_depth ∈ {3,4}`, `eta ∈ {0.05,0.1}`, `n_estimators ∈ {200,400}`,
+`(subsample, colsample) ∈ {(0.8,0.8),(1.0,1.0)}`, plus one `--ppos` ablation run on the best
+core config (user-locked 2026-07-12: shuttle-only v1 first, player features measured
+separately). Every run gets a runbook row (command + seed), `worker/training/bst_stroke_train.md` §7.
+
+### Build shape
+`stroke/traj.py` (pure `build_feature_row` + `export-stroke-traj` CLI →
+`worker/.labeling/stroke_traj/features.parquet`, one row per label with provenance columns) and
+`stroke/gbdt.py` (`train-stroke-gbdt` CLI; LOGO protocol parameterized by a `fit_predict`
+callable so the protocol tests torch- and xgboost-free). `xgboost` joins the `ml` extra
+(native Booster API — no scikit-learn dependency).
+
+## Model
+**BST** — Chang et al., *BST: Badminton Stroke-type Transformer for Skeleton-based Action Recognition
+in Racket Sports*, CVPRW 2026, arXiv:2502.21085,
+<https://github.com/Va6lue/BST-Badminton-Stroke-type-Transformer> (MIT, public weights). Per-stream
+TCNs (two player skeletons, shuttle trajectory, player court positions) → 2-layer transformer encoder.
+Its expected inputs match our artifacts 1:1 — MMPose-style 2D skeletons, **TrackNetV3** shuttle
+trajectory in [0,1], court positions from feet in [0,1].
+Taxonomy: coarse 7 (FR-23): `clear, smash, drop, net, drive, lift, serve` + **`unknown`** below the
+confidence threshold (FR-22). *(This revision's claim "ShuttleSet is 35 classes / 25 merged;
+BadmintonDB is the 18-class set" was REFUTED 0:3 in the v2 Phase-0 verification: ShuttleSet's
+native vocabulary IS 18 fine types (+unknown); 35/25 are the BST checkpoint head sizes — see
+`stroke-classification-v2.md` §2.)* Iterate the hard pairs (drop/net, clear/lift) before growing the
+taxonomy.
+
+## Locked decisions (user, 2026-07-05 — do not relitigate silently)
+1. **Eval = leave-one-game-out CV**: 5 folds, whole-game splits keyed by `video_id` (G1 151, G2 207,
+   G3 167, G4 144, G5 69 hits). Headline = mean accuracy ± spread, per-fold n and per-class recall
+   reported. Honest caveat everywhere the number appears: one session/lighting → this measures
+   cross-game, not cross-session generalization.
+2. **Unsicher rows**: train the 7-class softmax on the **554 confident rows only**; the 141 `unknown`
+   rows are a held-out confidence-calibration/eval set (a good model should be unconfident on them —
+   the overlap is reported). `unknown` output = below-threshold abstention, never a trained class.
+3. **Doubles (all current footage)**: refine `events.hit` for every match; write `player_shot_stats`
+   **only for singles matches**. No heuristic hitter guessing — who-of-the-pair attribution is P3+
+   (hitter labels banked).
+4. **Hit-refinement scope = classify + flag only**: swing-cue disagreement → `hit_disputed: true` in
+   the payload, rate reported. No re-timing, no hit deletion. The 43 `no_hit` labels are the stage-6
+   hit-precision eval number (43/738 ≈ 5.8 % FP → ≈ 94.2 % precision).
+
+## Design
+
+### Player streams: 4 fixed quadrant slots + pose recovery (REVISED 2026-07-05)
+The original two-stream nearest-per-half selector was **measured and rejected** at the Phase-1 gate
+(all 554 hitter-labeled hits, all 5 games):
+- the hitter's role track exists at the anchor for only **54.9 %** of hits (far half absent 40 % —
+  `gate_track` loses the far pair for long stretches; ±1.0 s tolerance recovers < 3 pp);
+- nearest-per-half picks the labeled hitter **76.6 %** when the track exists (time-aware eval —
+  an earlier 6 % readout was an eval bug: track ids churn, role↔id lookups must be time-aware);
+- every "which half hit" signal fails on this footage: trajectory vertical-flip **48 %**,
+  shuttle-py vs image midline **49 %** (near/far centroids overlap in image y on 3 of 5 games).
+  The `half` payload field is dropped from v1; singles attribution later comes from role tracks.
+
+**Revised design (user-locked 2026-07-05):** one stream per court quadrant —
+`near_left, near_right, far_left, far_right` — no hitter-picking logic at all. Slot membership is
+the gate_track role (time-aware: the role segment with rows nearest the anchor), singles roles map
+`near→near_left`, `far→far_left`. An absent player is an all-zeros stream. **Pose recovery** fills
+slots that role tracks leave empty: pose.parquet sees everyone (incl. the lost far pair — only the
+court-track bookkeeping drops them), so unassigned pose tracks whose precomputed feet
+(`foot_x/foot_y`, `foot_conf`) project through the calibration homography into the court
+(±margin, reusing `geometry.apply_homography`; quadrant = `v>0.5 → near`, `u<0.5 → left`, the
+absolute form of `geometry.role_assign`'s sort) are slotted in; their position stream is the
+per-frame foot projection. The 513 hitter labels **measure** slot coverage, never feed features:
+Phase-1 gate = labeled hitter's slot filled ≥ ~85 % (reported split by source: track vs recovery).
+
+**Phase-1 gate results (measured 2026-07-05, `export-stroke-dataset`, 695 samples, 554 labeled):**
+- hitter's slot filled (strict slot name): **83.6 %** (463/554; 308 via track, **155 via recovery**
+  — recovery is a third of all fills and lifted the far half from its 60 % track coverage).
+- hitting half shows **≥ 1 player: near 94.0 % / far 100 %**; **both players: near 52.3 % /
+  far 82.9 %** → the hitter's skeleton reaches the model in ≥ 67.1 % (guaranteed) to ~96.9 %
+  (upper bound) of samples. The residual hole is mostly the near-half **partner** (mutual
+  occlusion / feet at the frame edge), not the hitter.
+- shuttle stream: median window coverage **1.00** (16-frame window), min 0.12, zero-coverage 0.
+- Caveat for P3 attribution (not shot_type training): the labels' „links/rechts" are
+  viewer-relative, slots are court-u-relative — the axis orientation per half must be verified
+  before hitter labels are used as track-level ground truth (misses cluster as cross-half-only
+  candidates, consistent with a left/right mirror on one half).
+- Verdict: gate intent met (hitting half visible 94–100 %, dense shuttle stream); proceed to
+  training with the LOGO-CV ≥ 70 % gate as arbiter. First lever if it fails: near-half
+  recovery v2 for the missing partner.
+
+### Skeleton + training init
+Body26 (Halpe) indices 0–16 are exactly **COCO-17** → the stroke input is `kp[:17]`/`kp_score[:17]`.
+**Train from scratch as v1** — the model is tiny (minutes–hours on MPS) and the broadcast-singles
+pretrain transfers poorly to our steeper camera, 4-slot input, and sparse shuttle coverage (the
+4-slot revision also breaks the pretrained 2-player input shape — from-scratch is now structural;
+a pretrained-trunk fallback would need stream surgery and is correspondingly weaker). Variant
+**BST_CG_AP** adapted to 4 player streams with shared TCN weights, **`seq_len=16`** ≈ ±0.67 s at
+the pipeline's real **12 fps analysis cadence** (`ingest.DEFAULT_ANALYSIS_FPS = 12`, discovered at
+the Phase-1 gate — the earlier "30 frames ≈ ±0.5 s @ 30 fps" actually spans 2.5 s and neighboring
+hits). `pose_style=J_only` first. Sanctioned hyperparameter space only:
+{BST_0 vs BST_CG_AP, J_only vs JnB_bone, LR, epochs, class-weighted CE}. 30-fps re-ingest
+(`analysis_fps` job param) stays a separately measured later experiment if smash/drive recall
+disappoints — it would not fix track coverage (user-locked 2026-07-05).
+
+### Vendoring
+Upstream BST cloned to `worker/.cache/_vendor/BST` (git-ignored; SHA pinned in
+`worker/training/bst_stroke_train.md`). We import **only the model classes** via the `sys.path`
+pattern of `shuttle/tracknetv3.py`; upstream's per-dataset training scripts and preprocessing are
+not used. Dataset builder, training loop, eval, and threshold logic live in-tree and are TDD'd.
+`worker/training/bst_mps.patch` exists only if the model files themselves are device-pinned.
+
+### Windows + normalization (train == inference)
+One pure `build_sample()` shared by the dataset exporter and the pipeline stage:
+- **Window**: 16 frames centered on the anchor (nearest cached frame to `t_s` via `frames.json`);
+  zero-pad at clip edges, pad count recorded.
+- **Shuttle stream** `(16, 2)`: `(px/W, py/H)`; gaps ≤ 6 frames linearly interpolated **within an
+  arc, never across the anchor** (the contact breaks the arc); undetected → `(0,0)`.
+- **Joints** 4×`(16, 17, 2)` (slot order `near_left, near_right, far_left, far_right`):
+  bbox-relative, center-aligned, normalized by bbox diagonal (BST convention); bbox = envelope of
+  confident keypoints (pose.parquet stores no bbox); missing pose frames / empty slots → zeros.
+- **Positions** 4×`(16, 2)`: `tracks.parquet` `(u,v)` joined nearest-t for role-track slots;
+  per-frame homography-projected feet for pose-recovered slots; missing → zeros.
+- fps guard: warn loudly if median frame dt deviates > 20 % from 1/12 (the 12 fps analysis cadence
+  is a stage-7 input assumption). Train-time temporal jitter ±1 frame absorbs the observed ±0.2 s
+  stage-6 anchor drift.
+
+### Events write-back + stats plumbing
+- `pipeline/stroke.py` (runs after `rally_hit`, before `aggregate`) enriches every `type='hit'` row
+  in `events.parquet`: payload `{shot_type, confidence, hit_disputed, model_version}` replaces
+  `{provisional: true}`; event `confidence` = model confidence. Re-uploads the artifact and calls the
+  existing `store.replace_rallies(match_id, rallies, events)` once (events have no upsert key by
+  design; consumers join `video_id + t_s` — ids regenerate, which is the documented contract).
+- **Shot counts are written by `aggregate`, not by the stroke stage** (deviation from this spec's
+  earlier phrasing, deliberate): `aggregate` runs in every slice, already owns the singles gate and
+  the `track_label`→player binding, and `rally_sync` refreshes cache events from the DB — so a
+  `remap`/`rally_review` job re-attributes shots **for free** (re-mapping, no re-classification) and
+  `stroke` stays out of those slices. New `Store.upsert_player_shot_stats` sends only
+  `count` + `share_pct` on conflict key `(match_id, player_id, shot_type)` — the column-split twin of
+  `upsert_player_shot_errors` (errors-only), so the two writers coexist on the same row. `unknown`
+  is counted as its own row (FR-22: surfaced, never hidden).
+- `hit_disputed`: reuse `rally/swing.py::swing_events` — no swing activity from the selected players
+  within ±0.3 s of the anchor → flagged. Rate reported per match.
+
+### Confidence threshold τ (FR-22)
+All predictions are out-of-fold from the LOGO-CV. Sweep τ over the softmax-max grid; pick the
+smallest τ with OOF covered-accuracy ≥ 75 % subject to coverage ≥ 70 % on confident rows (if
+unsatisfiable: take the accuracy-coverage knee and say so). Report at τ*: covered accuracy,
+coverage, Unsicher-abstention rate (the honesty differential — if the model is confident on Unsicher
+rows, report the overlap, don't tune it away), and unknown-rate **per match**. One global τ, shipped
+in the model's sidecar JSON (`bst_best.json`: model_version, classes, variant, seq_len, τ, git SHA,
+date). Weights at `models/weights/stroke/` (git-ignored), promoted-checkpoint convention, env
+override `STROKE_MODEL` — all mirroring the stage-5 shuttle conventions.
+
+### Build gaps this closes (registration points)
+1. `pipeline/__init__.py`: add `"stroke"` to `_REAL`; create `pipeline/stroke.py` with `run(ctx)`.
+2. `__main__.py`: add `"stroke"` to `RESUME_STAGES` after `rally_hit`, before `aggregate`; new
+   `export-stroke-dataset` subcommand.
+3. `store.py`: `upsert_player_shot_stats` as above.
+4. Graceful degradation: missing weights or missing pose/tracks/shuttle → warn + leave events
+   untouched; the stage must never crash the slice.
 
 ## Labels
-~300–1k own-footage strokes via **Label Studio** (see the datasets section in `30-ml-pipeline.md`):
-clip the ±0.5 s around each stage-6 hit event, label the shot type, iterate the hard pairs. Session-2
-footage is available and processed — labeling effort is the only gate.
+~300–1k own-footage strokes via **Label Studio** — BUILT, see `features/stroke-labeling.md` for the
+schema (coarse 7 + Unsicher/Kein Schlag + who-hit), the ±0.7 s clip window, export CLI usage and the
+import CLI. All 738 Session-2 hit events are labeled and imported (2026-07-05): 695 training rows in
+`stroke_labels.parquet` (141 `unknown`) + 43 `no_hit` in `hit_detection_eval.parquet` — the labeling
+gate is cleared. **Training joins labels → parquets via `video_id + t_s`, never `event_id`**
+(`events.id` uuids regenerate on every stage-6 re-run; `replace_rallies` is delete-then-insert).
 
-## Acceptance (initial targets — revise once own labels exist)
-- Coarse accuracy **≥ 70 %** on held-out own-footage strokes to ship (literature ceiling 77–85 % on
-  clean broadcast data; ours is harder: 30 fps, overhead angle, no netzoom).
+## Acceptance
+- Coarse accuracy **≥ 70 %** as the **LOGO-CV mean** on held-out own-footage games (literature
+  ceiling 77–85 % on clean broadcast data; ours is harder: 12 fps analysis cadence, overhead
+  angle, no netzoom).
+  The model gate blocks pipeline wiring: no stage registration until the mean clears 70 %.
 - `unknown`-rate reported per match in the eval output — an honest "couldn't call it" is required
   behaviour, not a failure mode to minimise at accuracy's expense.
+- Per-class recall reported (drive n=22 and net n=20 are expected to lag — reported, never averaged
+  away); confusion matrix for the hard pairs (drop/net, clear/lift).
+- No metric enters this spec without the command (+ seed) that produced it.
 
 ## Honest limits
-- **Singles first** (locked decision #3); doubles attribution (who of the pair hit) is P3+.
-- **Smash frames are sparse at 30 fps** — the fastest strokes have the fewest usable frames; expect
-  smash recall to lag until 60 fps re-ingest is exercised.
+- **All current labels are doubles** — the earlier "singles first" framing is stale for this batch:
+  the stage classifies doubles footage now; only per-player `player_shot_stats` stays singles-gated,
+  and who-of-the-pair attribution (the banked 4-way hitter label) is P3+.
+- **One session, one lighting, 5 games**: LOGO-CV measures cross-game, not cross-session
+  generalization. A Session-3 re-eval is the real test (fix-later note).
+- **Smash frames are sparse at the 12 fps analysis cadence** — the fastest strokes have the fewest
+  usable frames; expect smash recall to lag until a higher-fps re-ingest (`analysis_fps` job param)
+  is exercised.
 - **Net-play attribution is occlusion-limited** — both players converge on the net; the overhead angle
   stacks them. `unknown` is the correct output there, not a guess.
+- **Shuttle coverage is 21–27 %** per window on our footage — within-arc interpolation helps, but
+  near-empty trajectory windows lean on pose alone; the exporter reports coverage per window.
 - Shot counts feed `player_shot_stats.share_pct` and the report's shot table as **estimates** — the UI
   already labels derived numbers „Schätzung"; keep that framing.

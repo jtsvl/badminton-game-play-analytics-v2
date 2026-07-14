@@ -4,6 +4,7 @@ import { MatchReport } from './pages/MatchReport'
 import { Calibrate } from './pages/Calibrate'
 import { PlayerReview } from './pages/PlayerReview'
 import { RallyReview } from './pages/RallyReview'
+import { HitReview } from './pages/HitReview'
 import { Upload } from './pages/Upload'
 
 export function App() {
@@ -15,6 +16,7 @@ export function App() {
         <Route path="/match/:slug/calibrate" element={<Calibrate />} />
         <Route path="/match/:slug/review" element={<PlayerReview />} />
         <Route path="/match/:slug/rallies" element={<RallyReview />} />
+        <Route path="/match/:slug/hits" element={<HitReview />} />
         <Route path="/upload" element={<Upload />} />
       </Routes>
     </BrowserRouter>

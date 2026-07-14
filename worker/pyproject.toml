@@ -29,6 +29,9 @@ ml = [
   "omegaconf>=2.3",     # WASB backend dep (shuttle stage 5); HRNet config (mixed dict/attr access)
   "tensorboard>=2.20.0", # TrackNetV3 fine-tune training logs (local MPS run, worker/training/)
   "pycocotools>=2.0.11", # TrackNetV3 fine-tune dep (training/eval)
+  "positional-encodings>=6.0", # BST vendored model dep (stroke stage 7, worker/training/)
+  "torchinfo>=1.8",     # BST vendored model dep (stroke stage 7); imported at bst.py module top
+  "xgboost>=3.2.0",
 ]
 dev = [
   "pytest>=8.3",
