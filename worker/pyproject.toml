@@ -32,6 +32,19 @@ ml = [
   "positional-encodings>=6.0", # BST vendored model dep (stroke stage 7, worker/training/)
   "torchinfo>=1.8",     # BST vendored model dep (stroke stage 7); imported at bst.py module top
 ]
+# VideoJev-4B zero-shot stroke pilot (specs/features/stroke-vlm-pilot.md). Separate extra so the
+# core `ml` env is untouched; pins follow upstream requirements-overlay.txt (MCG-NJU/VideoJev).
+# Deliberately absent: flash-linear-attention / flash-attn / causal-conv1d / deepspeed — CUDA-only;
+# transformers' Qwen3.5 layers fall back to pure-torch kernels without them (MPS/CPU path).
+# `av` stays on the ml extra's locked version: the remote code only uses av.open/decode.
+vlm = [
+  "transformers==5.14.1", # exact: the HF snapshot's remote code imports transformers.models.qwen3_5
+  "accelerate>=1.10",
+  "einops>=0.8",
+  "scipy>=1.12",
+  "safetensors>=0.4",
+  "huggingface_hub>=0.30", # `hf download` for the pinned revision
+]
 dev = [
   "pytest>=8.3",
   "ruff>=0.6",

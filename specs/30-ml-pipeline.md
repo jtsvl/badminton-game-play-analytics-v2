@@ -186,6 +186,9 @@ checkpoint head sizes and was refuted). Low-confidence → `unknown`/„Unsicher
 *Accept:* the single ≥ 70 % gate is replaced by the **G0–G5 gate stack** (hit timing, attribution,
 per-class recall, calibrated abstention, outcomes, trainer edit rate) — see v2 spec §9; below-gate
 models are labeling-assist only, never pipeline.
+*Side experiment (2026-10-18, not pipeline):* `features/stroke-vlm-pilot.md` — VideoJev-4B zero-shot on the
+labeled clips, dev/eval protocol, result pending the Mac run. TypeSafe's Jev was evaluated and rejected
+(text-only hosted API) — `features/stroke-classification.md` § Alternatives evaluated.
 
 ## Stage 8 — Insight aggregation (FR-11/12/13/14/26/27)
 Pure functions from tracks/events (TDD these): distance (court-space displacement), avg/top speed, sprints

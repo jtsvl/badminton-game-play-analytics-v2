@@ -156,6 +156,11 @@ def main() -> None:
         train_cli(sys.argv[2:])
         return
 
+    if len(sys.argv) > 1 and sys.argv[1] == "eval-stroke-vlm":
+        from .stroke.vlm_eval import eval_cli
+
+        sys.exit(eval_cli(sys.argv[2:]))
+
     if len(sys.argv) > 1 and sys.argv[1] == "backfill-calib-frames":
         from .backfill_calib_frames import backfill_cli
 

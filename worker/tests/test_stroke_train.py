@@ -11,10 +11,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from worker.stroke.train import (BONE_PAIRS, CLASSES, accuracy, class_weights, confusion,
-                                 encode_labels, fold_split, jitter_shift, load_dataset,
-                                 make_bones, per_class_recall, sweep_tau, to_model_arrays,
-                                 unknown_rate_per_match, unsicher_abstention)
+from worker.stroke.train import (BONE_PAIRS, CLASSES, HARD_PAIRS, accuracy, class_weights,
+                                 confusion, encode_labels, fold_split, hard_pair_block,
+                                 jitter_shift, load_dataset, make_bones, per_class_recall,
+                                 sweep_tau, to_model_arrays, unknown_rate_per_match,
+                                 unsicher_abstention)
 
 
 class TestClassesAndEncoding(unittest.TestCase):
@@ -183,6 +184,19 @@ class TestMetrics(unittest.TestCase):
 
         c = confusion(np.array([0, 0, 1]), np.array([0, 1, 1]), n_class=2)
         np.testing.assert_array_equal(c, [[1, 1], [0, 1]])
+
+
+class TestHardPairBlock(unittest.TestCase):
+    def test_two_by_two_slice_rows_true_cols_pred(self):
+        import numpy as np
+
+        y_true = np.array([CLASSES.index("drop")] * 3 + [CLASSES.index("net")] * 2)
+        y_pred = np.array([CLASSES.index("drop"), CLASSES.index("drop"), CLASSES.index("net"),
+                           CLASSES.index("drop"), CLASSES.index("net")])
+        block = hard_pair_block(confusion(y_true, y_pred), "drop", "net")
+        self.assertEqual(block["labels"], ["drop", "net"])
+        self.assertEqual(block["matrix"], [[2, 1], [1, 1]])
+        self.assertIn(("drop", "net"), HARD_PAIRS)
 
 
 class TestSweepTau(unittest.TestCase):
