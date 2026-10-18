@@ -125,7 +125,9 @@ features/shuttle-tracking.md; 0 = legacy single pass), `WASB_REPO`/`WASB_MODEL`,
 Stroke (stage 7, `features/stroke-classification.md`): `BST_REPO` (vendored BST clone, default
 `worker/.cache/_vendor/BST`), `STROKE_MODEL` (default `models/weights/stroke/bst_best.pt`; sidecar
 `bst_best.json` carries model_version/classes/variant/seq_len/τ/git SHA — same promoted-weights
-convention as shuttle below).
+convention as shuttle below). `STROKE_VLM_MODEL` (VideoJev-4B snapshot dir for the zero-shot pilot CLI
+`eval-stroke-vlm`, default `models/weights/stroke_vlm/VideoJev-4B`, git-ignored; `features/stroke-vlm-pilot.md`
+— pilot only, read by no pipeline stage).
 Landing/in-out (stage-6 sub-step, `features/shuttle-landing-inout.md` — **all defaults untuned until a
 real-footage run**): `LANDING_WINDOW_S` (0.5), `LANDING_MAX_WINDOW_DETS` (8), `LANDING_MIN_DETS` (4),
 `LANDING_MAX_END_GAP_FRAMES` (2), `LANDING_EDGE_MARGIN` (0.04 → located=false),

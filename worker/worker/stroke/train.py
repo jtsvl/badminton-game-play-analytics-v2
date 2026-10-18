@@ -210,6 +210,15 @@ def load_dataset(dataset_dir: Path) -> tuple[dict, "pl.DataFrame"]:  # noqa: F82
 HARD_PAIRS = (("drop", "net"), ("clear", "lift"))  # spec: confusion called out for these
 
 
+def hard_pair_block(cm, a: str, b: str) -> dict:
+    """2x2 slice of a confusion matrix (rows true, cols pred) for one hard pair — shared report
+    format between the BST LOGO-CV and the VideoJev zero-shot pilot (stroke/vlm_eval.py)."""
+    ia, ib = _CLASS_INDEX[a], _CLASS_INDEX[b]
+    return {"labels": [a, b],
+            "matrix": [[int(cm[ia, ia]), int(cm[ia, ib])],
+                       [int(cm[ib, ia]), int(cm[ib, ib])]]}
+
+
 def _none_if_nan(x) -> float | None:
     import math
 
@@ -359,12 +368,6 @@ def run_logo_cv(data: dict, meta, cfg: dict):
     fold_accs = [f["accuracy"] for f in per_fold]
     mean_acc = float(np.mean(fold_accs))
 
-    def _pair_block(a: str, b: str) -> dict:
-        ia, ib = _CLASS_INDEX[a], _CLASS_INDEX[b]
-        return {"labels": [a, b],
-                "matrix": [[int(cm[ia, ia]), int(cm[ia, ib])],
-                           [int(cm[ib, ia]), int(cm[ib, ib])]]}
-
     report = {
         "classes": list(CLASSES),
         "folds": per_fold,
@@ -374,7 +377,7 @@ def run_logo_cv(data: dict, meta, cfg: dict):
         "per_class_recall": {c: _none_if_nan(r) for c, r in
                              zip(CLASSES, per_class_recall(y[confident], pred[confident]))},
         "confusion": cm.tolist(),
-        "hard_pairs": {f"{a}/{b}": _pair_block(a, b) for a, b in HARD_PAIRS},
+        "hard_pairs": {f"{a}/{b}": hard_pair_block(cm, a, b) for a, b in HARD_PAIRS},
         "tau": tau_res,
         "unsicher_abstention": (unsicher_abstention(p_max[~confident], tau_res["tau"])
                                 if (~confident).any() else None),
