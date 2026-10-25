@@ -17,7 +17,7 @@ direct the next slice.
 
 ## Architecture
 ```
-frames (12fps cache) ─┐
+frames (cache; 12→30 fps per analysis-30fps.md) ─┐
 calibration H + mask ──┤→ court crop (geometry.court_crop_box) → ShuttleTracker.predict(crops)
                        │        ↑ isolate target court + restore shuttle resolution   ↓ peaks (model px)
                        │   shuttle.track.build_shuttle_track: map crop→frame→court (apply_homography),
@@ -44,10 +44,16 @@ calibration H + mask ──┤→ court crop (geometry.court_crop_box) → Shutt
   and `--render DIR` → `shuttle/render.py` draws the raw detections in **image space** (scatter +
   annotated key frames + `overlay.mp4`) — the diagnostic that disambiguates detection vs projection.
 
-### Tracker backends (best-model-per-stage, both MIT)
-Both reuse the upstream repos (cloned to `worker/.cache/_vendor/`, git-ignored) + published weights
+### Tracker backends (best-model-per-stage)
+All reuse the upstream repos (cloned to `worker/.cache/_vendor/`, git-ignored) + published weights
 (`models/weights/shuttle/`, git-ignored). Apple-Silicon: MPS-first with a one-shot NaN probe → CPU
-(`PYTORCH_ENABLE_MPS_FALLBACK=1`, fp32); no CoreML in slice 1 (defer).
+(`PYTORCH_ENABLE_MPS_FALLBACK=1`, fp32); no CoreML in slice 1 (defer). Shared helpers (resize, per-clip
+median, blob decode, checkpoint tag) live in `shuttle/base.py`.
+- **TrackNetV5** (`gino6178/TrackNetV5`, ICIP 2026, pinned `9116161`; no LICENSE file — user-confirmed licence
+  grant 2026-10-25) — third backend, **under A/B at 30 fps, not the default**: 5 frames × (RGB + background
+  difference) = 20 ch, motion prompt + R(2+1)D, Lite (α 0.5, thr 0.35) / full (α 1.0, thr 0.30). Input is
+  hand-rolled (its `dataset`/`utils`/`models` names collide with V3's/WASB's in one `--compare` process),
+  weights are converted to plain `weights_only`-loadable files. Spec + rule: `shuttle-tracknetv5.md`.
 - **WASB** (`nttcom/WASB-SBDT`, BMVC2023) — SOTA on the PwC badminton benchmark. HRNet, 3-frame/9ch
   input, ImageNet-normalized, built from `wasb.yaml` via OmegaConf. Weights: MODEL_ZOO WASB/Badminton.
   Needs `omegaconf`.
@@ -60,14 +66,16 @@ Both reuse the upstream repos (cloned to `worker/.cache/_vendor/`, git-ignored) 
 - **Airborne shuttle ≠ ground point.** `apply_homography` maps the **ground** plane; a shuttle in the air
   projects "beyond" its true spot, and a pixel above the court's ground-plane horizon projects toward
   infinity. So court-space (u,v) is a „Schätzung" — and for high shots it is **unusable**, not just noisy.
-- **Frame rate (shuttle = 30 fps; movement = 12 fps).** Shuttle fine-tune/eval clips now ingest at **30 fps**
-  (`enqueue --analysis-fps 30`) so smashes are sampled; the player-movement pipeline stays at the default
-  12 fps. (At 12 fps some dropouts were undersampling, not camouflage.) 60 fps remains a re-ingestable
-  comparison option — see `shuttle-finetune-plan.md` §2b "Framerate decision".
-- **Guard-rail: `gate_track` is fps-coupled.** Its `SMOOTH_WINDOW=9` / `MAX_GAP=8` are 12fps frame-counts
-  (≈0.75 s / ≈0.67 s). The 30fps shuttle path runs only ingest→label→eval (not the movement stages), so this
-  never bites today — but if a 30fps clip is ever pushed through the full movement pipeline, scale them ×2.5
-  via env (`SMOOTH_WINDOW=23`, `GAP_FILL_MAX_FRAMES=20`) or make them duration-based.
+- **Frame rate.** Production ran the shuttle tracker on the "12 fps" cache — which is really **10 fps** on the
+  30 fps Session-2 sources (ingest keep rule) — while the fine-tune was trained/scored on game1 at 30 fps.
+  Shuttle fine-tune/eval clips ingest at **30 fps** (`enqueue --analysis-fps 30`) so smashes are sampled (at
+  10 fps some dropouts were undersampling, not camouflage). User decision 2026-10-25: the **whole pipeline**
+  moves to 30 fps once measured — `features/analysis-30fps.md` (the former 30/12 hybrid is superseded).
+  60 fps remains a re-ingestable comparison option — see `shuttle-finetune-plan.md` §2b "Framerate decision".
+- **Former guard-rail (`gate_track` fps coupling) — resolved.** `SMOOTH_WINDOW`/`MAX_GAP` and every other
+  frame-count knob (rally, landing, spike guard, BoT-SORT buffer) are now **durations** derived from the
+  manifest's measured cadence (`worker/manifest.py`; `GAP_FILL_MAX_S` 0.8, `SMOOTH_WINDOW_S` 0.9,
+  `SHUTTLE_MAX_STEP_PER_S` 5.0 …), so a 30 fps clip through the full movement pipeline needs no env scaling.
 - **DJI ultrawide undistortion is a no-op** → edge positions carry lens error.
 - No shuttle ground truth yet → judged by **eye + auto-stats** (coverage %, gap structure, inter-frame
   step plausibility, % on-court for multi-court leakage), not a measured F1.
@@ -109,7 +117,9 @@ removes the cross-court scatter:
 Plan/runbook: `specs/features/shuttle-finetune-plan.md`. Locked decisions: **fine-tune TrackNetV3 only**
 (WASB stays frozen as the before/after benchmark — its public repo is eval-only); **runs locally on the
 Mac Studio M4 Max (MPS)** (overrides `30-ml-pipeline.md`'s cloud-NVIDIA line; see there); **measure on a
-held-out clip** (whole-clip train/val/test splits, never random frames).
+held-out clip** (whole-clip train/val/test splits, never random frames). *Amended 2026-10-25:* TrackNetV5 is
+added as a third backend and A/B'd against the fine-tuned V3 (`shuttle-tracknetv5.md`); V3-ft stays the
+default until that spec's pre-registered rule passes on a cross-session clip.
 
 **Slice 2a — answer-key + scoreboard infrastructure: BUILT** (this change).
 - **Shuttle labeler** `verify --shuttle` — native-4K frame + hover-loupe for the few-pixel shuttle; click =
@@ -158,10 +168,15 @@ only court-project near-ground events. Then the spec's layered mitigations (moti
 rectification) + 2D speed. Speed/rally/hit remain deferred.
 
 ## Config / env
-`SHUTTLE_TRACKER` (tracknetv3|wasb|fake, default `tracknetv3`), `SHUTTLE_CONF_THR` (0.5), `SHUTTLE_MAX_STEP` (0.5 court units),
+`SHUTTLE_TRACKER` (tracknetv3|tracknetv5|wasb|fake, default `tracknetv3`), `SHUTTLE_CONF_THR` (unset → the
+backend's declared threshold — V5 0.35/0.30 — else 0.5; explicit wins), `SHUTTLE_MAX_STEP_PER_S` (5.0 court
+units per second → per frame step at the measured cadence, `analysis-30fps.md`),
 `SHUTTLE_MASK` (1), `SHUTTLE_AIR_UP` (0.7), `SHUTTLE_AIR_SIDE` (0.08), **`SHUTTLE_AIR_DOWN` (0.0)**,
 **`SHUTTLE_AIR_OUT` (0.0)**, `SHUTTLE_BBOX_MARGIN` (0.02), `SHUTTLE_OVERLAY_GAP_S` (0.3),
-`SHUTTLE_CHUNK_FRAMES` (240, see below), `WASB_REPO`/`WASB_MODEL`, `TRACKNETV3_REPO`/`TRACKNETV3_MODEL`.
+`SHUTTLE_CHUNK_FRAMES` (240, see below), `WASB_REPO`/`WASB_MODEL`/`WASB_BATCH`,
+`TRACKNETV3_REPO`/`TRACKNETV3_MODEL`/`TRACKNETV3_BATCH`/`TRACKNETV3_MEDIAN_SAMPLES`,
+`TRACKNETV5_REPO`/`TRACKNETV5_VARIANT`/`TRACKNETV5_MODEL`/`TRACKNETV5_THR`/`TRACKNETV5_BATCH`/
+`TRACKNETV5_DIFF`/`TRACKNETV5_MEDIAN_SAMPLES` (`shuttle-tracknetv5.md`).
 
 ### Bounded-memory chunked prediction (`SHUTTLE_CHUNK_FRAMES`, default 240)
 The stage used to materialize **every** full-res court crop before calling the tracker (~130 GB for a

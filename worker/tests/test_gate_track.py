@@ -69,6 +69,22 @@ class TestBuildRoleTracks(unittest.TestCase):
             self.assertAlmostEqual(r["u"], 0.30, places=6)
 
 
+class TestCadenceDurations(unittest.TestCase):
+    """Gap fill and smoothing are durations: 0.8 s / 0.9 s = the tuned 8 / 9 frames at the real 10 fps."""
+
+    def test_reference_counts(self):
+        from worker.pipeline import gate_track as gt
+
+        self.assertEqual((gt.MAX_GAP, gt.SMOOTH_WINDOW), (8, 9))
+
+    def test_30fps_counts(self):
+        from worker.manifest import frames_for_seconds
+        from worker.pipeline import gate_track as gt
+
+        self.assertEqual(frames_for_seconds(gt.GAP_FILL_MAX_S, 30.0), 24)
+        self.assertEqual(frames_for_seconds(gt.SMOOTH_WINDOW_S, 30.0), 27)
+
+
 class TestBuildRoleTracksOverlapDedupe(unittest.TestCase):
     """Framewise stitching accepts fragments that OVERLAP the primary's frames (v1 rejected them).
     Overlapping frames must not duplicate rows: prefer the primary's detected row over the reid."""

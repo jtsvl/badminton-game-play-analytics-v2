@@ -88,7 +88,7 @@ heatmap_uri? · placement_uri? · fastest?  (ESTIMATE)` — unique (match_id, pl
 ### track_keyframes  (overlay, ~10 Hz)
 `id · video_id · subject ('player:<id>'|'shuttle') · data jsonb [{t,u,v}]` — unique (video_id, subject)
 
-### pose_keyframes  (skeleton overlay, whole video: ~12 fps in-rally / ~6 Hz between rallies — `features/pose-skeleton-overlay.md`)
+### pose_keyframes  (skeleton overlay, whole video: native cache cadence in-rally (~10 fps today, 30 fps after `features/analysis-30fps.md`) / ~6 Hz between rallies — `features/pose-skeleton-overlay.md`)
 `id · video_id · subject ('player:<id>') · format ('halpe26') · data jsonb [{t, kp:[[x,y,score]×26]}]`
 — unique (video_id, subject). `x,y` are **normalized image coords** (keypoint px ÷ native
 width/height, clamped to [0,1]), not court (u,v): elevated joints break the ground homography.
@@ -106,6 +106,9 @@ params jsonb? · error? · claimed_by? · claimed_at? · started_at? · finished
 > `params.corrections` (rally_review jobs, optional): the trainer's drop/merge edits as pre-shaped
 > `rally_corrections` rows (0011) — written server-side by `rally_sync`, never by the web
 > (`features/rally-shot-review.md` § Correction corpus).
+> `params.analysis_fps` (ingest jobs, optional): the REQUESTED frame-cache rate (`enqueue --analysis-fps`,
+> default `ingest.DEFAULT_ANALYSIS_FPS` 12); the cache's measured rate lands in `frames.json.cadence_fps`
+> (12 on a 30 fps source really gives 10 — `features/analysis-30fps.md`). `params.max_frames`: dev cap.
 
 ### job_runs  (audit/observability log)
 `id · job · match_id? · started_at · finished_at? · is_ok? · detail?`

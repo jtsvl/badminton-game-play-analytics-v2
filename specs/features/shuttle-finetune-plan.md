@@ -17,8 +17,10 @@ clip — not eyeball it.
   (`Frame,Visibility,X,Y`), median-background is the built-in white-wall lever, and it was the
   stronger baseline. **WASB stays frozen** as the before/after benchmark (its public repo is
   eval-only). V3-only is a deliberate scope choice for this slice; if fine-tuned V3 recall stays low
-  on the white-wall test clip, the next lever is **TrackNetV4 motion-attention** (now MIT;
-  `30-ml-pipeline.md:97`), which targets exactly this appearance-poor / motion-distinct failure mode.
+  on the white-wall test clip, the next lever is **motion attention** — TrackNetV4's idea (its code is
+  TF/Keras with no published weights), now carried by **TrackNetV5's motion prompt**, which was added as a
+  third backend under A/B on 2026-10-25 (`shuttle-tracknetv5.md`) — it targets exactly this
+  appearance-poor / motion-distinct failure mode.
 - **Labeling = sparse-click + linear interpolation with a live path preview.** Click anchor frames
   on each arc, mark contact/occlusion boundaries, fill every frame by interpolation, mark gaps
   `visibility=0`. The labeler shows the interpolated path live so the user adds anchors at the arc
@@ -171,15 +173,18 @@ disagreeing (the convention lives there, not in CLAUDE.md).
    sessions / lighting (incl. over-exposure)**, all ingested at **`--analysis-fps 30`** — ≥2 train, 1 val,
    1 held-out test, all distinct sessions so the metric measures generalization, not memorization. Only ONE
    ~30s clip exists today.
-   **Framerate decision (RESOLVED 2026-06-21 → 30 fps).** The 12fps cache can't sample a smash (1–3 frames,
-   blurred), so shuttle fine-tune/eval clips ingest at **`analysis_fps=30`** (`enqueue --analysis-fps 30`;
-   a clean ÷2 of the ~60fps source, matches the public badminton TrackNet distribution, makes smashes
-   trackable). The player-movement pipeline stays at the default **12 fps** (its `gate_track` smoothing/gap
-   params are 12fps frame-counts — see the guard-rail in `shuttle-tracking.md`). **60 fps stays a
-   re-ingestable comparison option**: the ~60fps source is retained in storage, and 30fps sample times are a
-   subset of 60fps, so 30fps labels remap *exactly* onto a 60fps grid (top-up the smashes, no full re-label)
-   for an `eval_shuttle --compare`. f35d0984 (slug `2026-06-14-doppel`) was re-ingested at 30 fps (890
-   frames) and is being re-labeled from scratch.
+   **Framerate decision (RESOLVED 2026-06-21 → 30 fps; widened 2026-10-25 → the whole pipeline).** The
+   12fps cache can't sample a smash (1–3 frames, blurred), so shuttle fine-tune/eval clips ingest at
+   **`analysis_fps=30`** (`enqueue --analysis-fps 30`; matches the public badminton TrackNet distribution,
+   makes smashes trackable). The player-movement pipeline *used to* stay at the default 12 fps; the user
+   decided (2026-10-25) on a **full switch once measured** — `features/analysis-30fps.md` converts every
+   frame-count knob (gate_track, rally, landing, …) to a duration derived from the cache's measured cadence,
+   so the old guard-rail is gone, and it records the 12-vs-30 measurement. Note "12 fps" caches of 30 fps
+   sources really run at **10 fps** (ingest keep rule). **60 fps stays a re-ingestable comparison option**:
+   the 4K originals live in the local `videos/` folder (not in Supabase storage), and 30fps sample times are
+   a subset of 60fps, so 30fps labels remap *exactly* onto a 60fps grid (top-up the smashes, no full
+   re-label) for an `eval_shuttle --compare`. f35d0984 (slug `2026-06-14-doppel`) was re-ingested at 30 fps
+   (890 frames) and is being re-labeled from scratch.
 1. Label the rallies with the new tool (white-wall + over-exposure first), then `import-shuttle-labels`
    to Postgres. **Effort reality:** ~15–30 rallies ≈ 750–1500 labeled frames (a full ~30s clip ≈ 890 frames
    at 30fps); airborne arcs need ~1 anchor every 2–4 frames (time-based, not fps-locked). **Recommended:

@@ -72,8 +72,9 @@ sets it). It's the inherent monocular far-court noise, not a calibration error.
 (`insights.percentile`, linear-interp) of the step-speeds instead of `max`, so one jittery far-court
 frame-pair no longer sets the headline; genuine sustained bursts survive (p98 ~= max on ≤2 samples, so
 short tracks are unchanged). (2) **Stronger smoothing** — the `gate_track` call to
-`geometry.smooth_track` now uses window **9** (~0.75 s @ ~12 Hz), env-tunable via `SMOOTH_WINDOW`
-(default 9; `smooth_track`'s own default stays 5 for other callers). Both unit-tested
+`geometry.smooth_track` now uses window **9** (0.9 s at the real ~10 fps cadence), env-tunable via
+`SMOOTH_WINDOW_S` (default 0.9 s, converted to frames per clip — `features/analysis-30fps.md`;
+`smooth_track`'s own default stays 5 for other callers). Both unit-tested
 (`tests/test_insights.py`, `tests/test_geometry.py`). Still inherent monocular noise on the far court —
 the deeper RC2 fixes (image-space filtering, distance-weighted uncertainty) remain below.
 

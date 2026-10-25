@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import List, Sequence
 
-from .base import Crop, ShuttleDetection
+from .base import Crop, ShuttleDetection, clip_median, decode_heatmap, median_of_frames, resize_rgb
 
 log = logging.getLogger("worker.shuttle.tracknetv3")
 
@@ -34,19 +34,7 @@ BATCH = int(os.environ.get("TRACKNETV3_BATCH", "4"))
 # and SIGKILLs the process. For a static tripod the subsample median ≈ the full median. ≤MEDIAN_SAMPLES
 # frames → stride 1 → byte-identical to the old path.
 MEDIAN_SAMPLES = int(os.environ.get("TRACKNETV3_MEDIAN_SAMPLES", "700"))
-
-
-def _predict_location(heatmap) -> tuple:
-    """Largest-blob bbox (x,y,w,h) from a binary heatmap — faithful reimplementation of the repo's
-    test.predict_location (which we avoid importing because test.py pulls pycocotools)."""
-    import cv2
-    import numpy as np
-
-    if np.amax(heatmap) == 0:
-        return 0, 0, 0, 0
-    cnts, _ = cv2.findContours(heatmap.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    rects = [cv2.boundingRect(c) for c in cnts]
-    return max(rects, key=lambda r: r[2] * r[3])
+THR = 0.5  # heatmap binarisation = the published V3 operating point (shared decode in shuttle/base.py)
 
 
 def _in_dims(seq_len: int, bg_mode: str) -> tuple:
@@ -108,47 +96,32 @@ class TrackNetV3Tracker:
 
     def begin_clip(self, loader) -> None:
         """Compute the per-clip median background ONCE from a stride subsample of the whole clip, so
-        chunked predict() calls share it. Same frames, same resize/BGR→RGB, same dtype as the legacy
-        in-predict computation → byte-identical median, and each chunk sees the clip-wide background
-        (a per-chunk median would differ and change detections)."""
-        import cv2
-        import numpy as np
-
+        chunked predict() calls share it (shared `base.clip_median`: same frames, same resize/BGR→RGB,
+        same dtype as the legacy in-predict computation → byte-identical median, and each chunk sees the
+        clip-wide background — a per-chunk median would differ and change detections)."""
         self._median = None
         if not self.bg_mode:
             return
-        n = len(loader)
-        if n == 0:
-            return
-        mw, mh = self.model_size
-        stride = max(1, n // MEDIAN_SAMPLES)
-        sample = [loader[i] for i in range(0, n, stride)]
-        rgb = np.stack(
-            [cv2.resize(img, (mw, mh))[:, :, ::-1] for _, img in sample if img is not None]
-        ).astype("uint8")
-        self._median = np.median(rgb, axis=0)
+        self._median = clip_median(loader, self.model_size, MEDIAN_SAMPLES)
 
     def predict(self, crops: Sequence[Crop]) -> List[ShuttleDetection]:
-        import cv2
         import numpy as np
         import torch
         from torch.utils.data import DataLoader
 
         from dataset import Shuttlecock_Trajectory_Dataset  # vendored repo
 
-        mw, mh = self.model_size
         frame_ids = [idx for idx, _ in crops]
         # Pre-resize each crop to model size (keeps the median-background cheap) and go BGR→RGB.
-        rgb = np.stack([cv2.resize(img, (mw, mh))[:, :, ::-1] for _, img in crops]).astype("uint8")
+        rgb = np.stack([resize_rgb(img, self.model_size) for _, img in crops]).astype("uint8")
 
-        # Per-clip median from begin_clip when the stage runs chunked; else (direct predict() callers,
-        # e.g. shuttle/render.py) compute it from THESE crops exactly as before. Handing the median to
-        # the dataset (which only computes np.median itself when median=None) caps the full-stack
-        # memory spike (the crash). Channels-last float64, same layout a computed median would have.
+        # Per-clip median from begin_clip when the stage runs chunked; else (direct predict() callers)
+        # compute it from THESE crops exactly as before. Handing the median to the dataset (which only
+        # computes np.median itself when median=None) caps the full-stack memory spike (the crash).
+        # Channels-last float64, same layout a computed median would have.
         median = self._median
         if median is None and self.bg_mode:  # '' / None bg_modes never use a median
-            stride = max(1, len(rgb) // MEDIAN_SAMPLES)
-            median = np.median(rgb[::stride], axis=0)
+            median = median_of_frames(rgb, MEDIAN_SAMPLES)
 
         ds = Shuttlecock_Trajectory_Dataset(
             seq_len=self.seq_len, sliding_step=self.seq_len, data_mode="heatmap",
@@ -166,11 +139,7 @@ class TrackNetV3Tracker:
                     pos = int(di[b, f, 1])  # index into the crops list
                     if pos in best:
                         continue  # padding repeats the last frame — keep the first prediction
-                    hm = y[b, f]
-                    x0, y0, w, h = _predict_location((hm > 0.5).astype("uint8"))
-                    if w == 0 and h == 0:
-                        best[pos] = ShuttleDetection(frame_ids[pos], 0.0, 0.0, 0.0)
-                    else:
-                        best[pos] = ShuttleDetection(
-                            frame_ids[pos], x0 + w / 2, y0 + h / 2, float(hm.max()))
+                    hit = decode_heatmap(y[b, f], THR)
+                    best[pos] = (ShuttleDetection(frame_ids[pos], *hit) if hit
+                                 else ShuttleDetection(frame_ids[pos], 0.0, 0.0, 0.0))
         return [best[i] for i in sorted(best)]

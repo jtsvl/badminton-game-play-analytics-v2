@@ -13,9 +13,16 @@ import logging
 from pathlib import Path
 
 from ..calib_frames import select_calib_frames, upload_calib_frames
+from ..manifest import measured_fps
 
 log = logging.getLogger("worker.pipeline.ingest")
 
+# The REQUESTED cache rate. The keep-rule below (`t >= last_kept + 1/fps`) only lands on the nearest source
+# frame AFTER the target instant, so the real cadence is `source_fps / ceil(source_fps / fps)`: on the 30 fps
+# Session-2 sources 12 → 10 fps, while 30 → 29.97 (native). frames.json therefore records both the request
+# (`analysis_fps`) and the measured `cadence_fps`; every stage converts seconds→frames from the measured
+# value via worker.manifest (specs/features/analysis-30fps.md). The 30 fps default flip waits for the
+# 12-vs-30 measurement recorded in that spec.
 DEFAULT_ANALYSIS_FPS = 12.0
 
 
@@ -98,11 +105,13 @@ def run(ctx) -> None:
         raise RuntimeError("ingest: decoded 0 frames")
     if duration_s is None:
         duration_s = manifest[-1]["t"]
+    cadence_fps = measured_fps(manifest) or analysis_fps  # what the cache REALLY runs at (PTS-based)
 
     (cache_dir / "frames.json").write_text(
         json.dumps(
             {
-                "analysis_fps": analysis_fps,
+                "analysis_fps": analysis_fps,   # requested
+                "cadence_fps": round(cadence_fps, 4),  # measured from the kept frames' PTS
                 "source_fps": fps,
                 "width": width,
                 "height": height,
@@ -146,9 +155,11 @@ def run(ctx) -> None:
     ctx["width"] = width
     ctx["height"] = height
     log.info(
-        "ingest done: %d frames @ %.1f fps cached, %dx%d, %.1fs, still@%.1fs, %d calib snapshots",
+        "ingest done: %d frames cached (requested %.1f fps → actual %.2f fps), %dx%d, %.1fs, "
+        "still@%.1fs, %d calib snapshots",
         kept,
         analysis_fps,
+        cadence_fps,
         width,
         height,
         duration_s,

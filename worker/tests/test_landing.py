@@ -16,11 +16,13 @@ def det(t, x, y, conf=0.7, frame=None, u=0.5, v=0.5):
             "frame": int(round(t * 30)) if frame is None else frame, "u": u, "v": v}
 
 
-def descent_then_flat(n_fall=5, n_flat=4, x=0.5, y0=0.40, dy_fall=0.02, dy_flat=0.001,
+def descent_then_flat(n_fall=8, n_flat=6, x=0.5, y0=0.40, dy_fall=0.02, dy_flat=0.001,
                       u=0.5, v=0.9, t0=10.0, dt=1 / 30, conf=0.8):
     """A shuttle falling (vy≈0.6/s) then resting (vy≈0.03/s) — a clean visible landing.
 
-    The first detection of the flat tail is the floor-contact candidate; it carries (u, v)."""
+    The first detection of the flat tail is the floor-contact candidate; it carries (u, v). The
+    fixture is a 30 fps cache (frame = round(t·30)), so the detection-count thresholds derive from
+    that cadence: 14 dets ≈ 0.43 s clears the 0.4 s "sparse" floor (12 dets at 30 fps)."""
     dets = []
     y = y0
     for i in range(n_fall):
@@ -90,7 +92,10 @@ class TestDetectLanding(unittest.TestCase):
 
     def test_terminal_frame_gap_is_straddle(self):
         dets = descent_then_flat()
-        dets[-1]["frame"] = dets[-2]["frame"] + 5   # dropout right at contact
+        # dropout right at contact: a > 0.2 s gap (7 frames at 30 fps) between the last two detections,
+        # with the time advanced too so the (frame, t) span still reads as a 30 fps cache
+        dets[-1]["frame"] = dets[-2]["frame"] + 7
+        dets[-1]["t"] = dets[-2]["t"] + 7 / 30
         out = lnd.detect_landing(dets)
         self.assertFalse(out["located"])
         self.assertEqual(out["reason"], "straddle")
@@ -103,7 +108,7 @@ class TestDetectLanding(unittest.TestCase):
 
     def test_trajectory_that_stops_while_falling_is_no_contact_and_never_extrapolated(self):
         # constant fast descent to the very last det (occlusion / mask exit / between-frame contact)
-        dets = descent_then_flat(n_fall=9, n_flat=0)
+        dets = descent_then_flat(n_fall=14, n_flat=0)
         out = lnd.detect_landing(dets)
         self.assertFalse(out["located"])
         self.assertEqual(out["reason"], "no_contact")
@@ -111,7 +116,7 @@ class TestDetectLanding(unittest.TestCase):
         self.assertNotIn("v", out)
 
     def test_flat_only_trajectory_is_no_descent(self):
-        dets = descent_then_flat(n_fall=0, n_flat=8)
+        dets = descent_then_flat(n_fall=0, n_flat=14)
         out = lnd.detect_landing(dets)
         self.assertFalse(out["located"])
         self.assertEqual(out["reason"], "no_descent")
@@ -134,7 +139,7 @@ class TestLandingEvent(unittest.TestCase):
         self.assertLessEqual(p["confidence"], 1)
 
     def test_degraded_payload_is_uncertain_without_position(self):
-        p = lnd.landing_event(descent_then_flat(n_fall=9, n_flat=0))
+        p = lnd.landing_event(descent_then_flat(n_fall=14, n_flat=0))
         self.assertFalse(p["located"])
         self.assertEqual(p["call"], "uncertain")
         self.assertIsNone(p["confidence"])
@@ -180,6 +185,40 @@ class TestLandingEvent(unittest.TestCase):
         self.assertEqual(p_s["call"], "uncertain")
         self.assertEqual(p_d["call"], "uncertain")   # 24 cm inside < band — honest near-line call
         self.assertGreater(p_d["margin_cm"], p_s["margin_cm"])
+
+
+class TestCadenceAwareCounts(unittest.TestCase):
+    """The count thresholds are durations (specs/features/analysis-30fps.md): 4 detections at the real
+    10 fps cadence the values were tuned on ≡ 12 detections at 30 fps (both 0.4 s)."""
+
+    def test_reference_cadence_reproduces_the_tuned_counts(self):
+        self.assertEqual(lnd.landing_counts(10.0),
+                         {"max_window_dets": 8, "min_dets": 4, "max_end_gap_frames": 2})
+        self.assertEqual((lnd.LANDING_MAX_WINDOW_DETS, lnd.LANDING_MIN_DETS, lnd.LANDING_MAX_END_GAP_FRAMES),
+                         (8, 4, 2))
+
+    def test_30fps_scales_the_counts(self):
+        self.assertEqual(lnd.landing_counts(30.0),
+                         {"max_window_dets": 24, "min_dets": 12, "max_end_gap_frames": 6})
+
+    def test_nine_detections_are_sparse_at_30fps_but_enough_at_10fps(self):
+        dets = descent_then_flat(n_fall=5, n_flat=4)          # 9 dets = 0.27 s on a 30 fps cache
+        self.assertEqual(lnd.detect_landing(dets)["reason"], "sparse")   # cadence inferred from frames
+        out = lnd.detect_landing(dets, fps=10.0)              # the same 9 dets would be 0.8 s at 10 fps
+        self.assertTrue(out["located"])
+        self.assertAlmostEqual(out["v"], 0.9)
+
+    def test_landing_event_passes_fps_through(self):
+        dets = descent_then_flat(n_fall=5, n_flat=4)
+        self.assertFalse(lnd.landing_event(dets)["located"])
+        self.assertTrue(lnd.landing_event(dets, fps=10.0)["located"])
+
+    def test_detections_without_frames_fall_back_to_the_reference_cadence(self):
+        dets = [{k: v for k, v in d.items() if k != "frame"} for d in descent_then_flat(n_fall=5, n_flat=4)]
+        for d in dets:
+            d["frame"] = 0   # degenerate frame span → unmeasurable → REFERENCE_FPS (10) counts apply
+        out = lnd.detect_landing(dets)
+        self.assertTrue(out["located"])
 
 
 class TestWinnerHalf(unittest.TestCase):

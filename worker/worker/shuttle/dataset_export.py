@@ -1,14 +1,21 @@
-"""Export shuttle labels → a TrackNetV3 fine-tune dataset that is IDENTICAL to what inference feeds.
+"""Export shuttle labels → a TrackNet (V3 or V5) fine-tune dataset that is IDENTICAL to what inference feeds.
 
-The vendored `dataset.py` enforces a strict on-disk contract and asserts on every deviation, and the
-fine-tune only closes the white-wall domain gap if the training frames match the inference frames. So this
-exporter emits the SAME airspace-masked, cropped, 512x288 frames the tracker sees at run time
-(`pipeline/shuttle.py:80-96` → `tracknetv3.py:108-118`), with the label X,Y in that 512x288 pixel space.
+The vendored `dataset.py` (V3 and its near-copy in V5) enforces a strict on-disk contract and asserts on
+every deviation, and the fine-tune only closes the white-wall domain gap if the training frames match the
+inference frames. So this exporter emits the SAME airspace-masked, cropped, 512x288 frames the tracker sees
+at run time (`pipeline/shuttle.py` CropLoader → `shuttle/base.resize_rgb`), with the label X,Y in that
+512x288 pixel space.
 
 Layout written (one clip → one match → one rally, assigned to one split):
     {out}/{split}/match{N}/frame/{rally}/{F}.png   PNG, F = 0-based contiguous frame (so 0.png exists)
     {out}/{split}/match{N}/csv/{rally}_ball.csv     Frame,Visibility,X,Y  (corrected_csv/ for the test split)
-    {out}/{split}/match{N}/median.npz               key 'median', HWC (288,512,3) uint8 — the concat lever
+    {out}/{split}/match{N}/median.npz               key 'median', HWC (288,512,3) float64 — what np.median
+                                                    returns and what upstream's own preprocess writes: V3's
+                                                    `concat` casts it to uint8 itself, V5's `subtract_concat`
+                                                    SUBTRACTS it (a uint8 median would wrap on negatives)
+`--seq-len` is the window the trainer builds (8 for V3, 5 for V5 — a rally shorter than it yields zero
+windows); `--frames A:B` exports only a span of the clip so a within-clip rally split is explicit and
+recorded (specs/features/shuttle-tracknetv5.md).
 
 Pure mapping (match-dir int-sortability, csv routing, 0-based Frame, full-frame→512x288) is TDD'd in
 tests/test_dataset_export.py, alongside a byte-identity check that masked_model_crop equals the pipeline's
@@ -29,11 +36,39 @@ from .label import interpolate_anchors
 
 log = logging.getLogger("worker.shuttle.dataset_export")
 
-MODEL_W, MODEL_H = 512, 288        # TrackNetV3 input (utils/general HEIGHT=288, WIDTH=512)
-SEQ_LEN = 8                        # vendored train.py default; a rally shorter than this yields ZERO windows
+MODEL_W, MODEL_H = 512, 288        # TrackNet input (utils/general HEIGHT=288, WIDTH=512 in V3 and V5)
+SEQ_LEN = 8                        # TrackNetV3's train.py default window; TrackNetV5 trains with 5 (--seq-len)
 
 
 # --- pure mapping helpers (TDD) -------------------------------------------------------------------
+
+def check_rally_length(n_frames: int, seq_len: int = SEQ_LEN) -> None:
+    """A rally shorter than the trainer's window builds ZERO training windows (sliding_step=1,
+    drop_last=True) — refuse loudly instead of exporting a dataset that silently trains on nothing."""
+    if seq_len < 1:
+        raise ValueError(f"seq_len must be ≥ 1 (got {seq_len})")
+    if n_frames < seq_len:
+        raise ValueError(
+            f"rally has {n_frames} frames (< seq_len {seq_len}) — train.py would build ZERO windows "
+            f"from it (sliding_step=1, drop_last=True). Label a longer span."
+        )
+
+
+def select_dense_range(dense: Sequence[Tuple], frame_range: Optional[Tuple[int, int]]) -> List[Tuple]:
+    """Keep only the dense label rows whose manifest position lies in the inclusive [a, b] span (None →
+    all). This is how a within-clip train/val/test split by rally is made explicit."""
+    if not frame_range:
+        return list(dense)
+    a, b = frame_range
+    return [d for d in dense if a <= int(d[0]) <= b]
+
+
+def frames_median(rgb_frames: Sequence) -> "object":
+    """The match median the loaders read: np.median over the exported RGB frames, kept as float64 HWC
+    (the upstream `preprocess_images.py` format). Not cast to uint8 — V5's subtract_concat subtracts it."""
+    import numpy as np
+
+    return np.median(np.stack(rgb_frames), axis=0)
 
 def match_name(n: int) -> str:
     """Match dir name. Must be integer-sortable: get_rally_dirs sorts by int(s.split('match')[-1])."""
@@ -121,10 +156,11 @@ def _clear_stale_split_caches(out: Path) -> None:
 def export_clip(
     *, cache_dir, split: str, match_n: int, out_dir, poly_px: Sequence,
     rally_id: str, labels: Optional[Mapping] = None, mask: bool = MASK,
+    seq_len: int = SEQ_LEN, frame_range: Optional[Tuple[int, int]] = None,
 ) -> dict:
-    """Export one labeled clip into {out}/{split}/match{N}/ as a single rally. Returns a summary dict."""
+    """Export one labeled clip (or the `frame_range` span of it) into {out}/{split}/match{N}/ as a single
+    rally. Returns a summary dict."""
     import cv2
-    import numpy as np
     from PIL import Image
 
     cache = Path(cache_dir)
@@ -134,12 +170,9 @@ def export_clip(
     if labels is None:
         labels = json.loads((cache / "shuttle_labels.json").read_text(encoding="utf-8"))
 
-    dense = interpolate_anchors(labels.get("anchors", []), labels.get("boundaries", []))
-    if len(dense) < SEQ_LEN:
-        raise ValueError(
-            f"rally has {len(dense)} frames (< seq_len {SEQ_LEN}) — train.py would build ZERO windows "
-            f"from it (sliding_step=1, drop_last=True). Label a longer span."
-        )
+    dense = select_dense_range(interpolate_anchors(labels.get("anchors", []), labels.get("boundaries", [])),
+                               frame_range)
+    check_rally_length(len(dense), seq_len)
 
     air, crop_box = crop_geometry(poly_px, frame_w, frame_h)
     x0, y0, x1, y1 = crop_box
@@ -166,11 +199,13 @@ def export_clip(
         rgb_frames.append(rgb)
         Image.fromarray(rgb).save(frame_dir / f"{row['Frame']}.png")
 
-    # median.npz per match dir: HWC (288,512,3) uint8 — what dataset.py:636 Image.fromarray consumes for
-    # bg_mode=concat. Generated from the SAME masked crops (do NOT call upstream get_match_median: it reads
-    # mp4s/per-rally npz we don't have).
-    median = np.median(np.stack(rgb_frames), axis=0).astype("uint8")
-    np.savez(match_dir / "median.npz", median=median)
+    # median.npz per match dir: HWC (288,512,3) float64, the upstream preprocess format. V3's concat path
+    # casts it to uint8 itself (dataset.py `Image.fromarray(median_img.astype('uint8'))` — byte-identical
+    # to the old uint8 export), V5's subtract_concat subtracts it as float. Generated from the SAME masked
+    # crops (do NOT call upstream get_match_median: it reads mp4s/per-rally npz we don't have).
+    import numpy as np
+
+    np.savez(match_dir / "median.npz", median=frames_median(rgb_frames))
 
     csv_path = match_dir / csv_relpath(rally_id, split)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,7 +218,8 @@ def export_clip(
     n_vis = sum(1 for r in rows if r["Visibility"] == 1)
     summary = {
         "split": split, "match": match_name(match_n), "rally": rally_id,
-        "frames": len(rows), "visible": n_vis, "crop_box": crop_box,
+        "frames": len(rows), "visible": n_vis, "crop_box": crop_box, "seq_len": seq_len,
+        "frame_range": list(frame_range) if frame_range else None,
         "frame_dir": str(frame_dir), "csv": str(csv_path), "median": str(match_dir / "median.npz"),
     }
     log.info("exported %d frames (%d visible) → %s [crop=%s]", len(rows), n_vis, frame_dir, crop_box)
@@ -195,15 +231,23 @@ def export_cli(argv: Sequence[str] | None = None) -> int:
 
     from ..config import load_config
 
+    from ..eval_shuttle import parse_frame_range
+
     ap = argparse.ArgumentParser(prog="worker export-shuttle-dataset",
-                                 description="Export shuttle_labels → a TrackNetV3 fine-tune dataset (one clip).")
+                                 description="Export shuttle_labels → a TrackNet (V3/V5) fine-tune dataset (one clip).")
     ap.add_argument("--video-id", required=True)
     ap.add_argument("--split", required=True, choices=["train", "val", "test"])
     ap.add_argument("--match", type=int, required=True, help="match{N} number (must be unique per split)")
     ap.add_argument("--out", default="data", help="dataset root (default: data/)")
     ap.add_argument("--rally", help="rally id (default: clip id prefix)")
     ap.add_argument("--file", help="shuttle_labels.json path (default: <frame_cache>/<video_id>/shuttle_labels.json)")
+    ap.add_argument("--seq-len", type=int, default=SEQ_LEN,
+                    help=f"trainer window: a rally shorter than this yields zero windows (default {SEQ_LEN} = "
+                         "TrackNetV3; use 5 for TrackNetV5)")
+    ap.add_argument("--frames", metavar="A:B",
+                    help="export only manifest positions A..B (inclusive) — an explicit within-clip rally split")
     args = ap.parse_args(argv)
+    frame_range = parse_frame_range(args.frames)
 
     cfg = load_config()
     cache_dir = Path(cfg.frame_cache_dir).expanduser() / args.video_id
@@ -217,9 +261,13 @@ def export_cli(argv: Sequence[str] | None = None) -> int:
         raise SystemExit(f"no calibration polygon for {args.video_id} — calibrate must run first")
 
     rally_id = args.rally or args.video_id.split("-")[0]
+    if frame_range:
+        rally_id = f"{rally_id}_{frame_range[0]}-{frame_range[1]}"
     summary = export_clip(cache_dir=cache_dir, split=args.split, match_n=args.match,
-                          out_dir=args.out, poly_px=poly, rally_id=rally_id, labels=labels)
-    print(f"exported {summary['frames']} frames ({summary['visible']} visible) "
+                          out_dir=args.out, poly_px=poly, rally_id=rally_id, labels=labels,
+                          seq_len=args.seq_len, frame_range=frame_range)
+    print(f"exported {summary['frames']} frames ({summary['visible']} visible, seq_len {summary['seq_len']}"
+          f"{', frames ' + args.frames if args.frames else ''}) "
           f"→ {summary['split']}/{summary['match']}/frame/{summary['rally']}")
     print("  NOTE: train.py needs all THREE splits (train/val/test) populated; export each clip separately.")
     return 0

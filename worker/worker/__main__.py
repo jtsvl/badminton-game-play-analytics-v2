@@ -161,6 +161,16 @@ def main() -> None:
 
         sys.exit(eval_cli(sys.argv[2:]))
 
+    if len(sys.argv) > 1 and sys.argv[1] == "convert-tracknetv5":
+        from .shuttle.tracknetv5 import convert_cli
+
+        sys.exit(convert_cli(sys.argv[2:]))
+
+    if len(sys.argv) > 1 and sys.argv[1] == "bench-fps":
+        from .bench_fps import main as bench_main
+
+        sys.exit(bench_main(sys.argv[2:]))
+
     if len(sys.argv) > 1 and sys.argv[1] == "backfill-calib-frames":
         from .backfill_calib_frames import backfill_cli
 

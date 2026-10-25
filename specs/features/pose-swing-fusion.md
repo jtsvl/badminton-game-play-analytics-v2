@@ -66,10 +66,12 @@ boundaries of every kept rally are the machine's own boundaries. Consequences:
   `SWING_MERGE_S`=0.3 s coalesce. No local-max logic — at 12 fps a swing is 1–2 samples, peak
   detection is degenerate.
 
-**Honest limit — 12 fps:** the analysis cache is 12 fps; a swing's forward phase is 1–2 frames.
-This signal is an **activity cue** ("racket-like arm motion in this window"), not a hit timer —
-±83 ms timing is fine for veto/bridge and is one more reason hit/serve *timing* stays stage-7 /
-future work.
+**Honest limit — 12 fps:** the analysis cache is "12 fps" (really 10 fps on the 30 fps sources —
+`features/analysis-30fps.md`); a swing's forward phase is 1–2 frames. This signal is an **activity
+cue** ("racket-like arm motion in this window"), not a hit timer — ±83 ms timing is fine for
+veto/bridge and is one more reason hit/serve *timing* stays stage-7 / future work. The strength
+thresholds (`SWING_MIN_TLPS` 3.0, `RALLY_SWING_BRIDGE_MIN_STRENGTH` 4.0) were tuned on that cadence's
+distributions and are re-checked, not rescaled, in the 30 fps measurement.
 
 **One operating threshold, one dropped:** the veto would have filtered at a low bar (any plausible
 arm activity saves a rally) — measured 2026-07-03 not to separate real short rallies from
