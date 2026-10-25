@@ -1,5 +1,11 @@
 # Feature — Stroke classification (pipeline stage 7)
 
+> **SUPERSEDED (2026-07-13) by `specs/features/stroke-classification-v2.md`.** The v2 rebuild
+> governs all new stroke work. This file stays as v1 reference: its measurements (Phase-1 slot
+> coverage, Phase-2 LOGO-CV 0.400 → gate FAILED, GBDT spike 0.536 → gate FAILED, pipeline never
+> wired) remain valid history; its design decisions do not. Known error corrected in v2 §2: the
+> taxonomy claim below (ShuttleSet class counts) was refuted 0:3 in the Phase-0 verification.
+
 **Status: DESIGN LOCKED (2026-07-05) — build in progress on `feat/stroke-classification`.**
 FR-21/22/23. See `specs/30-ml-pipeline.md` stage 7 and `specs/40-worker-contract.md`.
 Nothing below is BUILT unless explicitly marked so.
@@ -35,6 +41,110 @@ can't confidently call bucketed as **`unknown`** and surfaced in the UI, never h
   All 5 Session-2 games, all doubles, one session/lighting; source video 30 fps, but the frame
   cache all stages read is the **12 fps analysis cadence** (`ingest.DEFAULT_ANALYSIS_FPS`).
 
+## Alternative candidate: trajectory-geometry GBDT (spike — MEASURED 2026-07-12)
+
+**Measured 2026-07-12 (full sanctioned sweep in the runbook §7, `uv run python -m worker
+train-stroke-gbdt --seed 42 [--eta 0.05 --n-estimators 400 --ppos]`, worker git `8410897`):
+best mean LOGO-CV accuracy 0.536 ± 0.023 (pooled 0.534; seed 43/44 replicates 0.526/0.523;
+bit-deterministic on CPU) — GATE FAILED vs ≥ 0.70, but decisively above BST4's 0.400 ± 0.056
+(+12–14 pp, beyond the ~5–8 pp fold-noise band) at a fraction of the cost. net/drive recall
+recovered from 0.00/0.00 to 0.30/0.14; smash lags at 0.21; τ per FR-22 still unsatisfiable
+(knee at 0 — no confidence separation). Per the locked decision rules (0.5–0.7 → stop and
+discuss): stopped — no pipeline wiring, no promotion. Next levers on the table: more labeled
+sessions, net/drive mining from unlabeled hits, near-half recovery v2, 30 fps re-ingest for
+smash time-resolution.**
+
+**Status: DESIGN, approved spike — eval only.** No pipeline wiring and no promotion path in this
+spike regardless of outcome; a gate pass triggers a user decision on the model family, nothing
+more. Motivation: the BST4 failure is a **generalization gap** (train 0.945 vs held-out 0.402 on
+554 rows — memorization), and the label-ambiguity theory was tested and killed 2026-07-12
+(clean-clip accuracy 0.383 ≈ ambiguous 0.411; class-controlled CMH OR 0.92 [0.62–1.37]) — so the
+lever is the **representation**, not the optimizer or the labels. Hand-crafted hit-to-hit
+trajectory geometry + XGBoost is the regime where GBDTs beat deep nets on < 10k tabular samples
+(arXiv:2207.08815); the closest published comparable classifies ~these 7 classes at **72.1 %**
+with XGBoost on 7 such features (Sensors 24(13):4372). BST's own ablation ranks shuttle > pose,
+and shuttle coverage near hits is dense (median in-window coverage 1.00; measured on this cache:
+every hit has a shuttle detection within 0.1 s; hit-to-hit segments carry median 5 detections,
+≥ 2 in 95 %).
+
+### Protocol — identical to BST4 by construction
+Same `stroke/train.py` functions (`fold_split`, `sweep_tau`, metrics): 5 LOGO folds keyed by
+`video_id`; train on the 554 confident rows only; every held-out-game row (confident + the 141
+Unsicher) gets exactly one OOF prediction; τ per FR-22; **gate = mean LOGO-CV accuracy ≥ 0.70**;
+same `report.json` shape (`torch_version` → `xgboost_version`, `device` = `"cpu"`, one additive
+key `feature_importance_gain` = mean gain across fold models). Runs land in
+`stroke_runs/<UTC>_gbdt_traj/` with the same `oof_predictions.parquet` schema. Decision rules
+(locked): < 5–8 pp over BST4's 0.400 is noise at these fold sizes; 0.5–0.7 → stop and discuss
+(levers: more labeled sessions, net/drive mining from unlabeled hits, near-half recovery v2);
+≥ 0.70 → gate pass, user decides. Determinism: `hist` on CPU, `nthread=1`, per-fold seeds —
+bit-reproducible (no MPS caveat).
+
+### Features (28 core + 3 optional player features, all NaN-able Float64)
+Per labeled hit, from its **hit-to-hit segment**: outgoing `[t0, t1]` where t1 = next *detected*
+hit in the same rally (time-span lookup, `hits_in_rallies` semantics) else `rally.t_end_s`
+(labeled videos have no landing events); incoming `[t_prev, t0]`, absent for the first hit.
+Anchor/endpoint = nearest `shuttle.parquet` row within 0.1 s; **no interpolation** — endpoints
+and apex are read off real detections only. Coordinates: image-normalized `px/W, py/H`
+(homography-free) plus court `(u,v) = apply_homography(H, px, py)` **at anchor points only**
+(the shuttle parquet's in-flight u,v are airborne-projection garbage); homography per video via
+`store.get_calibration`, horizon/out-of-range → NaN.
+
+- **A rally context**: `first_of_rally`, `hit_idx_in_rally` (both recomputed from events+rallies,
+  mechanical), `out_end_is_rally_end` (measured: rally_end boundaries inflate smash flight time —
+  this flag lets trees correct for it).
+- **B timing**: `flight_time_out`, `flight_time_in`.
+- **C position at hit (court)**: `hit_dist_net` |v−0.5|, `hit_u_center_dist` |u−0.5|, `hit_v_raw`
+  (the one raw-v exception — near/far conditioning for perspective-scaled image-y magnitudes).
+- **D outgoing displacement (court)**: `out_end_dist_net`, `out_dv_abs`, `out_du_abs`,
+  `out_crossed_net`, `out_speed_uv`.
+- **E incoming displacement (court)**: `in_dv_abs`, `in_speed_uv`.
+- **D′/E′ image-space displacement** (user-approved amendment, 2026-07-12): `out_dpxn_abs`,
+  `out_dpyn_abs`, `out_speed_img`, `in_speed_img`. **Measured on the real export**: the floor
+  projection of *elevated* contact points is unusable for ~63 % of hits (median offset ≈ one
+  court length; high far-court contacts sit above the camera horizon, where the projection
+  flips sign — non-monotonic garbage, not noise; the same reason shuttle.parquet's own
+  in-flight u/v are junk). Picture-unit displacement is always computable and consistent; the
+  court groups C/D/E stay as sparse columns (valid ≈ 37 %, mostly low near-court contacts —
+  the missingness itself is inference-available signal), and `ppos_` inherits that ≈ 37 %
+  coverage since it measures distance to the projected contact point.
+- **F image-y arc**: `hit_pxn`, `hit_pyn`, `out_apex_rise`, `out_apex_t_frac`, `out_end_drop`,
+  `out_py_slope_early`, `in_apex_rise` (probe on real data: apex-rise alone rank-orders
+  lift .093 ≫ clear .018 > drive .012 > drop .003 > smash/net/serve ≈ 0 — the family works at
+  the 12 fps cadence).
+- **G segment quality**: `n_dets_out`, `n_dets_in` (density loss on fast low shots is itself an
+  inference-available signal).
+- **P optional, ablation-only** (`ppos_` prefix): `ppos_min_dist_same_half`,
+  `ppos_min_dist_other_half` (distance from the projected contact point to the nearest tracked
+  player on each half — geometric scene facts, **no hitter attribution anywhere**; every
+  which-half-hit signal measured ~50/50 on this footage), `ppos_n_slots_filled`.
+
+Side-invariance by **reparameterization, not flipping**: net-relative unsigned quantities
+(|v−0.5|, |Δv|, crossed_net) need no hit-side inference. NaN policy: XGBoost-native missing
+routing, no sentinels; degradation is per-feature, never per-row — all 695 label rows emit a
+vector (554 train + 141 Unsicher calibration).
+
+**Leakage rules**: the human `hitter` label is meta-only, never a feature (unavailable at
+inference); all *detected* hits are segment boundaries incl. the 43 `no_hit` false positives
+(inference-consistent; ~5.8 % of segments have one corrupted boundary — accepted);
+no `winner_side`/`end_shot_type` (near-direct label leakage); no per-video constants
+(video-ID proxies under LOGO-CV).
+
+### Sanctioned knobs (locked)
+`multi:softprob`, `tree_method=hist`, class-weighted sample weights always on (same
+inverse-frequency `class_weights`), fixed `num_boost_round` — **no early stopping** (no honest
+validation set inside a LOGO fold; same fixed-budget rationale as BST). Grid:
+`max_depth ∈ {3,4}`, `eta ∈ {0.05,0.1}`, `n_estimators ∈ {200,400}`,
+`(subsample, colsample) ∈ {(0.8,0.8),(1.0,1.0)}`, plus one `--ppos` ablation run on the best
+core config (user-locked 2026-07-12: shuttle-only v1 first, player features measured
+separately). Every run gets a runbook row (command + seed), `worker/training/bst_stroke_train.md` §7.
+
+### Build shape
+`stroke/traj.py` (pure `build_feature_row` + `export-stroke-traj` CLI →
+`worker/.labeling/stroke_traj/features.parquet`, one row per label with provenance columns) and
+`stroke/gbdt.py` (`train-stroke-gbdt` CLI; LOGO protocol parameterized by a `fit_predict`
+callable so the protocol tests torch- and xgboost-free). `xgboost` joins the `ml` extra
+(native Booster API — no scikit-learn dependency).
+
 ## Model
 **BST** — Chang et al., *BST: Badminton Stroke-type Transformer for Skeleton-based Action Recognition
 in Racket Sports*, CVPRW 2026, arXiv:2502.21085,
@@ -43,8 +153,10 @@ TCNs (two player skeletons, shuttle trajectory, player court positions) → 2-la
 Its expected inputs match our artifacts 1:1 — MMPose-style 2D skeletons, **TrackNetV3** shuttle
 trajectory in [0,1], court positions from feet in [0,1].
 Taxonomy: coarse 7 (FR-23): `clear, smash, drop, net, drive, lift, serve` + **`unknown`** below the
-confidence threshold (FR-22). *(Correction to earlier revisions: ShuttleSet is 35 classes / 25 merged;
-BadmintonDB is the 18-class set.)* Iterate the hard pairs (drop/net, clear/lift) before growing the
+confidence threshold (FR-22). *(This revision's claim "ShuttleSet is 35 classes / 25 merged;
+BadmintonDB is the 18-class set" was REFUTED 0:3 in the v2 Phase-0 verification: ShuttleSet's
+native vocabulary IS 18 fine types (+unknown); 35/25 are the BST checkpoint head sizes — see
+`stroke-classification-v2.md` §2.)* Iterate the hard pairs (drop/net, clear/lift) before growing the
 taxonomy.
 
 ## Locked decisions (user, 2026-07-05 — do not relitigate silently)

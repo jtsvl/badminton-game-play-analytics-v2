@@ -186,8 +186,8 @@ answer key exists.
 
 ## Stage 7 — Stroke classification (FR-21/22/23)
 **Governed by `features/stroke-classification-v2.md` (signed off 2026-07-13)** — v1
-(`features/stroke-classification.md`) is superseded: its build failed the 0.70 gate (LOGO-CV 0.400)
-and was never wired. v2 in one line: learned hit detection (HitNet-pattern GRU + audio-onset timing
+(`features/stroke-classification.md`) is superseded: its build failed the 0.70 gate (LOGO-CV 0.400,
+GBDT spike 0.536) and was never wired. v2 in one line: learned hit detection (HitNet-pattern GRU + audio-onset timing
 refinement) → 5-way hitter attribution → **BST-4-slot** (Chang et al., CVPRW 2026, arXiv:2502.21085,
 MIT) from the ShuttleSet-25 `_merged` checkpoint, trained on **coarse-8** (17 fine labels for
 labeling; ShuttleSet is natively 18 fine types — the earlier "35/25 classes" claim here mixed in the

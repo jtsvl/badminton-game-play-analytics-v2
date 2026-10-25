@@ -39,6 +39,8 @@ always surfaced with uncertainty (the UI already says „Schätzung").
 6. App is **non-distributed / non-commercial** → pick the **best model per stage** regardless of license
    (AGPL/CC-BY-NC/Adobe-NC all OK). Only hard-avoid: deps with *no license grant* (e.g. Deep-EIoU).
    If it ever becomes distributed/commercial, revisit (RF-DETR/RTMDet + own-footage training).
+   **User-granted exceptions (2026-07-13): BadmintonDB and VideoBadminton** (both no license grant)
+   may be used — incl. models trained on them — as long as the app stays non-distributed.
 
 ## Monorepo map
 `/specs` specs · `/web` Vite+React18+TS app · `/worker` Python CV/ML pipeline · `/supabase` migrations+seed ·

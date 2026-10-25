@@ -60,6 +60,12 @@ def _slice_for(job: dict) -> tuple[list[str], str | None]:
         # Re-run tracking identity (gate_track rebuilds tracks.parquet from cached detections —
         # no re-detect) + everything downstream of it. Backfill path for stitching improvements.
         return ["gate_track", "rally_sync", "aggregate", "overlay"], _return_status(job)
+    if stage == "hit_review":
+        # stroke-classification-v2 §5/§9: trainer corrected the draft hit list in /match/:slug/hits.
+        # The web already wrote the corrected `events` directly; this only persists the append-only
+        # hit_corrections corpus (the learned hit-detector's eval/training GT). Never changes match
+        # status (return None) — hit-labeling must not disturb the report gate.
+        return ["hit_review"], None
     return [stage], None
 
 
@@ -152,6 +158,18 @@ def main() -> None:
 
     if len(sys.argv) > 1 and sys.argv[1] == "train-stroke":
         from .stroke.train import train_cli
+
+        train_cli(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "export-stroke-traj":
+        from .stroke.traj import export_cli
+
+        export_cli(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "train-stroke-gbdt":
+        from .stroke.gbdt import train_cli
 
         train_cli(sys.argv[2:])
         return

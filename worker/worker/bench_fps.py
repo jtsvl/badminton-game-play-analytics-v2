@@ -44,6 +44,7 @@ WRITE_METHODS = frozenset({
     "upsert_player_match_stats", "upsert_player_shot_errors", "upsert_player_shot_stats",
     "upsert_track_keyframes", "upsert_pose_keyframes", "delete_pose_keyframes",
     "upsert_detection_corrections", "upsert_shuttle_labels", "insert_rally_corrections",
+    "insert_hit_corrections",
     "replace_rallies", "log_job_run", "create_player", "create_match", "create_video",
     "create_match_player", "upload", "upload_resumable",
 })
