@@ -15,7 +15,11 @@ reads the cache. Media engine runs parallel to GPU/ANE.
 **Primary: semi-automatic 4–6-point homography** (OpenCV `findHomography`/`getPerspectiveTransform`, Apache).
 Human confirms/drags corners + picks the court → the only approach robust to adjacent courts + overlapping lines.
 **Auto-assist: CourtKeyNet** (MIT) proposes corners (single-court-trained → suggests, never decides; fine-tune for clutter).
-*Avoid:* PnLCalib (GPL-2.0, soccer), TennisCourtDetector (no license).
+*Not used:* PnLCalib — GPL-2.0 is allowed by locked decision #6; it is skipped because its calibration is
+built on the soccer-pitch template. Its lens-distortion refinement (added 2026-03) is a legitimate reference
+for the stage-0 DJI undistortion work. *Avoid:* TennisCourtDetector (no license file).
+*(Corrected 2026-10-25 per `reports/Badminton video analysis AI 2026.md` — the earlier "Avoid: GPL-2.0"
+reason contradicted decision #6.)*
 *Accept:* reprojection error of confirmed corners < ~1 % of court width; metric distances sane (net 6.10 m, length 13.40 m).
 
 ## Stage 2 — Player detection (FR-9)
@@ -202,8 +206,14 @@ shot counts, fastest, rally aggregates + `endLine`, doubles `fb/ss/rot`, and ~10
 *Accept:* zones sum ≈100 %; timeline length = ceil(durationMin/5); kernels render to the design heatmap; spot-checks vs manual counts.
 
 ## Datasets & fine-tuning
-**Seed (non-commercial, usable):** ShuttleSet/BadmintonDB (stroke taxonomy + broadcast pretrain), VideoBadminton
-(elevated-angle action), SportsMOT (tracking/ReID weights). **Then fine-tune on own footage** for the overhead-gym +
+**Seed (non-commercial):** **ShuttleSet** (MIT — the one large stroke dataset with a clean licence; stroke
+taxonomy + broadcast pretrain), SportsMOT (tracking/ReID weights). **BadmintonDB** (taxonomy, BST checkpoints)
+and **VideoBadminton** (elevated-angle action) have **no licence file**, the one category locked decision #6
+excludes; they are usable only under the user's exception of 2026-07-13 (non-distributed use; recorded in
+`CLAUDE.md` decision #6 by the stroke-v2 branch, PR #19). Not seed datasets: BFMD (no licence file, BWF video
+marked "do not redistribute") and FineBadminton (repo Apache-2.0, data-card licence unverified).
+*(Corrected 2026-10-25 per `reports/Badminton video analysis AI 2026.md`, which found the earlier "usable"
+label covered two unlicensed sets.)* **Then fine-tune on own footage** for the overhead-gym +
 white-wall domain gap. ROI order: **shuttle (mandatory) → detector → stroke → court auto → pose → (no 3D)**.
 Tooling self-hosted on the Mac (privacy): CVAT (boxes/trajectories/keypoints), Label Studio (stroke/event timelines),
 FiftyOne (curation/label-error mining); pre-label with SAM + pretrained models. Budget ≈ 15–30 annotated rallies ≈ 1–3 weeks.
