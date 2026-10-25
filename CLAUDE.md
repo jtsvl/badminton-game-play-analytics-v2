@@ -72,4 +72,5 @@ overlay tracks are `[{t,u,v}]` in court coords u,v∈[0,1]). The DB schema is th
 - DB: apply `supabase/migrations/*.sql` via the **`supabase` MCP from `.mcp.json`** (`apply_migration`); see `/supabase/README.md`.
 
 ## Git
-Work on a feature branch (currently `feat/p0-foundations`). Commit/push only when the user asks.
+Work on a feature branch off `main` (one per slice, e.g. `feat/<slug>`) and open a PR into `main`.
+Commit/push only when the user asks.
