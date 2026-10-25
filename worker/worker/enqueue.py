@@ -37,7 +37,11 @@ def enqueue_cli(argv: list[str]) -> None:
     ap.add_argument("--angle", choices=["overhead", "side"], default="overhead")
     ap.add_argument("--played-on", default=None, help="YYYY-MM-DD (default: today)")
     ap.add_argument("--max-frames", type=int, default=None, help="dev cap on decoded frames")
-    ap.add_argument("--analysis-fps", type=float, default=None, help="frame-cache fps (default 12)")
+    from .pipeline.ingest import DEFAULT_ANALYSIS_FPS
+
+    ap.add_argument("--analysis-fps", type=float, default=None,
+                    help=f"requested frame-cache fps (default {DEFAULT_ANALYSIS_FPS:g}; the real cadence "
+                         "snaps to the source's frames and is recorded as frames.json cadence_fps)")
     args = ap.parse_args(argv)
 
     cfg = load_config()

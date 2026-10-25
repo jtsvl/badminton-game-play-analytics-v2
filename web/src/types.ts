@@ -3,6 +3,7 @@
 
 import type { Pt } from './lib/homography'
 import type { TrackKey } from './lib/overlay'
+import type { PoseKey } from './lib/pose'
 
 export type Discipline = 'singles' | 'doubles'
 export type Side = 'A' | 'B'
@@ -66,6 +67,7 @@ export interface CourtCalibrationPointsRow {
   image_size: { w: number; h: number } | null
 }
 export interface TrackKeyframeRow { subject: string; data: TrackKey[] }
+export interface PoseKeyframeRow { subject: string; data: PoseKey[] }
 export interface MatchListPlayerRef { side: Side; slot: number; players: Embedded<{ name: string }> }
 export interface MatchListQueryRow {
   id: string; slug: string; played_on: string; discipline: Discipline
@@ -103,7 +105,9 @@ export interface TrackData {
   data: TrackKey[]
 }
 export interface MatchReport {
-  video: { src: string; label: string; durationS: number | null } | null
+  // video.id lets the skeleton overlay lazy-fetch pose_keyframes on first „Skelett" toggle —
+  // ~0.5 MB/match that must never ride along eagerly with the report (usePoseTracks).
+  video: { id: string; src: string; label: string; durationS: number | null } | null
   calib: CourtCalib | null
   tracks: TrackData[]
   meta: ReportMeta

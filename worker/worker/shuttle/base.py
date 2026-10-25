@@ -128,3 +128,103 @@ def assert_finite(value: float) -> float:
     if not math.isfinite(value):
         raise ValueError("shuttle: non-finite coordinate")
     return value
+
+
+# ── shared backend helpers (TrackNetV3 + TrackNetV5; lazy numpy/cv2 so this module stays dev-extra light) ──
+
+def resize_rgb(img_bgr, model_size: Tuple[int, int]):
+    """A BGR crop → RGB uint8 at the model's (W, H) — the one resize both TrackNet backends feed."""
+    import cv2
+
+    mw, mh = model_size
+    return cv2.resize(img_bgr, (mw, mh))[:, :, ::-1]
+
+
+def median_of_frames(rgb_u8, samples: int = 700):
+    """Background median (float64 HWC) of an RGB uint8 stack from a stride subsample of ≤ `samples`
+    frames (≤ samples → every frame, byte-identical to a full median). The subsample caps the np.median
+    transient that once ~doubled peak memory on a whole clip and SIGKILLed the process."""
+    import numpy as np
+
+    stride = max(1, len(rgb_u8) // samples)
+    return np.median(rgb_u8[::stride], axis=0)
+
+
+def clip_median(loader, model_size: Tuple[int, int], samples: int = 700):
+    """Per-CLIP background median computed ONCE from a stride subsample of the whole clip (same resize /
+    BGR→RGB / dtype as predict) so every chunked predict() call shares the clip-wide background — a
+    per-chunk median would differ and change detections. None when the clip is empty."""
+    import numpy as np
+
+    n = len(loader)
+    if n == 0:
+        return None
+    stride = max(1, n // samples)
+    sample = [loader[i] for i in range(0, n, stride)]
+    rgb = np.stack([resize_rgb(img, model_size) for _, img in sample if img is not None]).astype("uint8")
+    return np.median(rgb, axis=0)
+
+
+def largest_blob_bbox(binary) -> tuple:
+    """Largest-area blob bbox (x, y, w, h) of a binary heatmap — a faithful reimplementation of the
+    TrackNet repos' `test.predict_location` (not imported: their test.py pulls pycocotools and the
+    vendored module names collide across backends). (0, 0, 0, 0) when the map is empty."""
+    import cv2
+    import numpy as np
+
+    if np.amax(binary) == 0:
+        return 0, 0, 0, 0
+    cnts, _ = cv2.findContours(binary.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    rects = [cv2.boundingRect(c) for c in cnts]
+    return max(rects, key=lambda r: r[2] * r[3])
+
+
+def decode_heatmap(hm, thr: float):
+    """TrackNet heatmap → (x, y, conf) of the largest blob above `thr`, conf = the map's (finite) peak;
+    None when nothing is above the threshold. `thr` is the backend's operating point (V3 0.5; V5 0.35
+    Lite / 0.30 full per the published sweep) — the stage gates `visibility` with the same value."""
+    import numpy as np
+
+    x0, y0, w, h = largest_blob_bbox((hm > thr).astype("uint8"))
+    if w == 0 and h == 0:
+        return None
+    finite = hm[np.isfinite(hm)]
+    conf = float(finite.max()) if finite.size else 0.0
+    return x0 + w / 2, y0 + h / 2, conf
+
+
+def checkpoint_tag(path, n: int = 8) -> str:
+    """First `n` hex chars of a file's SHA-256 — the provenance suffix in `shuttle.parquet.tracker`
+    (`tracknetv5-lite@<sha8>`), so a baseline and a fine-tune of the same backend stay distinguishable."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:n]
+
+
+def vendor_commit(repo) -> str | None:
+    """The checked-out commit of a vendored git repo (reads .git/HEAD, following one symbolic ref),
+    or None when it is not a git checkout."""
+    from pathlib import Path
+
+    git = Path(repo) / ".git"
+    try:
+        head = (git / "HEAD").read_text().strip()
+        if head.startswith("ref: "):
+            ref = head[5:].strip()
+            direct = git / ref
+            if direct.exists():
+                return direct.read_text().strip() or None
+            packed = git / "packed-refs"
+            if packed.exists():
+                for line in packed.read_text().splitlines():
+                    parts = line.split()
+                    if len(parts) == 2 and parts[1] == ref:
+                        return parts[0]
+            return None
+        return head or None
+    except OSError:
+        return None

@@ -6,6 +6,7 @@ export interface OverlayToggles {
   wege: boolean
   shuttle: boolean
   zonen: boolean
+  skelett: boolean
 }
 
 export interface VideoPlayer {
@@ -27,7 +28,7 @@ export interface VideoPlayer {
 
 const OV_KEY = 'bca-ov-v1'
 const RATE_KEY = 'bca-rate-v1'
-const DEFAULT_OV: OverlayToggles = { tracking: true, wege: true, shuttle: false, zonen: false }
+const DEFAULT_OV: OverlayToggles = { tracking: true, wege: true, shuttle: false, zonen: false, skelett: false }
 
 function loadRate(): number {
   try {

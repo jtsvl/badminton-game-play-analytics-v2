@@ -19,8 +19,25 @@ from pathlib import Path
 from typing import Dict, List, Sequence
 
 from .insights import COURT_L_M, COURT_W_M
+from .manifest import manifest_fps
 
-TRACKERS = ("wasb", "tracknetv3", "fake")
+TRACKERS = ("wasb", "tracknetv3", "tracknetv5", "fake")
+
+
+def compare_copy_name(parquet_path, backend: str) -> str:
+    """File name for a backend's detections kept beside `shuttle.parquet` during `--compare`:
+    `shuttle.<provenance>.parquet`, where provenance is the parquet's `tracker` value (e.g.
+    `tracknetv5-lite@c7ca025e` — distinguishes variants/checkpoints of one backend) or the backend key
+    when the parquet is empty. `eval_rally --shuttle-parquet` scores these downstream."""
+    import polars as pl
+
+    try:
+        col = pl.read_parquet(parquet_path, columns=["tracker"])["tracker"]
+        tag = str(col[0]) if len(col) else backend
+    except Exception:  # noqa: BLE001 — provenance is a nicety; never fail a bench on it
+        tag = backend
+    safe = "".join(c if (c.isalnum() or c in "-_.@") else "_" for c in tag)
+    return f"shuttle.{safe}.parquet"
 
 
 def parse_frame_range(s: str | None) -> tuple[int, int] | None:
@@ -107,7 +124,7 @@ def stats(parquet_path: str, manifest: dict, margin: float = 0.5) -> dict:
     import polars as pl
 
     frames = [int(f["frame"]) for f in manifest["frames"]]
-    fps = float(manifest.get("analysis_fps") or 12.0)
+    fps = manifest_fps(manifest)  # measured cadence, not the requested analysis_fps
     df = pl.read_parquet(parquet_path).sort("frame")
     rows = df.to_dicts()
     present = [int(r["frame"]) for r in rows]
@@ -294,13 +311,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         stats_manifest = {**manifest, "frames": scoped}
         print(f"note: --frames {a}:{b} → bench scoped to {len(scoped)} frames")
 
-    backends = list(TRACKERS) if args.compare else [args.tracker or os.environ.get("SHUTTLE_TRACKER", "tracknetv3")]
+    default_backend = os.environ.get("SHUTTLE_TRACKER", "tracknetv3")  # before run_stage mutates the env
+    backends = list(TRACKERS) if args.compare else [args.tracker or default_backend]
     results: Dict[str, dict] = {}
     scores: Dict[str, dict] = {}
-    print(f"shuttle bench — video={args.video_id}  frames={len(manifest['frames'])}")
+    copies: Dict[str, Path] = {}
+    print(f"shuttle bench — video={args.video_id}  frames={len(manifest['frames'])}  "
+          f"cadence={manifest_fps(manifest):.2f} fps")
     for name in backends:
         try:
             path = run_stage(args.video_id, tracker=name, frame_range=frame_range)
+            if args.compare:
+                # Every backend writes the same shuttle.parquet; keep a per-backend copy so the downstream
+                # A/B (eval_rally --shuttle-parquet) can score each, and so the LAST backend (fake) does
+                # not silently become the cache's shuttle.parquet (restored below).
+                import shutil
+
+                copy = Path(path).with_name(compare_copy_name(path, name))
+                shutil.copyfile(path, copy)
+                copies[name] = copy
             s = stats(path, stats_manifest)
             results[name] = s
             print(format_stats(s))
@@ -313,6 +342,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(format_score(name, sc))
         except Exception as e:  # noqa: BLE001 — a missing-weights backend shouldn't abort the others
             print(f"[{name:>10}] FAILED: {e}")
+    if args.compare and copies:
+        import shutil
+
+        restore = copies.get(default_backend) or next(iter(copies.values()))
+        shutil.copyfile(restore, cache / "shuttle.parquet")
+        print("per-backend detections kept for eval_rally --shuttle-parquet:")
+        for name, copy in copies.items():
+            print(f"  {name:>10}: {copy}")
+        print(f"  shuttle.parquet restored from {restore.name}")
     if args.labels and scores:
         best = max(scores, key=lambda k: scores[k]["f1"])
         n = next(iter(scores.values()))["n"]

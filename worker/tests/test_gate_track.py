@@ -69,6 +69,50 @@ class TestBuildRoleTracks(unittest.TestCase):
             self.assertAlmostEqual(r["u"], 0.30, places=6)
 
 
+class TestCadenceDurations(unittest.TestCase):
+    """Gap fill and smoothing are durations: 0.8 s / 0.9 s = the tuned 8 / 9 frames at the real 10 fps."""
+
+    def test_reference_counts(self):
+        from worker.pipeline import gate_track as gt
+
+        self.assertEqual((gt.MAX_GAP, gt.SMOOTH_WINDOW), (8, 9))
+
+    def test_30fps_counts(self):
+        from worker.manifest import frames_for_seconds
+        from worker.pipeline import gate_track as gt
+
+        self.assertEqual(frames_for_seconds(gt.GAP_FILL_MAX_S, 30.0), 24)
+        self.assertEqual(frames_for_seconds(gt.SMOOTH_WINDOW_S, 30.0), 27)
+
+
+class TestBuildRoleTracksOverlapDedupe(unittest.TestCase):
+    """Framewise stitching accepts fragments that OVERLAP the primary's frames (v1 rejected them).
+    Overlapping frames must not duplicate rows: prefer the primary's detected row over the reid."""
+
+    def test_overlapping_frames_dedupe_prefers_detected(self):
+        s = []
+        for f in range(10):
+            s.append((f * 0.1, f, 1, 0.30, 0.80))  # near_left, full
+            s.append((f * 0.1, f, 2, 0.70, 0.80))  # near_right, full
+            s.append((f * 0.1, f, 3, 0.55, 0.20))  # far_right, full
+        for f in range(0, 6):
+            s.append((f * 0.1, f, 6, 0.45, 0.05))  # far_left primary, lost after 5
+        for f in range(5, 10):
+            s.append((f * 0.1, f, 64, 0.50, 0.05))  # fragment double-tracks the primary at 5
+        counts = {}
+        for _, _, tid, _, _ in s:
+            counts[tid] = counts.get(tid, 0) + 1
+        rows, roles = build_role_tracks(s, counts, {f: f * 0.1 for f in range(10)},
+                                        n=4, discipline="doubles", max_gap=8)
+        self.assertEqual(roles.get(64), "far_left")
+        fl = sorted([r for r in rows if r["role"] == "far_left"], key=lambda r: r["t"])
+        self.assertEqual(len(fl), 10)  # one row per frame, no duplicates
+        by_t = {round(r["t"], 6): r for r in fl}
+        self.assertEqual(by_t[round(0.5, 6)]["source"], "detected")  # overlap frame: primary wins
+        self.assertAlmostEqual(by_t[round(0.5, 6)]["u"], 0.45, places=1)
+        self.assertEqual(by_t[round(0.8, 6)]["source"], "reid")
+
+
 class TestBuildRoleTracksNoStitch(unittest.TestCase):
     """With exactly N fully-detected tracks and no holes, behaviour is the plain per-role output
     (every row 'detected', no fabricated frames) — no regression vs the pre-Phase-4 pipeline."""

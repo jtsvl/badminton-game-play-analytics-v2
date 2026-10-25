@@ -33,6 +33,39 @@ class TestErrors(unittest.TestCase):
         self.assertAlmostEqual(e.court_m_error((0.0, 0.0), (1.0, 0.0)), COURT_W_M, places=6)
 
 
+class TestRemapFrameIdx(unittest.TestCase):
+    """Corrections carry the frame_idx of the cache they were labelled on AND t_s; re-key by time so a
+    label set made on the ~10 fps cache scores a 30 fps re-ingest (specs/features/analysis-30fps.md)."""
+
+    MANIFEST_30 = [{"frame": i, "t": round(i / 30, 4)} for i in range(600)]
+
+    def test_rekeys_by_time_onto_a_different_cadence(self):
+        # labelled on the 10 fps cache: frame 181 was t=18.1 s; on the 30 fps cache that is frame 543
+        cors = [{"frame_idx": 181, "t_s": 18.1, "role": "A1", "type": "bbox"}]
+        out = e.remap_frame_idx(cors, self.MANIFEST_30)
+        self.assertEqual(out[0]["frame_idx"], 543)
+        self.assertEqual(out[0]["role"], "A1")
+        self.assertEqual(cors[0]["frame_idx"], 181)   # input untouched
+
+    def test_same_cadence_is_the_identity(self):
+        cors = [{"frame_idx": 300, "t_s": 10.0, "role": "B1"}]
+        self.assertEqual(e.remap_frame_idx(cors, self.MANIFEST_30)[0]["frame_idx"], 300)
+
+    def test_without_t_s_the_index_is_kept(self):
+        cors = [{"frame_idx": 7, "role": "B1"}]
+        self.assertEqual(e.remap_frame_idx(cors, self.MANIFEST_30)[0]["frame_idx"], 7)
+
+    def test_nearest_wins_and_ties_go_to_the_earlier_frame(self):
+        manifest = [{"frame": 0, "t": 0.0}, {"frame": 1, "t": 0.1}, {"frame": 2, "t": 0.2}]
+        self.assertEqual(e.remap_frame_idx([{"frame_idx": 9, "t_s": 0.14}], manifest)[0]["frame_idx"], 1)
+        self.assertEqual(e.remap_frame_idx([{"frame_idx": 9, "t_s": 0.15}], manifest)[0]["frame_idx"], 1)
+        self.assertEqual(e.remap_frame_idx([{"frame_idx": 9, "t_s": 0.99}], manifest)[0]["frame_idx"], 2)
+        self.assertEqual(e.remap_frame_idx([{"frame_idx": 9, "t_s": -1.0}], manifest)[0]["frame_idx"], 0)
+
+    def test_empty_manifest_keeps_indices(self):
+        self.assertEqual(e.remap_frame_idx([{"frame_idx": 3, "t_s": 1.0}], [])[0]["frame_idx"], 3)
+
+
 class TestSummarize(unittest.TestCase):
     def test_reports_n_mean_median_p90(self):
         s = e.summarize([0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])

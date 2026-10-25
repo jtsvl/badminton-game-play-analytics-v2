@@ -2,14 +2,16 @@ import type { ReportPlayer } from '../../types'
 import type { Anim } from '../../lib/motion'
 import type { OverlayInputs } from '../../lib/calibration'
 import { useVideoPlayer } from '../../hooks/useVideoPlayer'
+import { usePoseTracks } from '../../hooks/usePoseTracks'
 import { SectionCard } from './SectionCard'
 import { VideoOverlay } from './VideoOverlay'
+import { SkeletonOverlay } from './SkeletonOverlay'
 import { OverlayChips } from './OverlayChips'
 import { VideoControls } from './VideoControls'
 
 interface Props {
   slug: string | undefined
-  video: { src: string; label: string; durationS?: number | null }
+  video: { id?: string; src: string; label: string; durationS?: number | null }
   players: ReportPlayer[]
   oi: OverlayInputs
   anim?: Anim
@@ -20,6 +22,7 @@ interface Props {
 export function VideoAnalysisCard({ slug, video, players, oi }: Props) {
   const hasFootage = Boolean(video.src)
   const player = useVideoPlayer(slug, hasFootage)
+  const poseTracks = usePoseTracks(video.id, player.ov.skelett)
 
   return (
     <SectionCard
@@ -58,6 +61,7 @@ export function VideoAnalysisCard({ slug, video, players, oi }: Props) {
           />
         )}
         <VideoOverlay time={player.time} players={players} ov={player.ov} H={oi.H} tracks={oi.tracks} />
+        <SkeletonOverlay time={player.time} players={players} ov={player.ov} poseTracks={poseTracks} />
       </div>
 
       <div style={{ marginTop: 12 }}>

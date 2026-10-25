@@ -62,6 +62,42 @@ class TestRallyRows(unittest.TestCase):
         self.assertEqual(rows[1]["Y"], 0)
 
 
+class TestSeqLenAndRange(unittest.TestCase):
+    """TrackNetV5 trains with 5-frame windows (V3: 8) and an explicit within-clip split is exported with
+    --frames A:B (specs/features/shuttle-tracknetv5.md)."""
+
+    def test_default_window_is_v3_and_v5_is_five(self):
+        self.assertEqual(dx.SEQ_LEN, 8)
+        dx.check_rally_length(8, 8)
+        dx.check_rally_length(5, 5)
+        with self.assertRaises(ValueError):
+            dx.check_rally_length(7, 8)
+        with self.assertRaises(ValueError):
+            dx.check_rally_length(4, 5)
+        with self.assertRaises(ValueError):
+            dx.check_rally_length(10, 0)
+
+    def test_select_dense_range_is_inclusive_on_manifest_positions(self):
+        dense = [(i, 0.5, 0.5, 1, False) for i in range(100, 110)]
+        self.assertEqual([d[0] for d in dx.select_dense_range(dense, (103, 105))], [103, 104, 105])
+        self.assertEqual(dx.select_dense_range(dense, None), dense)
+        self.assertEqual(dx.select_dense_range(dense, (200, 300)), [])
+
+
+class TestFramesMedian(unittest.TestCase):
+    def test_median_is_float64_not_truncated(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy (ml extra) not installed")
+        a = np.full((2, 2, 3), 100, dtype=np.uint8)
+        b = np.full((2, 2, 3), 103, dtype=np.uint8)
+        med = dx.frames_median([a, b])
+        self.assertEqual(med.dtype, np.float64)
+        self.assertEqual(med.shape, (2, 2, 3))
+        self.assertTrue((med == 101.5).all())   # the .5 survives — V3 casts to uint8 itself, V5 subtracts
+
+
 class TestMaskedModelCrop(unittest.TestCase):
     """The exported PNG must be byte-identical to the array pipeline/shuttle.py feeds the tracker:
     crop → airspace-mask → resize(512x288) → BGR→RGB. This proves train ≈ inference."""

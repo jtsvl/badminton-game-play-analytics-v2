@@ -4,11 +4,13 @@ import { deNum } from '../lib/format'
 import { disciplineDE } from '../lib/labels'
 import { overlayInputs } from '../lib/calibration'
 import { useVideoPlayer } from '../hooks/useVideoPlayer'
+import { usePoseTracks } from '../hooks/usePoseTracks'
 import { Reveal } from '../components/report/Reveal'
 import { Icon, ICONS } from '../components/report/Icon'
 import { PlayerTabs } from '../components/report/PlayerTabs'
 import { SafariFrame } from '../components/report/SafariFrame'
 import { VideoOverlay } from '../components/report/VideoOverlay'
+import { SkeletonOverlay } from '../components/report/SkeletonOverlay'
 import { VideoControls } from '../components/report/VideoControls'
 import { OverlayChips } from '../components/report/OverlayChips'
 import { Endstand } from '../components/report/Endstand'
@@ -35,6 +37,7 @@ export function MatchReportDashboard({ report, tab, setTab, slug }: Props) {
   const hasFootage = Boolean(report.video?.src)
   const vp = useVideoPlayer(slug, hasFootage)
   const oi = overlayInputs(report)
+  const poseTracks = usePoseTracks(report.video?.id, vp.ov.skelett)
 
   const opponent =
     report.pairs && report.pairs.length
@@ -109,6 +112,7 @@ export function MatchReportDashboard({ report, tab, setTab, slug }: Props) {
                     />
                   )}
                   <VideoOverlay time={vp.time} players={report.players} ov={vp.ov} H={oi.H} tracks={oi.tracks} />
+                  <SkeletonOverlay time={vp.time} players={report.players} ov={vp.ov} poseTracks={poseTracks} />
                 </div>
               </div>
               <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 12, padding: '6px 12px', background: 'var(--card)', borderTop: '1px solid var(--hairline)' }}>

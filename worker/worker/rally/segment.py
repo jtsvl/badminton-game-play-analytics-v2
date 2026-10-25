@@ -16,14 +16,23 @@ import math
 import os
 from typing import Dict, List, Optional, Sequence
 
+from ..manifest import REFERENCE_FPS, fps_from_frames_t, frames_for_seconds, per_step
+
 Det = Dict[str, float]
 
+# Cadence-dependent knobs are RATES / DURATIONS (specs/features/analysis-30fps.md): a per-step distance
+# or a detection count means something different at 30 fps than at the real ~10 fps of the caches these
+# values were tuned on. build_rallies derives the per-clip values from the cache's cadence
+# (`thresholds_for_fps`); the plain MAX_JUMP / MIN_RUN_LEN / MIN_DETS / HIT_DEADBAND names below are the
+# REFERENCE_FPS equivalents (0.10 / 4 / 5 / 0.01) that direct callers and the unit tests use.
 # --- trajectory grouping ---------------------------------------------------------------------------
 GAP_S = float(os.environ.get("RALLY_GAP_S", "0.5"))        # split a flight run on a temporal gap this big
-MAX_JUMP = float(os.environ.get("RALLY_MAX_JUMP", "0.10")) # normalized step above which a jump needs to be
+MAX_JUMP_PER_S = float(os.environ.get("RALLY_MAX_JUMP_PER_S", "1.0"))  # normalized image distance per second
+MAX_JUMP = per_step(MAX_JUMP_PER_S, REFERENCE_FPS)         # per-step: above this a jump needs to be
 MIN_COS = float(os.environ.get("RALLY_MIN_COS", "0.3"))    # collinear (cos>=MIN_COS) to stay one run (smash)
 # --- foreign-run rejection -------------------------------------------------------------------------
-MIN_RUN_LEN = int(os.environ.get("RALLY_MIN_RUN_LEN", "4"))      # a run this long counts as sustained flight
+MIN_RUN_S = float(os.environ.get("RALLY_MIN_RUN_S", "0.4"))      # a run this LONG counts as sustained flight
+MIN_RUN_LEN = frames_for_seconds(MIN_RUN_S, REFERENCE_FPS)       # …in detections at the reference cadence
 BRIDGE_S = float(os.environ.get("RALLY_BRIDGE_S", "1.5"))        # max time gap to connect/bridge two runs
 BRIDGE_DIST = float(os.environ.get("RALLY_BRIDGE_DIST", "0.15")) # max endpoint distance to connect two runs
 # --- swing-conditional gap bridging (T8, specs/features/pose-swing-fusion.md) -----------------------
@@ -36,15 +45,34 @@ RALLY_SWING_BRIDGE_MIN_STRENGTH = float(os.environ.get("RALLY_SWING_BRIDGE_MIN_S
 RALLY_SERVE_EXCLUSION_S = float(os.environ.get("RALLY_SERVE_EXCLUSION_S", "0.75"))  # no bridge this close to gap end
 # --- rally assembly --------------------------------------------------------------------------------
 MIN_RALLY_S = float(os.environ.get("RALLY_MIN_RALLY_S", "0.5"))  # discard spans shorter than this
-MIN_DETS = int(os.environ.get("RALLY_MIN_DETS", "5"))            # discard rallies with fewer detections
+MIN_DETS_S = float(os.environ.get("RALLY_MIN_DETS_S", "0.5"))    # discard rallies with fewer detections than…
+MIN_DETS = frames_for_seconds(MIN_DETS_S, REFERENCE_FPS)         # …this many seconds' worth
 # --- serve / end / hits ----------------------------------------------------------------------------
 SETTLE_KMH = float(os.environ.get("RALLY_SETTLE_KMH", "4.0"))         # players "settled" below this speed
 SETTLE_WINDOW_S = float(os.environ.get("RALLY_SETTLE_WINDOW_S", "0.5"))  # over this window before the serve
 SERVE_CONF_SETTLED = float(os.environ.get("RALLY_SERVE_CONF_SETTLED", "0.7"))   # serve cue confidence...
 SERVE_CONF_FALLBACK = float(os.environ.get("RALLY_SERVE_CONF_FALLBACK", "0.4")) # ...settled vs first-det
 END_MIN_CONF = float(os.environ.get("RALLY_END_MIN_CONF", "0.5"))     # ignore low-conf blips at rally end
-HIT_DEADBAND = float(os.environ.get("RALLY_HIT_DEADBAND", "0.01"))    # ignore vertical jitter below this
+HIT_DEADBAND_PER_S = float(os.environ.get("RALLY_HIT_DEADBAND_PER_S", "0.1"))  # vertical jitter per second
+HIT_DEADBAND = per_step(HIT_DEADBAND_PER_S, REFERENCE_FPS)            # per-step: ignore jitter below this
 HIT_CONF = float(os.environ.get("RALLY_HIT_CONF", "0.3"))            # provisional hit-event confidence
+
+
+def thresholds_for_fps(fps: float) -> Dict[str, float]:
+    """The per-step / per-count thresholds for a cache running at `fps` — the tuned values' meaning in
+    seconds, converted back to this cadence (REFERENCE_FPS reproduces 0.10 / 4 / 5 / 0.01 exactly)."""
+    return {
+        "max_jump": per_step(MAX_JUMP_PER_S, fps),
+        "min_run_len": frames_for_seconds(MIN_RUN_S, fps),
+        "min_dets": frames_for_seconds(MIN_DETS_S, fps),
+        "hit_deadband": per_step(HIT_DEADBAND_PER_S, fps),
+    }
+
+
+def cadence_of(dets: Sequence[Det]) -> Optional[float]:
+    """Frames per second implied by the detections' (frame, t) span (exact across dropouts); None when
+    the detections carry no usable frame numbers."""
+    return fps_from_frames_t((d["frame"], d["t"]) for d in dets if "frame" in d)
 
 
 def _dist(a: Det, b: Det) -> float:
@@ -236,7 +264,7 @@ def count_hits(rally_dets: Sequence[Det], deadband: float = HIT_DEADBAND) -> Opt
 def build_rallies(dets: Sequence[Det], player_energy: Optional[Sequence] = None,
                   swings: Optional[Sequence[dict]] = None,
                   swing_bridge: bool = RALLY_SWING_BRIDGE,
-                  discipline: str = "singles") -> Dict[str, list]:
+                  discipline: str = "singles", fps: Optional[float] = None) -> Dict[str, list]:
     """Orchestrate stage 6: detections → rallies + events shaped for the DB (rallies/events columns).
 
     Dead time falls out for free — anything not inside a surviving rally span is simply never emitted.
@@ -247,11 +275,17 @@ def build_rallies(dets: Sequence[Det], player_energy: Optional[Sequence] = None,
     event carrying the last in-flight ``(x, y, u, v)``, and a ``landing`` event with the in/out call
     against the ``discipline``'s boundary (or an honest ``located=false``). ``swings`` (player
     swing-activity events) only change output when ``swing_bridge`` is on — see
-    ``merge_runs_into_rallies``."""
+    ``merge_runs_into_rallies``. ``fps`` is the cache cadence the per-step / per-count thresholds are
+    derived from (``thresholds_for_fps``); omitted → inferred from the detections' (frame, t) span,
+    else REFERENCE_FPS. The cadence used is echoed as ``fps`` in the result."""
     from .landing import landing_event  # local: landing.py imports END_MIN_CONF from here (no cycle)
 
     dets = sorted(dets, key=lambda d: d["t"])
-    rallies_dets = merge_runs_into_rallies(reject_foreign_runs(group_trajectories(dets)),
+    fps = fps or cadence_of(dets) or REFERENCE_FPS
+    th = thresholds_for_fps(fps)
+    runs = reject_foreign_runs(group_trajectories(dets, max_jump=th["max_jump"]),
+                               min_run_len=th["min_run_len"])
+    rallies_dets = merge_runs_into_rallies(runs, min_dets=th["min_dets"],
                                            swings=swings, swing_bridge=swing_bridge)
 
     rallies: List[dict] = []
@@ -259,8 +293,8 @@ def build_rallies(dets: Sequence[Det], player_energy: Optional[Sequence] = None,
     for idx, rd in enumerate(rallies_dets):
         serve = find_serve_frame(rd, player_energy)
         end = find_rally_end(rd)
-        hits = hit_points(rd)
-        shots = count_hits(rd)
+        hits = hit_points(rd, th["hit_deadband"])
+        shots = count_hits(rd, th["hit_deadband"])
         frame_span = rd[-1]["frame"] - rd[0]["frame"]
         density = len(rd) / (frame_span + 1) if frame_span >= 0 else None
         rallies.append({
@@ -280,7 +314,7 @@ def build_rallies(dets: Sequence[Det], player_energy: Optional[Sequence] = None,
         events.append({"rally_idx": idx, "t_s": end["t"], "type": "rally_end",
                        "payload": {"x": end["x"], "y": end["y"], "u": end["u"], "v": end["v"]},
                        "confidence": None})
-        landing = landing_event(rd, discipline)
+        landing = landing_event(rd, discipline, fps=fps)
         events.append({"rally_idx": idx, "t_s": landing.pop("t", end["t"]), "type": "landing",
                        "payload": landing, "confidence": landing["confidence"]})
-    return {"rallies": rallies, "events": events}
+    return {"rallies": rallies, "events": events, "fps": fps}

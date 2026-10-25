@@ -320,3 +320,26 @@ gate is cleared. **Training joins labels → parquets via `video_id + t_s`, neve
   near-empty trajectory windows lean on pose alone; the exporter reports coverage per window.
 - Shot counts feed `player_shot_stats.share_pct` and the report's shot table as **estimates** — the UI
   already labels derived numbers „Schätzung"; keep that framing.
+
+## Alternatives evaluated (2026-10-18)
+
+**TypeSafe Jev (1.13 / 1.14) — not a candidate.** Asked whether TypeSafe's Jev could beat the models
+above. Jev is a hosted "System One" **decision model**: text state in ("natural-language text, sent as
+a string, a JSON object, or an array of text values"), typed answers out (Choice / Score / Noul /
+Box, each with probabilities), trained with "Reinforcement Learning for Calibrated Decisions",
+"not fine-tuned or LoRA-adapted with customer data". TypeSafe's own docs: "Images, audio, and
+video are not supported (yet)"; 1.14 (2026-10-14) adds still images behind an experimental
+danger-zone header. Hosted API only, waitlisted, no open weights, no on-prem. A stroke is motion
+over ~0.5 s, the worker runs locally on the Mac Studio, and our structured decisions (hit disputed,
+quadrant) are geometric rules — so there is no place in stage 7 where Jev fits, and no evidence of
+fine-grained sports competence anywhere (all performance claims are TypeSafe's own). **Decision: do
+not integrate; revisit only if a video modality ships with open weights or an on-prem option.**
+
+**VideoJev-4B (MCG-NJU, Apache-2.0) — unproven, being measured.** The video model that borrowed the
+"System One" name (not a TypeSafe product): a Qwen3.5-4B multimodal LLM with a candidate-scorer head
+that returns a softmax over text options for a clip. Pretrained video representation → plausibly a
+different failure mode than BST's cross-game memorization; never evaluated on fine-grained sports
+actions. **Zero-shot pilot on the 695 labeled clips: `features/stroke-vlm-pilot.md`** (dev game G5
+picks the prompt, the other 4 games give the number; decision tiers closed / labeling_assist /
+finetune_candidate / gate). **Result: pending the Mac run.** The 35B-A3B variant does not fit the
+64 GB Mac (≈ 70 GB bf16) and is a cloud-only second row if the 4B lands in the assist band.

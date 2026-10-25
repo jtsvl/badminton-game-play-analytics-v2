@@ -14,6 +14,24 @@ from pathlib import Path
 log = logging.getLogger("worker.pipeline.remap")
 
 
+def resolve_artifact(store, cfg, video_id: str, cache: Path, name: str) -> str | None:
+    """Local cache path for a per-video artifact, restoring it from the artifact bucket on a
+    cache miss (fresh worker / evicted cache). None when it exists in neither place. Shared by
+    remap (tracks.parquet), retrack's gate_track (detections.parquet) and overlay (pose.parquet)."""
+    local = cache / name
+    if local.exists():
+        return str(local)
+    key = f"{video_id}/{name}"
+    log.info("artifact: cache miss — downloading %s/%s", cfg.artifact_bucket, key)
+    data = store.download(cfg.artifact_bucket, key)
+    if not data:
+        return None
+    cache.mkdir(parents=True, exist_ok=True)
+    local.write_bytes(data)
+    log.info("artifact: restored %s → %s (%d bytes)", key, local, len(data))
+    return str(local)
+
+
 def run(ctx) -> None:
     store = ctx["store"]
     cfg = ctx["cfg"]
@@ -21,22 +39,11 @@ def run(ctx) -> None:
     video_id = job["video_id"]
 
     cache = Path(cfg.frame_cache_dir).expanduser() / str(video_id)
-    local = cache / "tracks.parquet"
-
-    if local.exists():
-        ctx["tracks_path"] = str(local)
-        log.info("remap: using cached tracks.parquet (%s)", local)
-        return
-
-    # Cache miss (fresh worker / evicted cache) → restore from the artifact bucket gate_track uploaded to.
-    key = f"{video_id}/tracks.parquet"
-    log.info("remap: cache miss — downloading %s/%s", cfg.artifact_bucket, key)
-    data = store.download(cfg.artifact_bucket, key)
-    if not data:
+    path = resolve_artifact(store, cfg, video_id, cache, "tracks.parquet")
+    if not path:
         raise RuntimeError(
-            f"remap: no tracks.parquet in cache or {cfg.artifact_bucket}/{key} — run the full pipeline first"
+            f"remap: no tracks.parquet in cache or {cfg.artifact_bucket}/{video_id}/tracks.parquet"
+            " — run the full pipeline first"
         )
-    cache.mkdir(parents=True, exist_ok=True)
-    local.write_bytes(data)
-    ctx["tracks_path"] = str(local)
-    log.info("remap: restored tracks.parquet → %s (%d bytes)", local, len(data))
+    ctx["tracks_path"] = path
+    log.info("remap: tracks.parquet resolved (%s)", path)

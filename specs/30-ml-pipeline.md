@@ -37,17 +37,27 @@ ReID alone (same-club kit) — spatial+motion continuity is primary.
 ≤ 1.0 m far half on the `eval_corrections` scorecard (measured 0.4/0.5 m un-fitted pose, 0.2/0.3 m clip-fitted
 nudge on f35d0984) *(initial targets — revise as answer-key clips accumulate)*.
 
-**Built (P1, Phase 4 — far-player robustness, RC3):** when BoT-SORT drops a small/low-contrast player and
-re-acquires them under a fresh id, `enforce_n_tracks` discards that short fragment, leaving a hole. Two layers
-recover it in `gate_track.build_role_tracks` (pure, unit-tested) before output:
-1. **Role re-ID** (`geometry.stitch_role_fragments`): a dropped in-court fragment is re-associated with the role
-   it continues — same court half, frame span **not overlapping** the role's primary coverage (it fills the
-   role's hole), nearest within `max_court_dist`. This recovers **real detected** positions, tagged
-   `source="reid"`; it never fabricates.
-2. **Bounded short-hole interp** (`geometry.fill_track_gaps`): holes of ≤ `GAP_FILL_MAX_FRAMES` (default 8) frames
+**Built (P1, Phase 4 — far-player robustness, RC3; identity rebuilt 2026-07-13):** when BoT-SORT drops a
+small/low-contrast player and re-acquires them under a fresh id, the fragment must be re-associated or the
+role has a hole. Three layers in `gate_track.build_role_tracks` (pure, unit-tested) before output:
+1. **Half-aware primaries** (`geometry.select_role_primaries`): per court half, the most-present
+   **coexisting pair** of tracks — two tracks alive at once are provably two people. Replaced the global
+   top-N-by-count + relative `role_assign`, which on far-fragmented doubles games picked near tracks for the
+   far roles (Session-2 postmortem: 18/20 role slots were near-half tracks — the far players were absent
+   from every shipped stat/overlay; see `features/pose-skeleton-overlay.md` §Coverage).
+2. **Framewise re-ID v2** (`geometry.stitch_fragments_framewise`, replaced `stitch_role_fragments`): a
+   fragment attaches to a same-half role iff it fills per-frame holes (span overlap is irrelevant; brief
+   double-tracking ≤ 20 % of its frames is tolerated), its boundary MEDIANS are velocity-continuous with
+   the role's anchors (`base 1 m + 6 m/s · gap`; a near-role anchor that died across the net is a corpse,
+   not evidence), and no second role is nearly as plausible (`STITCH_AMBIGUITY_M` — honest hole over
+   partner swap). Sustained coexistence with the partner role is **mutual-exclusion evidence**: with the
+   partner accounted for, the sole open role wins by elimination even when the boundary check glitches
+   (id switches drift boxes exactly at handovers). Longest-first + fixpoint iteration lets later
+   attachments disambiguate earlier drops. Tagged `source="reid"`; never fabricates.
+3. **Bounded short-hole interp** (`geometry.fill_track_gaps`): holes of ≤ `GAP_FILL_MAX_FRAMES` (default 8) frames
    between two anchors are linearly interpolated (`source="interp"`); longer one-sided dropouts are **left
-   absent** (never extrapolated). `tracks.parquet` gains a **`source`** column (`detected`/`reid`/`interp`) so the
-   overlay surfaces re-ID/interp positions as estimates („Schätzung").
+   absent** (never extrapolated). `tracks.parquet` carries the **`source`** column (`detected`/`reid`/`interp`) so
+   the overlay surfaces re-ID/interp positions as estimates („Schätzung").
 *Measured (f35d0984: far player B1 lost frames 284–355, 69 manual re-adds):* re-ID stitched the two dropped far
 fragments back into B1 → the `eval_corrections` scorecard **misses 69 → 0** (k=0.16) / 69 → 4 (k=0 default),
 recovering 63 real detections + 6 interp fills; the **detected** near/far cm is unchanged (re-ID/interp only add
@@ -88,23 +98,28 @@ and the low standing camera foreshortens the drop. Verified by **synthetic unit 
 foot within tolerance); real/multi-clip verification awaits a partial-occlusion answer key (specs/fix-later.md).
 
 ## Stage 5 — Shuttle tracking + white-wall problem (FR-15/16/17)
-**WASB (MIT) primary; TrackNetV3 (MIT) strong alternative — benchmark both.** White-shuttle-vs-white-wall is the
+**Production = the fine-tuned TrackNetV3 (MIT); WASB (MIT) is the frozen baseline; TrackNetV5 (ICIP 2026) is a
+third backend under A/B — `features/shuttle-tracknetv5.md`.** White-shuttle-vs-white-wall is the
 hardest case (video-camouflage: low appearance, distinct motion).
 **Multi-court isolation (first-class):** training sessions run several courts at once → several shuttles in
 frame. Isolate the **target** court before/around detection via the calibration mask (`mask_polygon_px` /
 `geometry.point_in_poly`) and a court-region crop (`geometry.court_crop_box`) — the crop also restores the
 tiny shuttle's effective resolution before a tracker downsizes to ~512×288. SOTA as of 2026 (web-checked):
-WASB (BMVC2023) tops the PwC badminton benchmark; TrackNetV3 leads recall (inpainting); TrackNetV4/V5 are
-incremental — keep WASB/TrackNetV3 for now. Layered mitigations:
+WASB (BMVC2023) tops the PwC badminton benchmark; TrackNetV3 leads recall (inpainting); TrackNetV4 is TF/Keras
+without published weights; the ICIP-2026 TrackNetV5 (PyTorch, from the V3 group) self-reports ~1 F1 point
+over V3 on broadcast footage (an independent re-implementation saw none) and is being A/B'd here at 30 fps —
+promoted only on a measured cross-session win (`features/shuttle-tracknetv5.md`). Layered mitigations:
 1. **Background-median subtraction** (per-clip; static tripod) removes the white wall — TrackNetV3 has it built-in.
 2. **Motion cues**: multi-frame input; optional frame-difference channel (OpenCV MOG2; avoid RAFT on MPS).
-3. **TrackNetV4 motion-attention** (now MIT) grafted on for small/blurry shuttles.
+3. **Motion attention** for small/blurry shuttles — TrackNetV4's idea (its official code is TF/Keras with no
+   published weights); TrackNetV5's gated motion prompt is the PyTorch successor under A/B.
 4. **Trajectory recovery**: TrackNetV3 inpainting + MonoTrack-style per-shot parabola + Kalman/RTS smoother —
    interpolate **within an arc only**, never across a racket contact.
 5. **Targeted fine-tuning** on labeled white-wall frames + over-exposure/brightness + mixup augmentation — biggest lever.
 6. Optional mild **CLAHE on L** front-end (train+infer on the same enhanced frames; verify it helps).
 Speed = homography + fps, **labeled estimate** with uncertainty (~5–8 km/h MAE best case). **2D only.**
-*Accept:* held-out **same-session** F1 ≥ 0.90 @ tol=4px in the pinned 512×288 space (measured 0.958 on game1);
+*Accept:* held-out **same-session** F1 ≥ 0.90 @ tol=4px in the pinned 512×288 space (measured **0.953** on game1 —
+in-sample, the 2026-07-02 re-measure with the recorded command; the earlier 0.958 was the first full-clip figure);
 **cross-session** gate F1 ≥ 0.80 on a newly-labeled clip before trusting a new session unlabeled; gaps over a
 wall bridged within an arc *(initial targets — revise as answer-key clips accumulate)*.
 
@@ -168,15 +183,17 @@ answer key exists.
 ## Stage 7 — Stroke classification (FR-21/22/23)
 **Governed by `features/stroke-classification-v2.md` (signed off 2026-07-13)** — v1
 (`features/stroke-classification.md`) is superseded: its build failed the 0.70 gate (LOGO-CV 0.400,
-GBDT spike 0.536) and was never wired. v2 in one line: learned hit detection (HitNet-pattern GRU +
-audio-onset timing refinement) → 5-way hitter attribution → **BST-4-slot** (Chang et al., CVPRW
-2026, arXiv:2502.21085, MIT) from the ShuttleSet-25 `_merged` checkpoint, trained on **coarse-8**
-(17 fine labels for labeling; ShuttleSet is natively 18 fine types — the earlier "35/25 classes"
-claim here mixed in the checkpoint head sizes and was refuted). Low-confidence →
-`unknown`/„Unsicher" abstention.
+GBDT spike 0.536) and was never wired. v2 in one line: learned hit detection (HitNet-pattern GRU + audio-onset timing
+refinement) → 5-way hitter attribution → **BST-4-slot** (Chang et al., CVPRW 2026, arXiv:2502.21085,
+MIT) from the ShuttleSet-25 `_merged` checkpoint, trained on **coarse-8** (17 fine labels for
+labeling; ShuttleSet is natively 18 fine types — the earlier "35/25 classes" claim here mixed in the
+checkpoint head sizes and was refuted). Low-confidence → `unknown`/„Unsicher" abstention.
 *Accept:* the single ≥ 70 % gate is replaced by the **G0–G5 gate stack** (hit timing, attribution,
 per-class recall, calibrated abstention, outcomes, trainer edit rate) — see v2 spec §9; below-gate
 models are labeling-assist only, never pipeline.
+*Side experiment (2026-10-18, not pipeline):* `features/stroke-vlm-pilot.md` — VideoJev-4B zero-shot on the
+labeled clips, dev/eval protocol, result pending the Mac run. TypeSafe's Jev was evaluated and rejected
+(text-only hosted API) — `features/stroke-classification.md` § Alternatives evaluated.
 
 ## Stage 8 — Insight aggregation (FR-11/12/13/14/26/27)
 Pure functions from tracks/events (TDD these): distance (court-space displacement), avg/top speed, sprints
@@ -197,10 +214,15 @@ the two hot fixed-shape models (detector, RTMPose) — export at a single fixed 
 winner; validate INT8 doesn't hurt the tiny shuttle. **No MLX** (slow on Conv2d). Process locally; cloud NVIDIA
 for fine-tuning runs / large backfills — **exception: the stage-5 TrackNetV3 shuttle fine-tune runs locally on
 the Mac Studio M4 Max (MPS)** (small fine-tune; keeps the label→train→benchmark loop on one box against the
-real frame cache/weights; shuttle clips ingest at **30 fps** `analysis_fps`, the movement pipeline stays at
-**12 fps**). This needs the vendored TrackNetV3 `.cuda()`→MPS patch in `worker/training/`
+real frame cache/weights). This needs the vendored TrackNetV3 `.cuda()`→MPS patch in `worker/training/`
 (`PYTORCH_ENABLE_MPS_FALLBACK=1` alone does NOT redirect explicit `.cuda()`). See
 `specs/features/shuttle-finetune-plan.md` §6.
+
+**Analysis cadence (user decision 2026-10-25 — `features/analysis-30fps.md`).** The earlier hybrid
+(shuttle clips at 30 fps, movement at 12 fps) is superseded by a **full switch to 30 fps once measured**.
+Note the "12 fps" caches really run at **10 fps** on 30 fps sources (ingest's keep rule); every frame-count
+threshold is now a duration converted from the manifest's measured cadence, so the same code runs any
+cadence. `DEFAULT_ANALYSIS_FPS` stays 12 until the 12-vs-30 table in that spec is filled on the Mac.
 
 ## Honesty / estimates (must be surfaced in UI)
 3D trajectory & absolute speed (monocular, not Hawk-Eye), reaction time, footwork "efficiency" absolutes, and

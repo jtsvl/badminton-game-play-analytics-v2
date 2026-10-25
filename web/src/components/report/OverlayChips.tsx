@@ -35,7 +35,7 @@ interface Props {
   toggle: (key: keyof OverlayToggles) => void
 }
 
-/** Overlay layer toggles: Tracking / Laufwege / Shuttle / Zonen. */
+/** Overlay layer toggles: Tracking / Laufwege / Shuttle / Zonen / Skelett. */
 export function OverlayChips({ ov, toggle }: Props) {
   return (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -43,6 +43,7 @@ export function OverlayChips({ ov, toggle }: Props) {
       <Chip label="Laufwege" on={ov.wege} onClick={() => toggle('wege')} />
       <Chip label="Shuttle" on={ov.shuttle} onClick={() => toggle('shuttle')} />
       <Chip label="Zonen" on={ov.zonen} onClick={() => toggle('zonen')} />
+      <Chip label="Skelett" on={ov.skelett} onClick={() => toggle('skelett')} />
     </div>
   )
 }

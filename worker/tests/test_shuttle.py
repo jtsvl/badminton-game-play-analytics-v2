@@ -51,6 +51,44 @@ class TestBuildShuttleTrack(unittest.TestCase):
         self.assertEqual([r["frame"] for r in rows], [0, 2])
 
 
+class TestStageThresholds(unittest.TestCase):
+    """Stage knobs that depend on the backend or the cadence (specs/features/analysis-30fps.md,
+    shuttle-tracknetv5.md): the confidence gate follows the backend's published operating point unless
+    SHUTTLE_CONF_THR is set, and the spike guard is a rate applied per frame step."""
+
+    def test_env_threshold_wins(self):
+        from worker.pipeline.shuttle import resolve_conf_thr
+
+        class Backend:
+            conf_thr = 0.35
+
+        self.assertEqual(resolve_conf_thr(Backend(), env_value="0.6"), 0.6)
+
+    def test_backend_declared_threshold_when_env_unset(self):
+        from worker.pipeline.shuttle import resolve_conf_thr
+
+        class Backend:
+            conf_thr = 0.35
+
+        self.assertEqual(resolve_conf_thr(Backend(), env_value=None), 0.35)
+        self.assertEqual(resolve_conf_thr(Backend(), env_value=""), 0.35)
+
+    def test_half_when_nothing_is_declared(self):
+        from worker.pipeline.shuttle import resolve_conf_thr
+
+        class Backend:
+            pass
+
+        self.assertEqual(resolve_conf_thr(Backend(), env_value=None), 0.5)
+
+    def test_spike_guard_is_a_rate(self):
+        from worker.manifest import per_step
+        from worker.pipeline.shuttle import MAX_STEP, MAX_STEP_PER_S
+
+        self.assertAlmostEqual(MAX_STEP, 0.5)                       # the tuned per-step value at 10 fps
+        self.assertAlmostEqual(per_step(MAX_STEP_PER_S, 30.0), 0.5 / 3)
+
+
 class TestGetTrackerDefault(unittest.TestCase):
     """Locks the production default: no env, no arg → the fine-tuned TrackNetV3 backend (not WASB).
     The backend classes are patched with sentinels so no weights load — this asserts SELECTION only."""

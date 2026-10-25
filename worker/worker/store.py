@@ -230,6 +230,23 @@ class Store:
             on_conflict="video_id,subject",
         ).execute()
 
+    def upsert_pose_keyframes(self, video_id: str, subject: str, data: list) -> None:
+        self._sb.table("pose_keyframes").upsert(
+            {"video_id": video_id, "subject": subject, "data": data},
+            on_conflict="video_id,subject",
+        ).execute()
+
+    def delete_pose_keyframes(self, video_id: str, keep_subjects: list) -> None:
+        """Drop skeleton rows the current run did not produce (stale after a re-label/remap)."""
+        q = self._sb.table("pose_keyframes").delete().eq("video_id", video_id)
+        if keep_subjects:
+            q = q.not_.in_("subject", keep_subjects)
+        q.execute()
+
+    def get_pose_keyframes(self, video_id: str) -> List[dict]:
+        res = self._sb.table("pose_keyframes").select("subject, data").eq("video_id", video_id).execute()
+        return res.data or []
+
     def upsert_detection_corrections(self, rows: List[dict]) -> None:
         """Persist verify-tool corrections (the scorecard answer key). Idempotent on (video_id,source_id)
         so re-importing the same corrections.json replaces rather than duplicates (0004 migration)."""

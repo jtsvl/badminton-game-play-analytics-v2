@@ -6,7 +6,8 @@ partial.** Validated on a disposable re-run of Session2_Game_5 (doubles, 23 rall
 — and that one was a **false positive** (a between-points racket catch "at rest" in mid-air, projected
 2.85 m out by the ground homography; trainer-verified on video). That finding added the
 `LANDING_MAX_OUT_CM` plausibility guard (see below); after the guard the run yields 0 located landings —
-honest, coverage-limited (21 % shuttle coverage at ~12 fps analysis). The match **score stays
+honest, coverage-limited (21 % shuttle coverage on the "12 fps" cache — really 10 fps; the 30 fps re-measure
+is `features/analysis-30fps.md`). The match **score stays
 human-entered**; nothing here ever computes or overrides it. All `LANDING_*` thresholds remain **untuned
 first guesses** — no located-rate or precision claim before the landing answer key exists (see accept
 criterion below).
@@ -42,8 +43,9 @@ the single writer.
    → the first detection of that resting tail is the contact. Inputs are the same normalized
    image-space points stage 6 uses (`px/W, py/H`) — **not** (u,v), which is still wrong in the descent.
 2. **Graceful degradation — never fabricate.** `located=false` with a `reason`, and NO position, when:
-   `sparse` (< `LANDING_MIN_DETS` 4 terminal dets), `straddle` (terminal frame gap >
-   `LANDING_MAX_END_GAP_FRAMES` 2 — 30 fps sampling straddled the contact), `edge_cutoff` (last det
+   `sparse` (< `LANDING_MIN_DETS_S` 0.4 s of terminal dets — 4 at the real 10 fps, 12 at 30 fps), `straddle`
+   (terminal gap > `LANDING_MAX_END_GAP_S` 0.2 s — the sampling straddled the contact; checked before the
+   window-density test since 2026-10-25, `features/analysis-30fps.md`), `edge_cutoff` (last det
    within `LANDING_EDGE_MARGIN` 0.04 of a frame border — descent left the frame/airspace mask),
    `no_contact` (track ends still falling — covers occlusion at contact, the labeler's never-click-a-guess
    rule), `no_descent` (nothing fell), `implausible` (the contact's court projection is >

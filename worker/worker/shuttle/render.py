@@ -99,7 +99,9 @@ def render_overlay(video_id: str, tracker_name: str, out_dir: str, video_max_w: 
     # 3) overlay.mp4: current detection + a fading trail of the last 8, downscaled.
     scale = min(1.0, video_max_w / fw)
     ow, oh = int(fw * scale), int(fh * scale)
-    fps = float(manifest.get("analysis_fps") or 12.0)
+    from ..manifest import manifest_fps
+
+    fps = manifest_fps(manifest)  # the cache's measured cadence → real-time playback
     vw = cv2.VideoWriter(str(out / "overlay.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), fps, (ow, oh))
     trail: list = []
     for f in frames:

@@ -14,6 +14,7 @@ Run a baseline straight from a corrections file:
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 from typing import Dict, List, Sequence, Tuple
 
 from .geometry import ankle_point, apply_homography, foot_point
@@ -101,6 +102,33 @@ def ground_truth(corrections: Sequence[dict]) -> Dict[Key, dict]:
             o["foot"] = tuple(c["foot_norm"])
         if c.get("court_uv"):
             o["uv"] = tuple(c["court_uv"])
+    return out
+
+
+def remap_frame_idx(corrections: Sequence[dict], manifest_frames: Sequence[dict]) -> List[dict]:
+    """Re-key corrections made on a cache with a DIFFERENT cadence onto the current manifest.
+
+    `frame_idx` is the position in the frames.json the verify tool was showing; the same label also
+    carries `t_s`, its time into the clip. On a 30 fps re-ingest frame 181 is 6.03 s, not the 18.1 s it
+    was on the ~10 fps cache, so keying by frame_idx would silently compare unrelated frames. Every
+    correction that carries `t_s` gets the `frame` of the nearest current manifest entry (ties → the
+    earlier frame); corrections without `t_s` are kept as-is. Pure; the input list is not modified
+    (specs/features/analysis-30fps.md)."""
+    frames = sorted((float(f["t"]), int(f["frame"])) for f in manifest_frames)
+    if not frames:
+        return [dict(c) for c in corrections]
+    ts = [t for t, _ in frames]
+    out: List[dict] = []
+    for c in corrections:
+        c = dict(c)
+        t_s = c.get("t_s")
+        if t_s is not None:
+            t = float(t_s)
+            i = bisect_left(ts, t)
+            cands = [j for j in (i - 1, i) if 0 <= j < len(ts)]
+            best = min(cands, key=lambda j: (abs(ts[j] - t), j))
+            c["frame_idx"] = frames[best][1]
+        out.append(c)
     return out
 
 
@@ -305,7 +333,10 @@ def full_from_pipeline(video_id: str, corrections_path: str | None = None,
     w, h = int(manifest["width"]), int(manifest["height"])
 
     cpath = Path(corrections_path) if corrections_path else cache / "corrections.json"
-    cors = json.loads(cpath.read_text(encoding="utf-8")).get("corrections", [])
+    raw_cors = json.loads(cpath.read_text(encoding="utf-8")).get("corrections", [])
+    # Labels were made on a specific cache; re-key by time so a 30 fps re-ingest scores correctly.
+    cors = remap_frame_idx(raw_cors, manifest["frames"])
+    n_remapped = sum(1 for a, b in zip(raw_cors, cors) if a.get("frame_idx") != b.get("frame_idx"))
     gt = ground_truth(cors)
 
     cal = _make_store(cfg).get_calibration(video_id)
@@ -334,7 +365,8 @@ def full_from_pipeline(video_id: str, corrections_path: str | None = None,
     n_overlay = overlay_filled(pm, track_rows, t_to_frame)
     rep = score(pm, gt, w, h)
     rep["meta"] = {"video_id": video_id, "foot_k": foot_k, "w": w, "h": h, "labels": labels,
-                   "pose": bool(pose_feet), "pose_conf_thr": pose_conf_thr, "overlay_filled": n_overlay}
+                   "pose": bool(pose_feet), "pose_conf_thr": pose_conf_thr, "overlay_filled": n_overlay,
+                   "frame_idx_remapped_by_t": n_remapped}
     return rep
 
 

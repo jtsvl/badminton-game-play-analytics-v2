@@ -18,12 +18,16 @@ import logging
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
+from ..manifest import measured_fps
 from .features import SLOTS, build_sample, slot_of_role
 
 log = logging.getLogger("worker.stroke.dataset")
 
-FPS_EXPECTED = 12.0  # the ingest analysis cadence (ingest.DEFAULT_ANALYSIS_FPS)
-FPS_TOLERANCE = 0.2  # warn when median frame dt deviates more than this fraction from 1/12
+# The cadence the stroke dataset / 16-step BST4 were built on: the REQUESTED 12 fps, which the real caches
+# deliver as ~10 fps (inside the tolerance). A 30 fps cache trips the guard — the fixed 16-frame window
+# then spans a third of the time and the model needs a retrain (specs/features/analysis-30fps.md).
+FPS_EXPECTED = 12.0
+FPS_TOLERANCE = 0.2  # warn when the measured frame spacing deviates more than this fraction from 1/12
 
 
 def slot_report(rows: Sequence[dict]) -> dict:
@@ -50,14 +54,14 @@ def slot_report(rows: Sequence[dict]) -> dict:
 
 
 def _fps_guard(frames: List[dict], video_id: str) -> None:
-    dts = sorted(frames[i + 1]["t"] - frames[i]["t"] for i in range(len(frames) - 1))
-    if not dts:
+    fps = measured_fps(frames)
+    if fps is None:
         return
-    median_dt = dts[len(dts) // 2]
-    if median_dt > 0 and abs(median_dt - 1 / FPS_EXPECTED) / (1 / FPS_EXPECTED) > FPS_TOLERANCE:
-        log.warning("stroke dataset: video %s median frame dt %.4fs deviates >%d%% from the "
-                    "12 fps analysis cadence — window time-math is off (stage-7 assumption)",
-                    video_id, median_dt, int(FPS_TOLERANCE * 100))
+    if abs(1 / fps - 1 / FPS_EXPECTED) / (1 / FPS_EXPECTED) > FPS_TOLERANCE:
+        log.warning("stroke dataset: video %s runs at %.2f fps, not the %.0f fps cadence the 16-frame "
+                    "windows / BST4 were built on — window time-math is off; retrain before trusting "
+                    "stage 7 on this cache (specs/features/analysis-30fps.md)",
+                    video_id, fps, FPS_EXPECTED)
 
 
 def build_video_samples(cache: Path, labels: Sequence[dict],
