@@ -199,6 +199,51 @@ class TestCountHits(unittest.TestCase):
         self.assertIsNone(seg.count_hits([det(10.0, 0.5, 0.5), det(10.1, 0.5, 0.6)]))
 
 
+class TestThresholdsForFps(unittest.TestCase):
+    """Per-step distances and detection counts are durations/rates (specs/features/analysis-30fps.md);
+    the REFERENCE cadence (the real 10 fps of the tuned caches) reproduces the tuned values exactly."""
+
+    def test_reference_cadence_reproduces_the_tuned_values(self):
+        th = seg.thresholds_for_fps(10.0)
+        self.assertAlmostEqual(th["max_jump"], 0.10)
+        self.assertEqual(th["min_run_len"], 4)
+        self.assertEqual(th["min_dets"], 5)
+        self.assertAlmostEqual(th["hit_deadband"], 0.01)
+        self.assertEqual((seg.MIN_RUN_LEN, seg.MIN_DETS), (4, 5))
+        self.assertAlmostEqual(seg.MAX_JUMP, 0.10)
+        self.assertAlmostEqual(seg.HIT_DEADBAND, 0.01)
+
+    def test_30fps_scales_counts_up_and_per_step_values_down(self):
+        th = seg.thresholds_for_fps(30.0)
+        self.assertAlmostEqual(th["max_jump"], 1.0 / 30)
+        self.assertEqual(th["min_run_len"], 12)
+        self.assertEqual(th["min_dets"], 15)
+        self.assertAlmostEqual(th["hit_deadband"], 0.1 / 30)
+
+    def test_short_run_is_foreign_at_30fps_but_sustained_at_10fps(self):
+        # 8 detections = 0.27 s at 30 fps (< the 0.4 s sustained-flight floor) but 0.8 s at 10 fps
+        rally = line(0.0, 0.10, 0.5, 0.004, 0.0, 18)
+        frag = line(5.0, 0.80, 0.2, 0.004, 0.0, 8)
+        at30 = seg.reject_foreign_runs([rally, frag], min_run_len=seg.thresholds_for_fps(30.0)["min_run_len"])
+        at10 = seg.reject_foreign_runs([rally, frag], min_run_len=seg.thresholds_for_fps(10.0)["min_run_len"])
+        self.assertEqual(len(at30), 1)
+        self.assertEqual(len(at10), 2)
+
+
+class TestBuildRalliesCadence(unittest.TestCase):
+    def test_fps_is_inferred_from_the_detections(self):
+        out = seg.build_rallies(line(0.0, 0.10, 0.5, 0.004, 0.0, 18))   # frame = round(t·30)
+        self.assertAlmostEqual(out["fps"], 30.0, places=3)
+
+    def test_explicit_fps_is_used_and_echoed(self):
+        out = seg.build_rallies(line(0.0, 0.10, 0.5, 0.004, 0.0, 18), fps=10.0)
+        self.assertAlmostEqual(out["fps"], 10.0)
+
+    def test_nothing_to_infer_falls_back_to_the_reference_cadence(self):
+        self.assertEqual(seg.build_rallies([])["fps"], seg.REFERENCE_FPS)
+        self.assertEqual(seg.REFERENCE_FPS, 10.0)
+
+
 class TestBuildRallies(unittest.TestCase):
     def test_empty_detections_yield_no_rallies(self):
         out = seg.build_rallies([])

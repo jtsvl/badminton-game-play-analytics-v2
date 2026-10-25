@@ -18,15 +18,21 @@ from ..geometry import (
     apply_homography, fill_track_gaps, foot_point, select_role_primaries,
     smooth_track, stitch_fragments_framewise,
 )
+from ..manifest import NOMINAL_FPS, REFERENCE_FPS, frames_for_seconds, manifest_fps
 
 log = logging.getLogger("worker.pipeline.gate_track")
 
 MARGIN = 0.06  # court-normalized gating margin (~37 cm wide / 80 cm long)
-MAX_GAP = int(os.environ.get("GAP_FILL_MAX_FRAMES", "8"))  # longest short hole to interpolate (RC3)
-# Centered moving-average window for per-role jitter smoothing. 9 @ ~12 Hz ≈ 0.75 s: the far court's
-# few px/m amplify ankle-point jitter into implausible far-court top speeds, so smooth harder than the
-# old 5 without flattening genuine bursts (specs/fix-later.md "Far-court top-speed inflation").
-SMOOTH_WINDOW = int(os.environ.get("SMOOTH_WINDOW", "9"))
+# Gap fill + smoothing are DURATIONS (specs/features/analysis-30fps.md): the tuned 8-frame hole / 9-frame
+# window were measured on the real ~10 fps cadence of the "12 fps" caches, i.e. 0.8 s / 0.9 s. run()
+# converts them to frames from the manifest's measured cadence; MAX_GAP / SMOOTH_WINDOW are the
+# REFERENCE_FPS equivalents (8 / 9) for direct callers and tests. The 0.9 s smoothing exists because the
+# far court's few px/m amplify ankle-point jitter into implausible far-court top speeds — smooth harder
+# than the old 5 frames without flattening genuine bursts (specs/fix-later.md "Far-court top-speed inflation").
+GAP_FILL_MAX_S = float(os.environ.get("GAP_FILL_MAX_S", "0.8"))   # longest short hole to interpolate (RC3)
+SMOOTH_WINDOW_S = float(os.environ.get("SMOOTH_WINDOW_S", "0.9"))  # centered moving-average window
+MAX_GAP = frames_for_seconds(GAP_FILL_MAX_S, REFERENCE_FPS)
+SMOOTH_WINDOW = frames_for_seconds(SMOOTH_WINDOW_S, REFERENCE_FPS)
 # Interim foot-truncation correction: push the foot down k*bbox-height before projecting (RC1).
 # 0 = off (identical to the old bbox-bottom). k≈0.16 fitted on f35d0984 (see eval_corrections).
 # Used as the FALLBACK when the pose stage has no confident ankle (Phase-3 three-layer foot).
@@ -82,7 +88,7 @@ def build_role_tracks(samples, counts, frame_t, n, discipline, max_gap=MAX_GAP, 
 
     frames_seen = sorted(frame_t)
     spf = ((frame_t[frames_seen[-1]] - frame_t[frames_seen[0]]) / (frames_seen[-1] - frames_seen[0])
-           if len(frames_seen) > 1 else 1 / 12)
+           if len(frames_seen) > 1 else 1 / NOMINAL_FPS)
     roles = select_role_primaries(by_tid, n, spf)  # primary track -> role
 
     role_paths = {role: by_tid[tid] for tid, role in roles.items()}
@@ -180,6 +186,12 @@ def run(ctx) -> None:
         raise RuntimeError("gate_track: no detections.parquet in ctx, cache or bucket — detect must run first")
     manifest = json.loads((cache / "frames.json").read_text())
     frame_t = {f["frame"]: f["t"] for f in manifest["frames"]}
+    # Durations → frames at THIS cache's measured cadence (a "12 fps" cache really runs ~10 fps).
+    fps = manifest_fps(manifest)
+    max_gap = frames_for_seconds(GAP_FILL_MAX_S, fps)
+    smooth_window = frames_for_seconds(SMOOTH_WINDOW_S, fps)
+    log.info("gate_track: cadence %.2f fps → gap fill ≤%d frames (%.1fs), smoothing %d frames (%.1fs)",
+             fps, max_gap, GAP_FILL_MAX_S, smooth_window, SMOOTH_WINDOW_S)
 
     match = store.get_match(match_id) or {}
     discipline = match.get("discipline", "doubles")
@@ -202,7 +214,7 @@ def run(ctx) -> None:
         raise RuntimeError("gate_track: no in-court detections after gating (check calibration)")
 
     # Roles + re-ID stitch of dropped fragments + bounded short-hole interp (Phase 4).
-    out_rows, role_of = build_role_tracks(samples, counts, frame_t, n, discipline, MAX_GAP)
+    out_rows, role_of = build_role_tracks(samples, counts, frame_t, n, discipline, max_gap, smooth_window)
 
     out = cache / "tracks.parquet"
     pl.DataFrame(out_rows, schema={

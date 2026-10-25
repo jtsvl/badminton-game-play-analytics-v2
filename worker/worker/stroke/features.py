@@ -11,7 +11,13 @@ see the spec's design section for the numbers).
 """
 from __future__ import annotations
 
-SEQ_LEN = 16  # frames per window ≈ ±0.67 s at the 12 fps analysis cadence
+from ..manifest import REFERENCE_FPS, frames_for_seconds, measured_fps
+
+# Frames per window — a FIXED model dimension (BST4 has 16 time steps): ±0.8 s at the real ~10 fps
+# cadence the stroke dataset was built on. On a 30 fps cache the same 16 frames span only ±0.27 s, so
+# stage 7 needs a retrain before it may run on 30 fps caches (specs/features/analysis-30fps.md; stroke
+# is not wired into the pipeline today — stroke/dataset._fps_guard warns).
+SEQ_LEN = 16
 
 SLOTS = ("near_left", "near_right", "far_left", "far_right")  # fixed stream order
 
@@ -29,7 +35,11 @@ def window_frames(anchor: int, seq_len: int = SEQ_LEN) -> list[int]:
     return list(range(anchor - half, anchor - half + seq_len))
 
 
-SHUTTLE_MAX_GAP = 6  # frames — matches stage 5/6's "interpolate within an arc only" principle
+# Interpolate shuttle gaps up to this DURATION within an arc (the stage 5/6 "within an arc only"
+# principle): the tuned 6 frames at the real 10 fps cadence. build_sample derives the frame count
+# from the manifest's cadence; SHUTTLE_MAX_GAP is the REFERENCE_FPS equivalent for direct callers.
+SHUTTLE_MAX_GAP_S = 0.6
+SHUTTLE_MAX_GAP = frames_for_seconds(SHUTTLE_MAX_GAP_S, REFERENCE_FPS)
 
 
 def shuttle_stream(dets: dict[int, tuple[float, float]], window: list[int], anchor: int,
@@ -209,7 +219,9 @@ def build_sample(pose_rows: list[dict], track_rows: list[dict],
     t_by_frame = {f["frame"]: f["t"] for f in frames}
     pad = sum(1 for f in window if f not in t_by_frame)
 
-    shuttle = shuttle_stream(dets, window, anchor, frame_w, frame_h)
+    fps = measured_fps(frames) or REFERENCE_FPS  # the gap is a duration; frames follow the cadence
+    shuttle = shuttle_stream(dets, window, anchor, frame_w, frame_h,
+                             max_gap=frames_for_seconds(SHUTTLE_MAX_GAP_S, fps))
     coverage = sum(1 for p in shuttle if p != [0.0, 0.0]) / len(window)
 
     window_pose = [r for r in pose_rows if window[0] <= r["frame"] <= window[-1]]

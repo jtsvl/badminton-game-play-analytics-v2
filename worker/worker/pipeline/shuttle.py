@@ -3,7 +3,7 @@
 The hall holds several courts (several shuttles) and the shuttle is a few pixels in a wide 4K DJI shot,
 so we crop to the target court's calibration polygon first (`geometry.court_crop_box`): that ignores the
 other courts AND restores effective shuttle resolution before the tracker downsizes. A swappable
-backend (WASB / TrackNetV3, behind `shuttle.get_tracker`) returns a per-frame peak; we map it through
+backend (WASB / TrackNetV3 / TrackNetV5, behind `shuttle.get_tracker`) returns a per-frame peak; we map it through
 the SAME homography the player overlay uses to court (u,v), drop low-confidence dropouts, reject isolated
 spikes, and write `shuttle.parquet (t,u,v,visibility + debug)`. overlay then emits subject='shuttle'.
 
@@ -19,14 +19,23 @@ import os
 from pathlib import Path
 
 from ..geometry import court_airspace_polygon, court_crop_box
+from ..manifest import REFERENCE_FPS, manifest_fps, per_step
 from ..shuttle import get_tracker
 from ..shuttle.base import chunk_spans
 from ..shuttle.track import build_shuttle_track
 
 log = logging.getLogger("worker.pipeline.shuttle")
 
-CONF_THR = float(os.environ.get("SHUTTLE_CONF_THR", "0.5"))   # peak below this = a real dropout
-MAX_STEP = float(os.environ.get("SHUTTLE_MAX_STEP", "0.5"))   # court-unit isolated-spike guard
+# Peak-confidence gate — a peak below this is a real dropout. Unset → the backend's own published
+# threshold (`tracker.conf_thr`, e.g. TrackNetV5's 0.35 Lite / 0.30 full), else 0.5; an explicit env
+# always wins (resolve_conf_thr). CONF_THR keeps the module-level fallback for direct callers.
+CONF_THR_ENV = os.environ.get("SHUTTLE_CONF_THR")
+CONF_THR = float(CONF_THR_ENV) if CONF_THR_ENV else 0.5
+# Court-space isolated-spike guard as a RATE (court units per SECOND); run() derives the per-step value
+# from the manifest's measured cadence (specs/features/analysis-30fps.md). 5.0/s = the tuned 0.5 per
+# step at the real 10 fps cadence; MAX_STEP is that per-step equivalent for direct callers.
+MAX_STEP_PER_S = float(os.environ.get("SHUTTLE_MAX_STEP_PER_S", "5.0"))
+MAX_STEP = per_step(MAX_STEP_PER_S, REFERENCE_FPS)
 # Bounded-memory prediction: process the clip in chunks of this many crops instead of holding every
 # full-res crop in RAM (a full match would OOM). Boundaries are aligned to the backend's temporal
 # window (chunk_spans), and TrackNetV3's median background is computed per-clip (begin_clip), so
@@ -50,6 +59,16 @@ SCHEMA = {
     "t": "Float64", "u": "Float64", "v": "Float64", "visibility": "Float64",
     "frame": "Int64", "px": "Float64", "py": "Float64", "conf": "Float64", "tracker": "Utf8",
 }
+
+
+def resolve_conf_thr(tracker, env_value: str | None = CONF_THR_ENV) -> float:
+    """The peak-confidence gate for this run: `SHUTTLE_CONF_THR` when set, else the backend's declared
+    `conf_thr` (its published operating point), else 0.5. Without this a backend whose threshold is
+    below 0.5 would be silently re-thresholded by the stage."""
+    if env_value not in (None, ""):
+        return float(env_value)
+    declared = getattr(tracker, "conf_thr", None)
+    return float(declared) if declared else 0.5
 
 
 class CropLoader:
@@ -115,6 +134,8 @@ def run(ctx) -> None:
     manifest = json.loads((cache / "frames.json").read_text())
     frame_w, frame_h = int(manifest["width"]), int(manifest["height"])
     frames = manifest["frames"]
+    fps = manifest_fps(manifest)  # measured cadence — the spike guard is a rate, applied per frame step
+    max_step = per_step(MAX_STEP_PER_S, fps)
     fr = ctx.get("frame_range")  # optional (bench/render only); production never sets it → full clip
     if fr:
         a, b = fr
@@ -143,6 +164,7 @@ def run(ctx) -> None:
     loader = CropLoader(frames, frames_dir, crop_box, mask)
 
     tracker = get_tracker()
+    conf_thr = resolve_conf_thr(tracker)
     begin_clip = getattr(tracker, "begin_clip", None)
     if callable(begin_clip):
         begin_clip(loader)  # per-clip state (TrackNetV3 median, Fake phase) shared across chunks
@@ -159,7 +181,7 @@ def run(ctx) -> None:
     raw = [(d.frame, d.x, d.y, d.visibility) for d in dets]
     mw, mh = tracker.model_size
     rows = build_shuttle_track(raw, H, crop_box, mw, mh, t_by_frame,
-                               conf_thr=CONF_THR, max_step=MAX_STEP)
+                               conf_thr=conf_thr, max_step=max_step)
     for r in rows:
         r["tracker"] = tracker.name
 
@@ -174,9 +196,9 @@ def run(ctx) -> None:
         store.upload(cfg.artifact_bucket, f"{video_id}/shuttle.parquet", out.read_bytes(),
                      "application/octet-stream")
 
-    n_seen = sum(1 for d in dets if d.visibility >= CONF_THR)
+    n_seen = sum(1 for d in dets if d.visibility >= conf_thr)
     rate = 100.0 * len(rows) / max(n_crops, 1)
-    log.info("shuttle: %s on %d frames → %d kept rows (%.0f%% coverage; %d raw peaks ≥thr, "
-             "crop=%s mask=%s chunk=%d)%s", tracker.name, n_crops, len(rows), rate, n_seen,
-             crop_box, MASK, CHUNK_FRAMES,
+    log.info("shuttle: %s on %d frames → %d kept rows (%.0f%% coverage; %d raw peaks ≥%.2f, "
+             "max_step=%.3f/frame @%.2f fps, crop=%s mask=%s chunk=%d)%s", tracker.name, n_crops,
+             len(rows), rate, n_seen, conf_thr, max_step, fps, crop_box, MASK, CHUNK_FRAMES,
              f", {loader.skipped} unreadable frames skipped" if loader.skipped else "")

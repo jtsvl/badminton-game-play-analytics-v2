@@ -18,6 +18,7 @@ from typing import Dict, Optional, Sequence
 
 from ..geometry import SINGLES_INSET_M
 from ..insights import COURT_L_M, COURT_W_M
+from ..manifest import REFERENCE_FPS, fps_from_frames_t, frames_for_seconds
 from .segment import END_MIN_CONF
 
 Det = Dict[str, float]
@@ -29,9 +30,16 @@ SINGLES_U_MAX = 1.0 - SINGLES_U_MIN
 
 # --- landing-frame selection (image space) ----------------------------------------------------------
 LANDING_WINDOW_S = float(os.environ.get("LANDING_WINDOW_S", "0.5"))    # terminal window before the last det
-LANDING_MAX_WINDOW_DETS = int(os.environ.get("LANDING_MAX_WINDOW_DETS", "8"))
-LANDING_MIN_DETS = int(os.environ.get("LANDING_MIN_DETS", "4"))        # fewer → sparse
-LANDING_MAX_END_GAP_FRAMES = int(os.environ.get("LANDING_MAX_END_GAP_FRAMES", "2"))  # larger → straddle
+# Detection counts / frame gaps are DURATIONS (specs/features/analysis-30fps.md): the tuned 8 / 4 / 2 were
+# measured on the real ~10 fps cadence → 0.8 s / 0.4 s / 0.2 s. detect_landing derives the counts from the
+# rally's cadence (`fps`, inferred from its (frame, t) span when not given); the *_DETS / *_FRAMES names
+# keep the REFERENCE_FPS equivalents for direct callers.
+LANDING_MAX_WINDOW_S = float(os.environ.get("LANDING_MAX_WINDOW_S", "0.8"))    # cap on dets in the window
+LANDING_MIN_DETS_S = float(os.environ.get("LANDING_MIN_DETS_S", "0.4"))        # fewer → sparse
+LANDING_MAX_END_GAP_S = float(os.environ.get("LANDING_MAX_END_GAP_S", "0.2"))  # larger → straddle
+LANDING_MAX_WINDOW_DETS = frames_for_seconds(LANDING_MAX_WINDOW_S, REFERENCE_FPS)
+LANDING_MIN_DETS = frames_for_seconds(LANDING_MIN_DETS_S, REFERENCE_FPS)
+LANDING_MAX_END_GAP_FRAMES = frames_for_seconds(LANDING_MAX_END_GAP_S, REFERENCE_FPS)
 LANDING_EDGE_MARGIN = float(os.environ.get("LANDING_EDGE_MARGIN", "0.04"))       # border zone → edge_cutoff
 LANDING_UNCERTAIN_EDGE = float(os.environ.get("LANDING_UNCERTAIN_EDGE", "0.08")) # barrel-bow zone → uncertain
 LANDING_FLAT_VY_ABS = float(os.environ.get("LANDING_FLAT_VY_ABS", "0.25"))   # |vy| (norm/s) below = at rest
@@ -47,24 +55,43 @@ def _near_border(x: float, y: float, margin: float) -> bool:
     return min(x, 1.0 - x, y, 1.0 - y) < margin
 
 
-def detect_landing(rally_dets: Sequence[Det], min_conf: float = END_MIN_CONF) -> dict:
+def landing_counts(fps: float) -> Dict[str, int]:
+    """The detection-count / frame-gap thresholds at a cache cadence of `fps` (REFERENCE_FPS → 8/4/2)."""
+    return {
+        "max_window_dets": frames_for_seconds(LANDING_MAX_WINDOW_S, fps),
+        "min_dets": frames_for_seconds(LANDING_MIN_DETS_S, fps),
+        "max_end_gap_frames": frames_for_seconds(LANDING_MAX_END_GAP_S, fps),
+    }
+
+
+def _cadence(rally_dets: Sequence[Det], fps: Optional[float]) -> float:
+    return fps or fps_from_frames_t((d["frame"], d["t"]) for d in rally_dets if "frame" in d) or REFERENCE_FPS
+
+
+def detect_landing(rally_dets: Sequence[Det], min_conf: float = END_MIN_CONF,
+                   fps: Optional[float] = None) -> dict:
     """Find the floor-contact detection in a rally's terminal trajectory, or say honestly why not.
 
     Located ⇒ ``{located: True, t, frame, x, y, u, v, edge_uncertain, window_conf}`` where the landing
     detection is the FIRST of the flattened tail (descent stopped there). Degraded ⇒
     ``{located: False, reason}`` with reason ∈ sparse | straddle | edge_cutoff | no_descent | no_contact
     — and deliberately NO position: a fabricated landing pixel is worse than an absent one.
+    ``fps`` is the cache cadence the count thresholds are derived from (``landing_counts``); omitted →
+    inferred from the detections' (frame, t) span, else REFERENCE_FPS.
     """
+    counts = landing_counts(_cadence(rally_dets, fps))
     reliable = [d for d in rally_dets if d.get("conf", 1.0) >= min_conf]
-    if len(reliable) < LANDING_MIN_DETS:
+    if len(reliable) < counts["min_dets"]:
         return {"located": False, "reason": "sparse"}
-    t_last = reliable[-1]["t"]
-    window = [d for d in reliable if t_last - d["t"] <= LANDING_WINDOW_S][-LANDING_MAX_WINDOW_DETS:]
-    if len(window) < LANDING_MIN_DETS:
+    last, prev = reliable[-1], reliable[-2]
+    # Checked BEFORE the window-density test: a terminal dropout longer than LANDING_MAX_END_GAP_S also
+    # thins the 0.5 s window, and "contact fell into a gap" is the honest reason, at any cadence.
+    if last["t"] - prev["t"] > LANDING_MAX_END_GAP_S + 1e-9:
+        return {"located": False, "reason": "straddle"}
+    t_last = last["t"]
+    window = [d for d in reliable if t_last - d["t"] <= LANDING_WINDOW_S][-counts["max_window_dets"]:]
+    if len(window) < counts["min_dets"]:
         return {"located": False, "reason": "sparse"}
-    last, prev = window[-1], window[-2]
-    if last["frame"] - prev["frame"] > LANDING_MAX_END_GAP_FRAMES:
-        return {"located": False, "reason": "straddle"}   # contact fell into a detection gap
     if _near_border(last["x"], last["y"], LANDING_EDGE_MARGIN):
         return {"located": False, "reason": "edge_cutoff"}  # descent left the frame / airspace mask
 
@@ -113,7 +140,7 @@ def classify_landing(u: float, v: float, band_cm: float = LANDING_BAND_CM,
 
 
 def landing_event(rally_dets: Sequence[Det], discipline: str = "singles",
-                  min_conf: float = END_MIN_CONF) -> dict:
+                  min_conf: float = END_MIN_CONF, fps: Optional[float] = None) -> dict:
     """The ``events.type='landing'`` payload for one rally (spec shape).
 
     Located: ``{located, call, line, u, v, px, py, margin_cm, band_cm, confidence}`` — ``px, py`` are
@@ -125,7 +152,7 @@ def landing_event(rally_dets: Sequence[Det], discipline: str = "singles",
     ``edge_uncertain`` landings keep their position but are forced ``uncertain`` (lens bow near the
     frame edges; undistortion is still a no-op).
     """
-    d = detect_landing(rally_dets, min_conf)
+    d = detect_landing(rally_dets, min_conf, fps=fps)
     if not d["located"]:
         return {"located": False, "call": "uncertain", "line": None, "reason": d["reason"],
                 "band_cm": LANDING_BAND_CM, "confidence": None}

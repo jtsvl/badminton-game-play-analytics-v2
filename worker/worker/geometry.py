@@ -16,8 +16,14 @@ from statistics import median
 from typing import Dict, List, Sequence, Tuple
 
 from .insights import COURT_W_M, COURT_L_M
+from .manifest import frames_for_seconds
 
 log = logging.getLogger("worker.geometry")
+
+# Boundary medians in stitch_fragments_framewise span this much TIME of samples (the tuned 6 samples at
+# the real ~10 fps cadence); the count is derived per clip from `seconds_per_frame`
+# (specs/features/analysis-30fps.md).
+BOUNDARY_S = 0.6
 
 # Singles side lines sit this far inside each doubles side line (full length in singles).
 SINGLES_INSET_M = 0.46
@@ -323,6 +329,7 @@ def stitch_fragments_framewise(
     speed_cap_m_s: float = 6.0,
     ambiguity_margin_m: float = 0.5,
     collision_max_ratio: float = 0.2,
+    boundary_k: int = 0,
 ) -> Dict[int, str]:
     """Re-associate dropped in-court track fragments with the role they continue (re-ID v2).
 
@@ -364,7 +371,10 @@ def stitch_fragments_framewise(
     """
     from bisect import bisect_left
 
-    BOUNDARY_K = 6           # samples per boundary median (jitter/glitch damping)
+    # samples per boundary median (jitter/glitch damping): BOUNDARY_S of samples at this clip's cadence
+    # (= the tuned 6 at the real 10 fps), ≥2 so a median stays a median; `boundary_k` > 0 overrides.
+    BOUNDARY_K = boundary_k if boundary_k > 0 else frames_for_seconds(
+        BOUNDARY_S, 1.0 / seconds_per_frame, minimum=2)
     EXCLUDED_COEXIST_S = 1.0  # absolute seconds of partner coexistence that count as "accounted for"
     MIN_ELIMINATION_S = 2.0   # fragment length before elimination evidence is trusted
     CORPSE_MARGIN = 0.08      # v-depth past the net (~1 m) before a near anchor counts as wrong-half

@@ -11,10 +11,48 @@ import logging
 import os
 from pathlib import Path
 
+from ..manifest import frames_for_seconds, manifest_fps
+
 log = logging.getLogger("worker.pipeline.detect")
 
 DEFAULT_MODEL = os.environ.get("YOLO_MODEL", "yolo11m.pt")
 IMGSZ = int(os.environ.get("YOLO_IMGSZ", "1280"))  # 4K → 1280 keeps far/small players detectable
+# BoT-SORT keeps a lost track alive for `track_buffer` FRAMES (stock botsort.yaml: 30; ultralytics also
+# hard-codes frame_rate=30 inside the tracker) — 3.0 s at the real ~10 fps cadence but only 1.0 s at
+# 30 fps, which fragments tracks. Keep it a DURATION: run() writes a per-cache copy of the stock yaml with
+# track_buffer derived from the manifest's cadence (specs/features/analysis-30fps.md).
+TRACK_BUFFER_S = float(os.environ.get("TRACK_BUFFER_S", "3.0"))
+TRACKER_YAML = "botsort.yaml"
+
+
+def tracker_config(default_cfg: dict, track_buffer_frames: int) -> dict:
+    """Pure: the stock BoT-SORT config with only `track_buffer` replaced (≥ 1 frame)."""
+    cfg = dict(default_cfg)
+    cfg["track_buffer"] = int(max(1, track_buffer_frames))
+    return cfg
+
+
+def _tracker_yaml_for(cache: Path, fps: float) -> str:
+    """<cache>/botsort_<n>f.yaml with track_buffer = TRACK_BUFFER_S at this cadence. Any ultralytics API
+    hiccup falls back to the stock yaml with a warning — detection must never block on the tracker knob."""
+    n = frames_for_seconds(TRACK_BUFFER_S, fps)
+    try:
+        from ultralytics.utils.checks import check_yaml
+
+        try:
+            from ultralytics.utils import yaml_load, yaml_save
+        except ImportError:  # newer ultralytics: the helpers live on the YAML class
+            from ultralytics.utils import YAML
+
+            yaml_load, yaml_save = YAML.load, YAML.save
+        default = yaml_load(check_yaml(TRACKER_YAML))
+        out = cache / f"botsort_{n}f.yaml"
+        yaml_save(str(out), tracker_config(default, n))
+        return str(out)
+    except Exception as e:  # noqa: BLE001
+        log.warning("detect: could not derive a cadence-aware %s (%s) — using the stock track_buffer",
+                    TRACKER_YAML, e)
+        return TRACKER_YAML
 
 
 def _pick_device(model, sample_path: str):
@@ -52,14 +90,18 @@ def run(ctx) -> None:
     model = YOLO(DEFAULT_MODEL)
     first = str(frames_dir / f"{frames[0]['frame']:06d}.jpg")
     device = _pick_device(model, first)
-    log.info("detect: %s on %s, imgsz=%d, %d frames", DEFAULT_MODEL, device, IMGSZ, len(frames))
+    fps = manifest_fps(manifest)
+    tracker_yaml = _tracker_yaml_for(cache, fps)
+    log.info("detect: %s on %s, imgsz=%d, %d frames @ %.2f fps, tracker=%s (track_buffer %.1fs = %d frames)",
+             DEFAULT_MODEL, device, IMGSZ, len(frames), fps, Path(tracker_yaml).name, TRACK_BUFFER_S,
+             frames_for_seconds(TRACK_BUFFER_S, fps))
 
     rows = []
     for f in frames:
         p = str(frames_dir / f"{f['frame']:06d}.jpg")
         res = model.track(
             p, persist=True, classes=[0], conf=0.25, iou=0.7, imgsz=IMGSZ, device=device,
-            tracker="botsort.yaml", verbose=False,
+            tracker=tracker_yaml, verbose=False,
         )[0]
         b = res.boxes
         if b is None or b.xyxy is None or len(b) == 0:

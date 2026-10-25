@@ -18,13 +18,16 @@ Run against a reviewed match (CLI, lazy imports):
 """
 from __future__ import annotations
 
+from pathlib import Path
 from statistics import median
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from .manifest import manifest_fps
 from .rally.segment import (BRIDGE_S, RALLY_SERVE_EXCLUSION_S, RALLY_SWING_BRIDGE_S, SETTLE_KMH,
                             SETTLE_WINDOW_S, players_settled_before)
 
 Span = Tuple[float, float]
+HIT_TOL_S = 0.25  # a predicted contact within ±this of a labelled hit counts (heuristic drift ≈ ±0.2 s)
 
 
 def _overlap_s(a: Span, b: Span) -> float:
@@ -344,6 +347,67 @@ def settled_counts(pred: Sequence[Span], gt: Sequence[Span], player_energy: Sequ
             "phantom_total": len(phantoms)}
 
 
+def landing_summary(events: Sequence[dict]) -> dict:
+    """Located-landing count + reason / call histograms over stage-6 `landing` events (pure). The 12-vs-30
+    fps measurement compares these (specs/features/analysis-30fps.md); `reasons` names why each
+    unlocated landing degraded (sparse | straddle | edge_cutoff | no_descent | no_contact | implausible)."""
+    landings = [e for e in events if e.get("type") == "landing"]
+    reasons: Dict[str, int] = {}
+    calls: Dict[str, int] = {}
+    located = 0
+    for e in landings:
+        p = e.get("payload") or {}
+        if p.get("located"):
+            located += 1
+            calls[p.get("call", "?")] = calls.get(p.get("call", "?"), 0) + 1
+        else:
+            reasons[p.get("reason", "?")] = reasons.get(p.get("reason", "?"), 0) + 1
+    return {"rallies": len(landings), "located": located, "reasons": reasons, "calls": calls}
+
+
+def hit_recall(pred_times: Sequence[float], label_times: Sequence[float], no_hit_times: Sequence[float],
+               tol_s: float = HIT_TOL_S) -> dict:
+    """Hit RECALL of predicted contact times (stage-6 serve + hit events) against the trainer's confirmed
+    hits, plus how many of the known false positives (`no_hit` rows) are proposed again. Matching is 1:1,
+    closest pairs first (`_greedy_match`). Precision proper is NOT computable from these labels — they only
+    judged candidates the old heuristic proposed, so an unlabelled new candidate is neither right nor
+    wrong; `candidates_per_label` is the honest proxy. Pure."""
+    pred = sorted(float(t) for t in pred_times)
+    labels = sorted(float(t) for t in label_times)
+    no_hit = sorted(float(t) for t in no_hit_times)
+    found = _greedy_match(pred, labels, tol_s) if pred and labels else 0
+    redetected = sum(1 for t in no_hit if any(abs(p - t) <= tol_s for p in pred))
+    return {
+        "tol_s": tol_s,
+        "n_pred": len(pred),
+        "n_labels": len(labels),
+        "found": found,
+        "recall": round(found / len(labels), 4) if labels else None,
+        "n_no_hit": len(no_hit),
+        "no_hit_redetected": redetected,
+        "no_hit_redetected_rate": round(redetected / len(no_hit), 4) if no_hit else None,
+        "candidates_per_label": round(len(pred) / len(labels), 3) if labels else None,
+        "note": "recall only — the stroke labels judged the OLD heuristic's candidates, so precision of new "
+                "candidates is unmeasurable; candidates_per_label is the proxy",
+    }
+
+
+def load_hit_labels(video_id: str, labeling_root: Path) -> Tuple[List[float], List[float]]:
+    """(confirmed hit times, rejected `no_hit` candidate times) for one video from the trainer's stroke
+    labels (`stroke_labels.parquet`, `hit_detection_eval.parquet`; keyed by video_id + t_s, so they are
+    valid on any cadence). Missing files → empty lists."""
+    import polars as pl  # lazy
+
+    def times(name: str) -> List[float]:
+        p = Path(labeling_root) / name
+        if not p.exists():
+            return []
+        df = pl.read_parquet(p)
+        return sorted(float(t) for t in df.filter(pl.col("video_id") == video_id)["t_s"].to_list())
+
+    return times("stroke_labels.parquet"), times("hit_detection_eval.parquet")
+
+
 def format_report(rep: dict) -> str:
     """Human-readable scorecard for the CLI — confusion lines in the trainer's vocabulary."""
     b, c = rep["boundary"], rep["confusion"]
@@ -384,13 +448,15 @@ def gt_from_db(store, slug: str) -> Tuple[List[Span], dict]:
     return spans, match
 
 
-def predict_from_cache(video_id: str, cfg) -> List[Span]:
+def build_from_cache(video_id: str, cfg, shuttle_path: Optional[str] = None,
+                     discipline: str = "singles") -> dict:
     """Re-run build_rallies from the cached parquets through rally_hit's own loaders — NOT a
     duplicate loading path, else the 'flags-off baseline reproduces the pre-review machine
     output' claim silently breaks. Knobs (incl. RALLY_SWING_BRIDGE) come from env exactly like
-    the pipeline, so this single path stays truthful once the swing-bridge flag flips on."""
+    the pipeline, the cadence from the manifest (so a 30 fps cache gets 30 fps thresholds), and
+    `shuttle_path` may point at another tracker's parquet (`shuttle.<tracker>.parquet` from
+    `eval_shuttle --compare`) for a downstream A/B. Returns the full ``{rallies, events, fps}``."""
     import json
-    from pathlib import Path
 
     from .pipeline import rally_hit
     from .rally import segment as seg
@@ -399,9 +465,14 @@ def predict_from_cache(video_id: str, cfg) -> List[Span]:
     manifest = json.loads((cache / "frames.json").read_text())
     frame_w, frame_h = int(manifest["width"]), int(manifest["height"])
 
-    dets = rally_hit.load_dets(str(cache / "shuttle.parquet"), frame_w, frame_h)
+    dets = rally_hit.load_dets(shuttle_path or str(cache / "shuttle.parquet"), frame_w, frame_h)
+    return seg.build_rallies(dets, load_player_energy(video_id, cfg), load_swings(video_id, cfg),
+                             discipline=discipline, fps=manifest_fps(manifest))
 
-    out = seg.build_rallies(dets, load_player_energy(video_id, cfg), load_swings(video_id, cfg))
+
+def predict_from_cache(video_id: str, cfg, shuttle_path: Optional[str] = None) -> List[Span]:
+    """Predicted rally spans from the cache (see build_from_cache)."""
+    out = build_from_cache(video_id, cfg, shuttle_path)
     return [(float(r["t_start_s"]), float(r["t_end_s"])) for r in out["rallies"]]
 
 
@@ -410,8 +481,6 @@ def load_player_energy(video_id: str, cfg) -> Optional[list]:
     tracks.parquet — the exact series the pipeline's serve cue sees (single definition; the
     diagnostics path re-reads the small parquet rather than threading dataframes around).
     None when the parquet is absent or empty."""
-    from pathlib import Path
-
     from .pipeline import rally_hit
 
     tracks_path = Path(cfg.frame_cache_dir).expanduser() / str(video_id) / "tracks.parquet"
@@ -428,7 +497,6 @@ def load_swings(video_id: str, cfg) -> Optional[list]:
     exact events the pipeline's swing-bridge rule sees. None when tracks/pose parquets are
     absent or empty (same guard as ``load_player_energy``)."""
     import json
-    from pathlib import Path
 
     from .pipeline import rally_hit
 
@@ -452,7 +520,6 @@ def load_swing_samples(video_id: str, cfg) -> Tuple[List[dict], Dict[int, str]]:
     track ids; frame→t via frames.json; `source=\"interp\"` rows have no pose — harmless.
     Without tracks/pose parquets there is no swing signal at all — empty report, not a crash."""
     import json
-    from pathlib import Path
 
     import polars as pl  # lazy
 
@@ -532,6 +599,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--bridge-hist", action="store_true",
                     help="bridge-gap tuning report (T8): split-gap (should-bridge) vs real-gap "
                          "(must-not-bridge) swing-strength distributions + operating-point sweep")
+    ap.add_argument("--shuttle-parquet", metavar="PATH",
+                    help="score another tracker's detections (e.g. <cache>/<video>/shuttle.<tracker>.parquet "
+                         "from eval_shuttle --compare) instead of the cache's shuttle.parquet")
+    ap.add_argument("--landings", action="store_true",
+                    help="also report landings located / degraded-reason histogram (12-vs-30 fps bench)")
+    ap.add_argument("--hits", action="store_true",
+                    help="also report hit recall vs the trainer's stroke labels (stroke_labels.parquet + "
+                         "hit_detection_eval.parquet; recall only — see hit_recall)")
+    ap.add_argument("--labeling-root", metavar="DIR",
+                    help="dir holding the stroke label parquets (default: worker/worker/.labeling, then "
+                         "<frame_cache>/../.labeling)")
+    ap.add_argument("--hit-tol", type=float, default=HIT_TOL_S, help=f"hit match tolerance ±s (default {HIT_TOL_S})")
     args = ap.parse_args(argv)
 
     cfg = load_config()
@@ -540,7 +619,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     video = store.get_video_by_match(match["id"])
     if not video:
         raise RuntimeError(f"eval_rally: match {args.slug!r} has no video row")
-    pred = predict_from_cache(video["id"], cfg)
+    built = build_from_cache(video["id"], cfg, args.shuttle_parquet, match.get("discipline") or "singles")
+    pred = [(float(r["t_start_s"]), float(r["t_end_s"])) for r in built["rallies"]]
 
     if args.swing_hist:
         samples, half_by_track = load_swing_samples(video["id"], cfg)
@@ -641,23 +721,60 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rep = evaluate(pred, gt, tol_s=args.tol)
     rep["meta"] = {"slug": args.slug, "video_id": video["id"], "tol_s": args.tol,
-                   "rally_edited_at": match.get("rally_edited_at")}
+                   "rally_edited_at": match.get("rally_edited_at"), "cadence_fps": round(built["fps"], 3),
+                   "shuttle_parquet": args.shuttle_parquet or "shuttle.parquet",
+                   "frame_cache_dir": cfg.frame_cache_dir}
     # The two empirical-constant feeds (spec: veto span guard + bridge cap).
     rep["gt_span_stats"] = span_stats(gt)
     rep["split_gaps_s"] = split_gaps(pred, gt)
+    if args.landings:
+        rep["landings"] = landing_summary(built["events"])
+    if args.hits:
+        root = Path(args.labeling_root) if args.labeling_root else _default_labeling_root(cfg)
+        labels, no_hit = load_hit_labels(video["id"], root)
+        pred_hits = [float(e["t_s"]) for e in built["events"] if e.get("type") in ("hit", "serve")]
+        rep["hits"] = {"labeling_root": str(root), **hit_recall(pred_hits, labels, no_hit, args.hit_tol)}
 
     if args.json:
         print(json.dumps(rep, indent=2))
         return 0
     print(f"[{args.slug}] video={video['id']}  tol=±{args.tol}s  "
-          f"reviewed={match.get('rally_edited_at') or 'NEVER'}")
+          f"reviewed={match.get('rally_edited_at') or 'NEVER'}  cadence={built['fps']:.2f} fps  "
+          f"dets={rep['meta']['shuttle_parquet']}")
     print(format_report(rep))
     st = rep["gt_span_stats"]
     print(f"kept-rally spans: n={st['n']}  min={st['min_span_s']:.2f}s  "
           f"median={st['median_span_s']:.2f}s")
     gaps = rep["split_gaps_s"]
     print("trainer-merged gaps (s): " + (", ".join(f"{g:.2f}" for g in gaps) if gaps else "none"))
+    if args.landings:
+        ld = rep["landings"]
+        reasons = ", ".join(f"{k}={v}" for k, v in sorted(ld["reasons"].items())) or "none"
+        calls = ", ".join(f"{k}={v}" for k, v in sorted(ld["calls"].items())) or "none"
+        print("-" * 68)
+        print(f"landings located: {ld['located']}/{ld['rallies']}  calls: {calls}  degraded: {reasons}")
+    if args.hits:
+        h = rep["hits"]
+        print("-" * 68)
+        if h["recall"] is None:
+            print(f"hits: no stroke labels for this video under {h['labeling_root']}")
+        else:
+            print(f"hit recall @±{h['tol_s']}s: {h['found']}/{h['n_labels']} = {h['recall']:.3f}  "
+                  f"(candidates {h['n_pred']}, {h['candidates_per_label']}× labels)")
+            if h["no_hit_redetected_rate"] is not None:
+                print(f"known false positives re-proposed: {h['no_hit_redetected']}/{h['n_no_hit']} "
+                      f"= {h['no_hit_redetected_rate']:.3f}")
+            print(f"  note: {h['note']}")
     return 0
+
+
+def _default_labeling_root(cfg) -> Path:
+    """Where import-stroke-labels put the parquets: the repo's `worker/worker/.labeling`, else the
+    `.labeling` next to the configured frame cache (the stroke tools' convention)."""
+    here = Path(__file__).resolve().parent / ".labeling"
+    if (here / "stroke_labels.parquet").exists():
+        return here
+    return Path(cfg.frame_cache_dir).expanduser().parent / ".labeling"
 
 
 if __name__ == "__main__":
