@@ -98,23 +98,28 @@ and the low standing camera foreshortens the drop. Verified by **synthetic unit 
 foot within tolerance); real/multi-clip verification awaits a partial-occlusion answer key (specs/fix-later.md).
 
 ## Stage 5 — Shuttle tracking + white-wall problem (FR-15/16/17)
-**WASB (MIT) primary; TrackNetV3 (MIT) strong alternative — benchmark both.** White-shuttle-vs-white-wall is the
+**Production = the fine-tuned TrackNetV3 (MIT); WASB (MIT) is the frozen baseline; TrackNetV5 (ICIP 2026) is a
+third backend under A/B — `features/shuttle-tracknetv5.md`.** White-shuttle-vs-white-wall is the
 hardest case (video-camouflage: low appearance, distinct motion).
 **Multi-court isolation (first-class):** training sessions run several courts at once → several shuttles in
 frame. Isolate the **target** court before/around detection via the calibration mask (`mask_polygon_px` /
 `geometry.point_in_poly`) and a court-region crop (`geometry.court_crop_box`) — the crop also restores the
 tiny shuttle's effective resolution before a tracker downsizes to ~512×288. SOTA as of 2026 (web-checked):
-WASB (BMVC2023) tops the PwC badminton benchmark; TrackNetV3 leads recall (inpainting); TrackNetV4/V5 are
-incremental — keep WASB/TrackNetV3 for now. Layered mitigations:
+WASB (BMVC2023) tops the PwC badminton benchmark; TrackNetV3 leads recall (inpainting); TrackNetV4 is TF/Keras
+without published weights; the ICIP-2026 TrackNetV5 (PyTorch, from the V3 group) self-reports ~1 F1 point
+over V3 on broadcast footage (an independent re-implementation saw none) and is being A/B'd here at 30 fps —
+promoted only on a measured cross-session win (`features/shuttle-tracknetv5.md`). Layered mitigations:
 1. **Background-median subtraction** (per-clip; static tripod) removes the white wall — TrackNetV3 has it built-in.
 2. **Motion cues**: multi-frame input; optional frame-difference channel (OpenCV MOG2; avoid RAFT on MPS).
-3. **TrackNetV4 motion-attention** (now MIT) grafted on for small/blurry shuttles.
+3. **Motion attention** for small/blurry shuttles — TrackNetV4's idea (its official code is TF/Keras with no
+   published weights); TrackNetV5's gated motion prompt is the PyTorch successor under A/B.
 4. **Trajectory recovery**: TrackNetV3 inpainting + MonoTrack-style per-shot parabola + Kalman/RTS smoother —
    interpolate **within an arc only**, never across a racket contact.
 5. **Targeted fine-tuning** on labeled white-wall frames + over-exposure/brightness + mixup augmentation — biggest lever.
 6. Optional mild **CLAHE on L** front-end (train+infer on the same enhanced frames; verify it helps).
 Speed = homography + fps, **labeled estimate** with uncertainty (~5–8 km/h MAE best case). **2D only.**
-*Accept:* held-out **same-session** F1 ≥ 0.90 @ tol=4px in the pinned 512×288 space (measured 0.958 on game1);
+*Accept:* held-out **same-session** F1 ≥ 0.90 @ tol=4px in the pinned 512×288 space (measured **0.953** on game1 —
+in-sample, the 2026-07-02 re-measure with the recorded command; the earlier 0.958 was the first full-clip figure);
 **cross-session** gate F1 ≥ 0.80 on a newly-labeled clip before trusting a new session unlabeled; gaps over a
 wall bridged within an arc *(initial targets — revise as answer-key clips accumulate)*.
 
@@ -209,10 +214,15 @@ the two hot fixed-shape models (detector, RTMPose) — export at a single fixed 
 winner; validate INT8 doesn't hurt the tiny shuttle. **No MLX** (slow on Conv2d). Process locally; cloud NVIDIA
 for fine-tuning runs / large backfills — **exception: the stage-5 TrackNetV3 shuttle fine-tune runs locally on
 the Mac Studio M4 Max (MPS)** (small fine-tune; keeps the label→train→benchmark loop on one box against the
-real frame cache/weights; shuttle clips ingest at **30 fps** `analysis_fps`, the movement pipeline stays at
-**12 fps**). This needs the vendored TrackNetV3 `.cuda()`→MPS patch in `worker/training/`
+real frame cache/weights). This needs the vendored TrackNetV3 `.cuda()`→MPS patch in `worker/training/`
 (`PYTORCH_ENABLE_MPS_FALLBACK=1` alone does NOT redirect explicit `.cuda()`). See
 `specs/features/shuttle-finetune-plan.md` §6.
+
+**Analysis cadence (user decision 2026-10-25 — `features/analysis-30fps.md`).** The earlier hybrid
+(shuttle clips at 30 fps, movement at 12 fps) is superseded by a **full switch to 30 fps once measured**.
+Note the "12 fps" caches really run at **10 fps** on 30 fps sources (ingest's keep rule); every frame-count
+threshold is now a duration converted from the manifest's measured cadence, so the same code runs any
+cadence. `DEFAULT_ANALYSIS_FPS` stays 12 until the 12-vs-30 table in that spec is filled on the Mac.
 
 ## Honesty / estimates (must be surfaced in UI)
 3D trajectory & absolute speed (monocular, not Hawk-Eye), reaction time, footwork "efficiency" absolutes, and

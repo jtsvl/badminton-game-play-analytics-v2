@@ -3,7 +3,9 @@
 Pure parsing: "A:B" → (A, B) with inclusive non-negative bounds and A <= B. Garbage raises ValueError so
 the CLI fails loudly before any heavy render work; absent input is None (full clip). No torch needed.
 """
+import tempfile
 import unittest
+from pathlib import Path
 
 from worker.eval_shuttle import clip_to_range, parse_frame_range
 
@@ -27,6 +29,45 @@ class TestClipToRange(unittest.TestCase):
     def test_handles_string_frame_keys(self):
         rows = [{"frame": "5"}, {"frame": "10"}]
         self.assertEqual(clip_to_range(rows, (8, 12)), [{"frame": "10"}])
+
+
+class TestCompareCopyName(unittest.TestCase):
+    """`--compare` keeps every backend's detections as shuttle.<provenance>.parquet (the parquet's
+    `tracker` value, e.g. tracknetv5-lite@c7ca025e) so eval_rally --shuttle-parquet can A/B them and the
+    last backend (fake) no longer replaces the cache's shuttle.parquet."""
+
+    def _write(self, path, tracker_values):
+        try:
+            import polars as pl
+        except ImportError:
+            self.skipTest("polars (ml extra) not installed")
+        rows = [{"frame": i, "tracker": t} for i, t in enumerate(tracker_values)]
+        pl.DataFrame(rows, schema={"frame": pl.Int64, "tracker": pl.Utf8}).write_parquet(path)
+
+    def test_uses_the_parquets_provenance(self):
+        from worker.eval_shuttle import compare_copy_name
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "shuttle.parquet"
+            self._write(p, ["tracknetv5-lite@c7ca025e", "tracknetv5-lite@c7ca025e"])
+            self.assertEqual(compare_copy_name(p, "tracknetv5"), "shuttle.tracknetv5-lite@c7ca025e.parquet")
+
+    def test_falls_back_to_the_backend_key_when_empty_or_missing(self):
+        from worker.eval_shuttle import compare_copy_name
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "shuttle.parquet"
+            self._write(p, [])
+            self.assertEqual(compare_copy_name(p, "wasb"), "shuttle.wasb.parquet")
+            self.assertEqual(compare_copy_name(Path(d) / "nope.parquet", "fake"), "shuttle.fake.parquet")
+
+    def test_sanitises_odd_characters(self):
+        from worker.eval_shuttle import compare_copy_name
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "shuttle.parquet"
+            self._write(p, ["weird name/with spaces"])
+            self.assertEqual(compare_copy_name(p, "x"), "shuttle.weird_name_with_spaces.parquet")
 
 
 class TestParseFrameRange(unittest.TestCase):

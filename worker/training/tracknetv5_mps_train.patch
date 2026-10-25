@@ -1,0 +1,168 @@
+--- train.py.orig
++++ train.py
+@@ -63,6 +63,8 @@
+                    help='split to evaluate each epoch; the paper and the official\n                         V3 recipe both use test')
+     p.add_argument('--init_from', type=str, default='',
+                    help='checkpoint to load model weights from; optimiser state is\n                         NOT loaded, so the schedule starts fresh')
++    p.add_argument('--device', type=str, default='auto', choices=['auto', 'mps', 'cpu', 'cuda'],
++                   help='compute device (PATCH); cpu = the mandatory 2-batch NaN probe run')
+     p.add_argument('--quiet', action='store_true')
+     return p.parse_args()
+ 
+@@ -80,6 +82,56 @@
+ from test import eval_tracknet                               # noqa: E402
+ from utils.general import get_model                          # noqa: E402
+ 
++# ── LOCAL MPS PATCH (worker/training/tracknetv5_finetune.md) ──────────────────────────────────────
++# Upstream hard-codes .cuda() and bf16 autocast (CUDA-only); on the Mac Studio PYTORCH_ENABLE_MPS_FALLBACK
++# only redirects unimplemented ops, NOT explicit .cuda(). Route the trainer through a global DEVICE
++# (mps→cpu, fp32, no autocast/GradScaler off CUDA) and load checkpoints with weights_only=True
++# (allow-listing only the numpy scalar/dtype the release files pickle), mirroring
++# worker/shuttle/tracknetv5.py + the V3 patch. Scope = train.py (+ eval_tracknet in test.py).
++def pick_device(prefer='auto'):
++    if prefer == 'cpu':
++        return 'cpu'
++    if prefer == 'cuda' and torch.cuda.is_available():
++        return 'cuda'
++    if prefer in ('auto', 'mps') and torch.backends.mps.is_available():
++        return 'mps'
++    if prefer == 'auto' and torch.cuda.is_available():
++        return 'cuda'
++    return 'cpu'
++
++
++def _safe_load(path):
++    """torch.load with weights_only=True; the only non-torch globals in the release checkpoints are the
++    numpy scalar/dtype of `val_f1` — allow-list exactly those, never fall back to weights_only=False."""
++    import importlib
++    import numpy as np
++    allowed = [np.dtype]
++    scalar = None
++    for modname in ('numpy._core.multiarray', 'numpy.core.multiarray'):
++        try:
++            scalar = importlib.import_module(modname).scalar
++            break
++        except (ImportError, AttributeError):
++            pass
++    if scalar is not None:
++        allowed.append(scalar)
++        for legacy in ('numpy.core.multiarray.scalar', 'numpy._core.multiarray.scalar'):
++            if legacy != f'{scalar.__module__}.{scalar.__qualname__}':
++                allowed.append((scalar, legacy))   # numpy>=2 pickles the legacy name (torch>=2.6 tuple form)
++    try:
++        import numpy.dtypes as npd
++        allowed.extend(getattr(npd, n) for n in dir(npd) if n.endswith('DType'))
++    except ImportError:
++        pass
++    with torch.serialization.safe_globals(allowed):
++        return torch.load(path, map_location='cpu', weights_only=True)
++
++
++DEVICE = pick_device(getattr(ARGS, 'device', 'auto'))
++AMP_ENABLED = DEVICE == 'cuda'          # fp32 on MPS/CPU (CLAUDE.md: MPS fp32, validate vs CPU for NaNs)
++print(f'  device {DEVICE}  autocast {"on" if AMP_ENABLED else "off (fp32)"}', flush=True)
++# ──────────────────────────────────────────────────────────────────────────────────────────────────
++
+ 
+ def mixup(x, y, alpha=0.5):
+     """Blend pairs within the batch, targets included, as TrackNetV3 does."""
+@@ -103,13 +155,14 @@
+     it = tqdm(loader, mininterval=10.0) if verbose else loader
+     for step, (_, x, y, _, _) in enumerate(it):
+         optimizer.zero_grad(set_to_none=True)
+-        x = x.float().cuda(non_blocking=True)
+-        y = y.float().cuda(non_blocking=True)
++        x = x.float().to(DEVICE, non_blocking=True)   # PATCH: .cuda()→.to(DEVICE)
++        y = y.float().to(DEVICE, non_blocking=True)
+         if mix_a > 0:
+             # blends pairs within the batch, targets included, as the released
+             # TrackNetV3 was trained
+             x, y = mixup(x, y, mix_a)
+-        with autocast(device_type='cuda', dtype=AMP_DTYPE):
++        with autocast(device_type='cuda' if DEVICE == 'cuda' else 'cpu', dtype=AMP_DTYPE,
++                      enabled=AMP_ENABLED):   # PATCH: fp32 off CUDA
+             out = model(x)
+             if isinstance(out, (tuple, list)):
+                 main, aux = out
+@@ -218,11 +271,13 @@
+ 
+ 
+ def main():
++    global DEVICE   # PATCH: the MPS probe may fall back to CPU
+     a = ARGS
+     np.random.seed(a.seed)
+     torch.manual_seed(a.seed)
+-    torch.cuda.manual_seed(a.seed)
+-    torch.backends.cudnn.benchmark = True
++    if torch.cuda.is_available():            # PATCH: guard — no-op on a CUDA-less Mac
++        torch.cuda.manual_seed(a.seed)
++        torch.backends.cudnn.benchmark = True
+     if hasattr(torch, 'set_float32_matmul_precision'):
+         torch.set_float32_matmul_precision('high')
+ 
+@@ -258,15 +313,15 @@
+ 
+     nw = min(os.cpu_count(), 8)
+     train_loader = DataLoader(train_set, batch_size=a.batch_size, shuffle=True,
+-                              num_workers=nw, drop_last=True, pin_memory=True,
++                              num_workers=nw, drop_last=True, pin_memory=(DEVICE == 'cuda'),  # PATCH
+                               persistent_workers=True)
+     val_loader = DataLoader(val_set, batch_size=a.batch_size, shuffle=False,
+-                            num_workers=nw, drop_last=False, pin_memory=True,
++                            num_workers=nw, drop_last=False, pin_memory=(DEVICE == 'cuda'),  # PATCH
+                             persistent_workers=True)
+ 
+-    model = get_model(a.model_name, a.seq_len, a.bg_mode, alpha=a.model_alpha).cuda()
++    model = get_model(a.model_name, a.seq_len, a.bg_mode, alpha=a.model_alpha).to(DEVICE)  # PATCH
+     if a.init_from:
+-        ck = torch.load(a.init_from, map_location='cpu', weights_only=False)
++        ck = _safe_load(a.init_from)   # PATCH: weights_only=True + numpy allow-list
+         sd = ck.get('model_state_dict', ck)
+         missing, unexpected = model.load_state_dict(sd, strict=False)
+         print(f'  initialised from {a.init_from}', flush=True)
+@@ -306,17 +361,31 @@
+     if a.teacher_weights:
+         teacher = get_model(a.teacher_name or a.model_name, a.seq_len, a.bg_mode,
+                             alpha=a.model_alpha)
+-        tsd = torch.load(a.teacher_weights, map_location='cpu',
+-                         weights_only=False)['model_state_dict']
++        tsd = _safe_load(a.teacher_weights)['model_state_dict']   # PATCH: weights_only=True
+         teacher.load_state_dict(tsd, strict=True)
+-        teacher = teacher.cuda().eval()
++        teacher = teacher.to(DEVICE).eval()   # PATCH: .cuda()→.to(DEVICE)
+         for q in teacher.parameters():
+             q.requires_grad_(False)
+         print(f'  teacher {a.teacher_name or a.model_name} from {a.teacher_weights}, '
+               f'kd_weight {a.kd_weight}', flush=True)
+ 
+     # a scaler only matters for fp16 gradient underflow; bf16 does not need one
+-    scaler = GradScaler(enabled=(a.amp_dtype == 'fp16'))
++    scaler = GradScaler(enabled=(a.amp_dtype == 'fp16' and DEVICE == 'cuda'))   # PATCH
++    # PATCH: one-shot MPS NaN probe → CPU fallback (worker/shuttle/tracknetv5.py probe_device). fp32.
++    if DEVICE == 'mps':
++        try:
++            _probe = next(iter(train_loader))[1].float().to(DEVICE)
++            with torch.no_grad():
++                _out = model(_probe)
++            _out = _out[0] if isinstance(_out, (tuple, list)) else _out
++            if not bool(torch.isfinite(_out).all()):
++                print('non-finite output on MPS probe — falling back to CPU', flush=True)
++                DEVICE = 'cpu'; model.to(DEVICE)
++                if teacher is not None: teacher.to(DEVICE)
++        except Exception as e:
++            print(f'MPS probe failed ({e}) — falling back to CPU', flush=True)
++            DEVICE = 'cpu'; model.to(DEVICE)
++            if teacher is not None: teacher.to(DEVICE)
+     best_f1, best_ep = 0.0, -1
+     t_start = time.time()
+ 
+@@ -326,7 +395,8 @@
+                                   ds_w=a.ds_weight, teacher=teacher, kd_w=a.kd_weight,
+                                   mix_a=a.mixup_alpha)
+         val_loss, r = eval_tracknet(model, val_loader,
+-                                    {'verbose': False, 'tolerance': a.tolerance})
++                                    {'verbose': False, 'tolerance': a.tolerance,
++                                     'device': DEVICE})   # PATCH
+         if sched is not None:
+             sched.step(val_loss) if a.lr_scheduler == 'ReduceLROnPlateau' else sched.step()
+ 

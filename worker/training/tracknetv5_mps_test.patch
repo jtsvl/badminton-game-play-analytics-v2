@@ -1,0 +1,12 @@
+--- test.py.orig
++++ test.py
+@@ -336,7 +336,8 @@
+         data_prob = data_loader
+     
+     for step, (i, x, y, _, _) in enumerate(data_prob):
+-        x, y = x.float().cuda(), y.float().cuda()
++        _dev = param_dict.get('device', 'cpu')   # PATCH: .cuda()→DEVICE (train.py passes it)
++        x, y = x.float().to(_dev), y.float().to(_dev)
+         with torch.no_grad():
+             y_pred = model(x)
+ 
