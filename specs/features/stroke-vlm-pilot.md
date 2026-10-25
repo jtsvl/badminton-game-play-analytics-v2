@@ -1,9 +1,10 @@
 # Feature — Stroke VLM pilot: VideoJev-4B zero-shot on the labeled clips (stage-7 side experiment)
 
-**Status: BUILT, NOT RUN (2026-10-18).** Code, tests and protocol are in-tree; the model run needs
-the Mac Studio (weights, clips and labels live only there) — runbook `worker/training/videojev_pilot.md`.
-The results table below stays empty until then. **Nothing here wires anything into the pipeline**;
-below-gate models are labeling-assist only, never pipeline (stage-7 policy, `30-ml-pipeline.md`).
+**Status: RUN (2026-10-24/25) — result `closed`.** VideoJev-4B zero-shot scores **0.284** pooled accuracy on the
+503 confident eval rows (4 games), below the majority baseline 0.30 and BST's 0.400; top-2 0.382. Per the decision
+rule: no usable zero-shot signal on this footage, **no fine-tune**, no 35B cloud row. Numbers, commands and
+observations are in § Results; runbook `worker/training/videojev_pilot.md`. **Nothing here wires anything into
+the pipeline**; below-gate models are labeling-assist only, never pipeline (stage-7 policy, `30-ml-pipeline.md`).
 
 ## Why this exists
 - Stage 7's BST4 (`features/stroke-classification.md`) failed its gate: LOGO-CV **0.400** vs 0.70, with
@@ -87,8 +88,14 @@ Baselines carried in every report: chance 1/7, majority 165/554 ≈ 0.30, BST LO
 
 | date | split | preset | n confident | pooled acc | per-game | top-2 | τ* (cov.) | Unsicher abst. | tier | command |
 |---|---|---|---|---|---|---|---|---|---|---|
-| — | dev | — | — | — | — | — | — | — | — | *not run yet* |
-| — | eval | — | — | — | — | — | — | — | — | *not run yet* |
+| 2026-10-24/25 | dev (G5) | `plain_fps10` (selected of 10) | 51 (+17 Unsicher) | 0.412 | one game | 0.451 | τ*=0.00 (knee fallback; coverage 1.00) | 0.00 | `labeling_assist` on dev — **never counts** | `python -m worker eval-stroke-vlm --split dev --dev-video-id 91deb7ca-ff0b-4d11-a4d1-452530426519 --preset all --probe 5` (interrupted once, finished with `python -m worker eval-stroke-vlm --split dev --dev-video-id 91deb7ca-ff0b-4d11-a4d1-452530426519 --preset all --probe 5 --resume worker/.labeling/stroke_runs/20261024T211232Z_videojev_zeroshot_dev`; run dir `.labeling/stroke_runs/20261024T211232Z_videojev_zeroshot_dev`) |
+| 2026-10-25 | **eval (G1–G4)** | `plain_fps10` (frozen from dev) | **503** (+124 Unsicher) | **0.284** | 0.289 / 0.364 / 0.264 / 0.254 (mean 0.293 ± 0.043) | 0.382 | τ*=0.00 (knee fallback; coverage 1.00) | 0.00 | **`closed`** (gate FAILED) | `python -m worker eval-stroke-vlm --split eval --dev-video-id 91deb7ca-ff0b-4d11-a4d1-452530426519 --frozen-from worker/.labeling/stroke_runs/20261024T211232Z_videojev_zeroshot_dev` (run dir `.labeling/stroke_runs/20261024T234535Z_videojev_zeroshot_eval`, revision `b614f1a6`) |
+
+**Eval result (the number of record): pooled 0.284, tier `closed`.** The frozen `plain_fps10` preset predicts `drop` on 85 % of the 503 confident eval rows (recall: drop 0.88, smash 0.26, serve 0.02, **0.00 for clear, net, drive, lift**); the confusion matrix is essentially one column. Per-game accuracy 0.25–0.36 tracks each game's drop share. Median p_max 0.262 on confident vs 0.265 on Unsicher rows — the confidence is flat and carries no honesty signal, so τ* fell back to the knee (0.00, coverage 1.00, Unsicher abstention 0.00). Probe CPU-fp32 vs MPS-fp32: max |Δp| 0.006, 5/5 argmax agree, PASSED. 0 missing clips. Wall 12.5 s per clip at 10 fps (14 frames) on MPS, 2.2 h total. Verdict: VideoJev-4B carries no zero-shot stroke signal on this footage; this pilot is **closed** and the pretrained-video-representation lever is dropped for stage 7 unless a model with open weights shows fine-grained sports-action results first.
+
+Dev sweep observations (G5, 51 confident rows; selection only, no number of record): all three `plain` presets land at 0.37–0.41 **by predicting `drop` on 94 % of clips** (`pred_share_max` 0.94; drop is 20/51 of the dev game), i.e. a majority-class collapse, not stroke recognition. `described` and `context` wordings fall to 0.04–0.12. Position-bias probe: reversing the option order drops `plain_fps10` from 0.412 to 0.294 (Δ 0.118), so option order moves the answer. Median p_max 0.270 on confident vs 0.263 on Unsicher rows (chance 0.143): near-flat distributions, no usable confidence signal; τ* fell back to the knee (0.00, coverage 1.00). Probe CPU-fp32 vs MPS-fp32: max |Δp| 0.006, 5/5 argmax agree, PASSED (twice: the sweep was interrupted once and resumed from `predictions.jsonl`). Wall: ≈ 120 s per clip for all 10 presets on MPS.
+
+Prior results on unmerged branches (added 2026-10-24; baselines and tiers above stay as locked): a trajectory-geometry GBDT reached LOGO **0.536** (`feat/stroke-gbdt-traj`, `stroke-classification.md`, 2026-07-12), i.e. above BST's 0.400; and an earlier VLM pre-label pilot — Qwen2.5-VL-7B 4-bit via mlx-vlm, 9 frames, 105 clips — scored **0.267** top-1 and was dropped (`feat/stroke-gbdt-traj`, `stroke-labeling.md`, 2026-07-12; artifacts in `.labeling/vlm_pilot/`).
 
 ## Honest limits
 - **One session, one lighting, all doubles**: cross-game, not cross-session generalization.
