@@ -10,6 +10,7 @@ pilot number sits next to the BST LOGO number without translation.
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from worker.stroke import vlm_eval as ve
@@ -586,7 +587,9 @@ class TestEvalCliWithFakeModel(unittest.TestCase):
             self.assertTrue(any("NO cpu-vs-device probe" in c for c in rep["caveats"]))
 
     def test_hf_id_without_revision_is_refused(self):
-        with tempfile.TemporaryDirectory() as d:
+        # VIDEOJEV_REVISION is pinned in-tree (runbook §0); this pins the *unpinned* state, where an
+        # HF id with no --revision must be refused because remote code would run from a moving snapshot.
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ve, "VIDEOJEV_REVISION", None):
             root = Path(d)
             truth = self._labeling_root(root)
             with self.assertRaises(SystemExit) as cm:

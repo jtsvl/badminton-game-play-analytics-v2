@@ -38,7 +38,7 @@ MODEL_ID = "ZhuYuhan/VideoJev-4B"
 _ROOT = Path(__file__).resolve().parents[3]
 STROKE_VLM_MODEL = os.environ.get("STROKE_VLM_MODEL",
                                   str(_ROOT / "models/weights/stroke_vlm/VideoJev-4B"))
-VIDEOJEV_REVISION: str | None = None   # pin the HF snapshot SHA after the first download (runbook §0)
+VIDEOJEV_REVISION: str | None = "b614f1a6248ba1f169cd3bec9e4392758b566e5d"   # HF snapshot pinned 2026-10-24 (runbook §0)
 CLIP_DURATION_S = 1.4                  # stroke_clips DEFAULT_PRE_S + DEFAULT_POST_S
 DEFAULT_CONTEXT = 32768                # ≥ 2× the ~8.2k visual tokens a 30 fps clip produces
 FPS_GRID = (2.0, 10.0, 30.0)           # upstream default 2 fps ≈ 3 frames of a clip; 30 fps = every proxy frame

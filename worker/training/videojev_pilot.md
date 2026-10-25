@@ -15,7 +15,9 @@ If `uv lock` cannot reconcile `transformers==5.14.1` with the `ml` extra (ultral
 extras into separate envs — the pilot needs `ml` only for `av`, `numpy`, `polars`, `torch`.
 
 ```bash
-uv run hf download ZhuYuhan/VideoJev-4B --local-dir ../models/weights/stroke_vlm/VideoJev-4B
+uv run hf download ZhuYuhan/VideoJev-4B --revision <SHA> --local-dir ../models/weights/stroke_vlm/VideoJev-4B
+# 2026-10-24: the default xet transport stalled twice here (0 bytes, "connection struggling" in
+# ~/.cache/huggingface/xet/logs); HF_HUB_DISABLE_XET=1 in front of the command used plain HTTPS at ~10 MB/s.
 ```
 Then, before anything runs:
 1. **Pin the revision.** `hf download` prints the snapshot SHA (or read
@@ -84,8 +86,10 @@ expected outcome; it still gets written down.
 
 | date | split | revision | preset | n confident | pooled acc | per-game | top-2 | τ* (cov.) | Unsicher abst. | tier | command |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| — | dev | — | — | — | — | — | — | — | — | — | *not run yet* |
-| — | eval | — | — | — | — | — | — | — | — | — | *not run yet* |
+| 2026-10-24/25 | dev | b614f1a6248b | `plain_fps10` | 51 | 0.412 | one game | 0.451 | 0.00 (1.00, knee) | 0.00 | labeling_assist (dev never counts) | `python -m worker eval-stroke-vlm --split dev --dev-video-id 91deb7ca-ff0b-4d11-a4d1-452530426519 --preset all --probe 5` + `--resume <run dir>` after one interruption |
+| 2026-10-25 | **eval** | b614f1a6248b | `plain_fps10` | 503 | **0.284** | 0.289 / 0.364 / 0.264 / 0.254 (0.293 ± 0.043) | 0.382 | 0.00 (1.00, knee) | 0.00 | **closed** | `python -m worker eval-stroke-vlm --split eval --dev-video-id 91deb7ca-ff0b-4d11-a4d1-452530426519 --frozen-from worker/.labeling/stroke_runs/20261024T211232Z_videojev_zeroshot_dev` |
+
+Outcome 2026-10-25: **closed** (0.284 < 0.35). Selected on dev by majority-class collapse (`drop` on 94 % of dev clips, 85 % of eval clips); recall 0 for four of seven classes; flat confidence (p_max ≈ 0.26 for confident and Unsicher alike). No fine-tune, no 35B row. Both probes passed (max |Δp| ≤ 0.006). The dev sweep was interrupted once by the session's shell timeout and resumed via `--resume`; the report's `command` therefore shows the resume call.
 
 ## 6. Caveats (report these with every number)
 
